@@ -164,4 +164,24 @@ describe('this turn and now', () => {
     t.started({ id: 'v', tool: 'Bash', input: { command: 'npm test' }, agentId: undefined, now: 2 })
     expect(nowOf({ isTurnRunning: true, running: running(), progress: progressOf(plan) })?.text).toBe('Running tests')
   })
+
+  test('a shell call is named by the command doing the work, past a cd or an environment setting', () => {
+    // Seen live in the Desktop app: every call of a session began `cd "/c/Game Dev/GRAVELINE" && …`, and the
+    // status bar said "Running cd" through a build.
+    const doing = (command: string): string | undefined => {
+      const t = new ActivityTracker()
+      t.turnStarted(0)
+      t.started({ id: 's', tool: 'Bash', input: { command }, agentId: undefined, now: 1 })
+      return nowOf({ isTurnRunning: true, running: t.runningItems(), progress: progressOf(emptyPlan()) })?.text
+    }
+    expect(doing('cd "/c/Game Dev/GRAVELINE" && cat .claude/launch.json && echo "---"')).toBe('Running cat')
+    expect(doing(`cd "/c/Game Dev/GRAVELINE" && git log -8 --format='%ci %h %s'`)).toBe('Running git log')
+    expect(doing('cd /work; NODE_ENV=production node build.mjs')).toBe('Running node')
+    expect(doing('Set-Location C:\\work; python tools\\gen.py')).toBe('Running python')
+    expect(doing(`$env:DEBUG='1'; node server.js`)).toBe('Running node')
+    expect(doing('export PORT=5191 && node dev-server.mjs')).toBe('Running node')
+    // Nothing but the setting up: it is still named.
+    expect(doing('cd /work')).toBe('Running cd')
+    expect(doing('ls -la')).toBe('Running ls')
+  })
 })

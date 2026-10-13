@@ -262,6 +262,10 @@ describe('the 5H reading on the surfaces', () => {
     const plan = await desktop.find({ key: 'cell-plan' })
     expect(plan).toBeDefined()
     expect(JSON.stringify(plan)).toContain('Five-hour plan usage 63%, resets in 2h 14m')
+    // Seen in the Desktop app: "5-hour usage" sat flush right over its wider reading. The cell keeps the right edge
+    // (it does not grow), and its caption starts where its reading starts, as in every other cell.
+    expect(plan?.props.flexGrow).toBe(0)
+    for (const key of ['cell-work', 'cell-ctx', 'cell-cache', 'cell-machine', 'cell-plan']) expect((await desktop.find({ key }))?.props.alignItems, key).toBe('flex-start')
     await desktop.unmount()
     const pane = await $.ui.mount({ plugin: 'project-sentinel', surface: 'terminal', component: 'Pane', requestId: 'control-room', props: { title: 'Control Room', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} }, viewport: { columns: 200, rows: 50, isFullscreen: true } })
     await pane.press({ key: 'tab-context' })

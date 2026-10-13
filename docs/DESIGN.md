@@ -256,8 +256,9 @@ drop. Docked beside the panel (about 80 columns) the whole line still fits.
 
 **On Desktop the surface lays the row out, not counted cells.** Each reading is a column weighted
 by what it holds (Work and Context 3, Cache and Machine 2, on a zero basis, so a column never
-drifts as its value changes): a quiet caption over its graphic and value. The five-hour reading
-takes what it needs at the right edge. The five readings always keep their cells, a dim word standing in for
+drifts as its value changes): a quiet caption over its graphic and value, the caption starting where
+its reading starts. The five-hour reading takes what it needs at the right edge (its caption is not
+pushed to the end: flush right, it sat apart from its wider reading, seen in the app). The five readings always keep their cells, a dim word standing in for
 one with nothing yet (`No milestones yet`, `—`): a row that dropped them collapsed to two readings
 with a wide empty middle (a release candidate of 1.3.0, seen in the app). Width decides the detail
 in three tiers, each sized so every cell fits: wide from 110 columns, medium from 80, compact below

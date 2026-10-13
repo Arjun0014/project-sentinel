@@ -884,11 +884,13 @@ function cellsRow(kit: Kit, hud: HudModel): RenderElement {
         <Box
           key={`cell-${c.key}`}
           flexDirection="column"
-          // Weighted columns on a zero basis: fixed shares that never drift; the five-hour reading takes what it needs at the right edge.
+          // Weighted columns on a zero basis: fixed shares that never drift; the five-hour reading takes what it needs at the
+          // right edge. Every caption starts where its reading starts, the last cell's too (flush right, the caption sat
+          // apart from its wider reading).
           flexGrow={c.isEnd === true ? 0 : c.weight}
           flexShrink={c.isEnd === true ? 0 : 1}
           width={c.isEnd === true ? undefined : 0}
-          alignItems={c.isEnd === true ? 'flex-end' : 'flex-start'}
+          alignItems="flex-start"
           {...clip(kit)}
         >
           {line(`cell-${c.key}-caption`, c.caption)}

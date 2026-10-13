@@ -208,15 +208,35 @@ const fileOf = (label: string): string => label.split('/').pop() ?? label
 
 const RANK: Partial<Record<ActivityKind, number>> = { shell: 0, agent: 1, web: 2, edit: 3, mcp: 4, read: 5, search: 6, task: 7 }
 
+/** Commands that only set up where or how the next one runs: `cd app && npm run build` is a build, not a cd. */
+const SETUP_PROGRAM = /^(cd|chdir|pushd|set-location|sl|export|set|source|\.)$/i
+/** An environment setting ahead of a command: `NODE_ENV=production node …`, PowerShell's `$env:DEBUG='1'`. */
+const ASSIGNMENT = /^(\$env:)?[A-Za-z_]\w*=/i
+
+const programOf = (word: string): string => word.replace(/^["']|["']$/g, '').split(/[\\/]/).pop() ?? word
+
+/** The words of the command a shell line runs for its work: past a change of directory or an environment setting. */
+function workWords(line: string): string[] {
+  let first: string[] | null = null
+  for (const part of line.split(/&&|\|\||;/)) {
+    const words = part.trim().split(/\s+/).filter(w => w !== '')
+    while (words.length > 1 && ASSIGNMENT.test(words[0] ?? '')) words.shift()
+    if (words.length === 0 || ASSIGNMENT.test(words[0] ?? '')) continue
+    first ??= words
+    if (!SETUP_PROGRAM.test(programOf(words[0] ?? ''))) return words
+  }
+  return first ?? []
+}
+
 /** A running call in a few words: "Running tests", "Editing renderer.ts", "Searching the code". */
 export function doingOf(i: ActivityItem): string {
   if (i.validation !== null) return VALIDATION_DOING[i.validation]
   switch (i.kind) {
     case 'shell': {
-      const first = i.label.split(/\s+/)[0] ?? ''
-      const program = first.split(/[\\/]/).pop() ?? first
+      const words = workWords(i.label)
+      const program = programOf(words[0] ?? '')
       if (i.heavy.includes('install')) return 'Installing packages'
-      if (/^git$/i.test(program)) return `Running git ${i.label.split(/\s+/)[1] ?? ''}`.trim()
+      if (/^git$/i.test(program)) return `Running git ${words[1] ?? ''}`.trim()
       return program === '' ? 'Running a command' : `Running ${program}`
     }
     case 'edit':

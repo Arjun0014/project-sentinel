@@ -539,6 +539,12 @@ describe('scout: a wait read only from what is explicit', () => {
     expect(suggestionWords(s!, now)).toBe('Check S-002 result again at 14:00?')
     const vague = scoutOf({ now, message: '', waiting: [{ subject: 'Run S-002', detail: 'the leaderboard to update' }] })
     expect(vague).toMatchObject({ isExplicit: false, when: null, label: 'The leaderboard to update' })
+    // Seen live in the Desktop app: the blocker "the window reset at 14:50 local" was asked as "Check The window reset
+    // local again at 14:50?". "local" belongs to the time, and the label's article is lowercase inside the question.
+    const reset = scoutOf({ now, message: '', waiting: [{ subject: 'Verify the 14:50 five-hour reset on Desktop', detail: 'the window reset at 14:50 local' }] })
+    expect(reset).toMatchObject({ isExplicit: true, when: { kind: 'at', at: today(14) + 50 * MIN }, whenText: 'at 14:50 local', label: 'The window reset' })
+    expect(suggestionWords(reset!, now)).toBe('Check the window reset again at 14:50 local?')
+    expect(scoutOf({ now, message: '', waiting: [{ subject: 'Run S-003', detail: 'S-003 result at 15:00 local time' }] })).toMatchObject({ label: 'S-003 result', whenText: 'at 15:00 local time' })
   })
 
   test("Claude's own sentence pairing a check with a time", () => {
@@ -548,8 +554,10 @@ describe('scout: a wait read only from what is explicit', () => {
     expect(s!.reason).toBe('Claude said it will check the leaderboard again in two hours')
     // In Claude's own time words, "again" said once.
     expect(suggestionWords(s!, now)).toBe('Check the leaderboard again in two hours?')
-    expect(suggestionWords({ label: 'The eval', when: { kind: 'at', at: now + 90 * MIN, words: '' }, whenText: null }, now)).toBe('Check The eval again at 11:30 (in 1h 30m)?')
-    expect(suggestionWords({ label: 'The leaderboard to update', when: null, whenText: null }, now)).toBe('Check The leaderboard to update later?')
+    expect(suggestionWords({ label: 'The eval', when: { kind: 'at', at: now + 90 * MIN, words: '' }, whenText: null }, now)).toBe('Check the eval again at 11:30 (in 1h 30m)?')
+    expect(suggestionWords({ label: 'The leaderboard to update', when: null, whenText: null }, now)).toBe('Check the leaderboard to update later?')
+    // Only an article or a determiner is lowercased: a name keeps its capital.
+    expect(suggestionWords({ label: 'Vercel deploy', when: null, whenText: null }, now)).toBe('Check Vercel deploy later?')
   })
 
   test('advice to the person, a time with no check, a check with no time: no suggestion', () => {

@@ -15,7 +15,7 @@ Supervisor watches every handoff; Keep warm stays on until the old context is re
 has a way out. Agents are tracked from their spawn, workflows included, with an Activity view and a band above
 the status bar. The status bar shows the plan's five-hour usage instead of the run's cost; completed milestones
 keep evidence and say when it goes stale; navigation has two distinct levels; and new installs start with
-Autopilot and Frontier Max on, while existing installs keep what they had. 574 tests pass on Claude Code 2.1.296
+Autopilot and Frontier Max on, while existing installs keep what they had. 576 tests pass on Claude Code 2.1.296
 and 2.1.289.
 
 ### Changed
@@ -169,6 +169,41 @@ and 2.1.289.
   *Network* only. A file named in any spelling (`-o f`, `-Lo f`, `-of`, `--output=f`, `> page.html`, `-O`) is still
   a download, and a fetch piped into a shell is still refused as dangerous. Found in a live run.
 - Keep warm wrote the same refresh plan to the debug log twice at a turn's end; it writes each plan once.
+- **Found in the Claude Desktop app**, each with a regression test that fails on the old code:
+  - **A prompt pasted in Desktop named the run `<pasted_content id="2961">`.** Desktop wraps a pasted prompt in a tag
+    on its own lines (the closing one carries the id too); the objective skipped only the terminal's `[Pasted text …]`
+    placeholder. A line that is only a tag is skipped and the wrapper is stripped, so the objective is the paste's
+    first sentence; tags the person wrote stay their words.
+  - **The status bar's `5-hour usage` caption sat flush right**, apart from its wider reading, the only cell aligned
+    to its end. Every caption now starts where its reading starts; the cell keeps the right edge. The Desktop preview
+    (`tools/desktop-preview`) now draws a five-hour reading, so it shows that cell as the app does.
+  - **A shell call was named after its `cd`.** `cd "/c/Game Dev/GRAVELINE" && npx vite build …` read *Running cd* in
+    the status bar through a build. The command doing the work is named, past a change of directory (`cd`, `pushd`,
+    `Set-Location`) or an environment setting (`export`, `set`, `source`, `FOO=1`, `$env:FOO='1'`): *Running git log*,
+    *Running node*.
+  - **The Watcher Scout's question was garbled.** A milestone waiting for "the window reset at 14:50 local" asked
+    *Check The window reset local again at 14:50?*. A clock time keeps a following "local" or "local time" with it, and
+    an article or a determiner at the start of the label is lowercase inside the question (a name keeps its capital):
+    *Check the window reset again at 14:50 local?*
+
+### Verified live (Claude Desktop app, Code tab, its Claude Code 2.1.295, Opus 5.5, 2026-10-13)
+
+- **Desktop loads the installed copy, not the repository folder.** The Code tab runs its own Claude Code and loads a
+  plugin from `installed_plugins.json`'s install path: it ran 1.6.3 until `claude plugin update
+  project-sentinel@control-room` installed 1.7.0, while the terminal's Claude Code read the folder in place. A fix
+  copied into the install path reached the sessions started after it. The settings saved before 1.7.0 read **Classic ·
+  edited**, every value kept.
+- **Five-hour usage**: the `5-hour usage` cell read 36% · 1h43m with its thin bar at about 13:07 local, and the app's
+  own usage card 36%, resetting 09:20:00Z (14:50 local), a minute later; Context agreed too (18%). After the alignment
+  fix a new session drew the caption over its bar's left end (37% · 1h34m).
+- **Activity's second level**: `Activity › Operations` over a bordered *View* group, `Summary · Operations · Tool calls
+  (60)`, the current view the primary button, apart from the section buttons; no Agents button with no agents.
+- **Guardrails**: with every permission stored as *Default*, the three whose default is Default read *Claude Code
+  decides · default* in gray, the others in amber with their default (*asks you first*, *never runs*).
+- **Behavior**: Frontier Max's *This context* read *Delivered in the system prompt from the first request · sent with
+  Extra high effort*, and the session's instructions carried the policy at Extra high effort.
+- Not seen in the app: the window's reset at 14:50 (the person is watching it), the agent band and Activity › Agents
+  (seen in a real terminal above), and `/cr handoff` beside a dev server (driven live headless above).
 
 ### Verified live (Claude Code 2.1.296, Sonnet 5.5, this build under a renamed copy, 2026-10-13)
 

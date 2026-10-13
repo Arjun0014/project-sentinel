@@ -91,6 +91,17 @@ describe('run plan', () => {
     expect(objectiveOf('yes')).toBeNull()
     expect(objectiveOf('   ')).toBeNull()
   })
+
+  test('a prompt pasted in Desktop is named by its first sentence, never by its wrapper tag', () => {
+    // Seen live in the Desktop app: Run progress read `Objective <pasted_content id="2961">`. Desktop wraps a pasted
+    // prompt in a tag on its own lines, the closing one carrying the id too.
+    const pasted = '\n\n<pasted_content id="2961">\nProject Sentinel 1.7.0 is committed locally (2432d9f, not pushed). Read the notes first.\n1. The status bar.\n</pasted_content id="2961">\n'
+    expect(objectiveOf(pasted)).toBe('Project Sentinel 1.7.0 is committed locally (2432d9f, not pushed).')
+    expect(objectiveOf('<pasted_content id="7">Fix the flaky login test on Windows</pasted_content id="7">')).toBe('Fix the flaky login test on Windows')
+    expect(objectiveOf('<pasted_content id="8">\n</pasted_content id="8">')).toBeNull()
+    // Only the wrapper goes: tags the person wrote are their words.
+    expect(objectiveOf('Fix the focus ring on <Button> in the settings dialog')).toBe('Fix the focus ring on <Button> in the settings dialog')
+  })
 })
 
 describe('the fresh context after a handoff', () => {

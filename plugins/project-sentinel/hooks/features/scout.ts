@@ -52,7 +52,12 @@ function findTime(text: string, now: number): { phrase: string; result: WhenResu
         .replace(/[.,;:!?)"'”’]+$/, '')
       const result = parseWhen(phrase, now)
       if (result.kind === 'error') continue
-      if (best === null || n > best.end - best.start) best = { phrase, result, start: i, end: i + n }
+      // "at 14:50 local", "at 14:50 local time": the clock's own words, kept with the time and out of the label.
+      const bare = (k: number): string => (words[k] ?? '').toLowerCase().replace(/[^a-z]/g, '')
+      let end = i + n
+      if (bare(end) === 'local') end += bare(end + 1) === 'time' ? 2 : 1
+      const said = end === i + n ? phrase : words.slice(i, end).join(' ').replace(/[.,;:!?)"'”’]+$/, '')
+      if (best === null || end - i > best.end - best.start) best = { phrase: said, result, start: i, end }
       break
     }
   }
@@ -74,13 +79,18 @@ function labelOf(text: string, time: { start: number; end: number } | null): str
   return clean(out.charAt(0).toUpperCase() + out.slice(1), 60)
 }
 
+/** A label's first word when it is an article or a determiner, never a name. */
+const ARTICLE = /^(?:the|a|an|this|that|these|those|its|their|our|my|your|his|her|some|any|each|every|all|both)\b/i
+
 /**
  * The suggestion as the person is asked it: "Check the leaderboard again in two hours?", in Claude's
  * own time words when it said them, else the local time or a countdown.
  */
 export function suggestionWords(s: { label: string; when: WhenResult | null; whenText: string | null }, now: number): string {
   const at = s.when !== null && s.when.kind === 'at' ? s.when.at : null
-  const what = s.label.replace(/^(?:check|look at|re-?check|revisit)\s+/i, '')
+  // The label starts with a capital where it stands alone; inside the question an article or a determiner is lowercase
+  // (a name keeps its capital).
+  const what = s.label.replace(/^(?:check|look at|re-?check|revisit)\s+/i, '').replace(ARTICLE, w => w.toLowerCase())
   const when = at === null ? ' later' : s.whenText !== null ? ` ${s.whenText}` : ` at ${clockAhead(at, now)} (in ${untilWords(at - now)})`
   const again = at === null || /\bagain\b/i.test(what) ? '' : ' again'
   return `Check ${what}${again}${when}?`

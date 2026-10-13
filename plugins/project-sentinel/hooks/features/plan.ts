@@ -251,17 +251,22 @@ export function progressOf(plan: Plan): Progress {
   return { done, total: plan.tasks.length, current, next, blocked: plan.tasks.filter(t => t.status === 'blocked'), waiting: plan.tasks.filter(t => t.status === 'waiting') }
 }
 
+/** The tags Desktop wraps a pasted prompt in, `<pasted_content id="…">` and `</pasted_content id="…">`. */
+const PASTE_WRAPPER = /<\/?pasted_content(?:\s[^<>]*)?>/gi
+/** A line that is nothing but one markup tag. */
+const TAG_LINE = /^<\/?[a-z][\w-]*(?:\s[^<>]*)?\/?>$/i
+
 /**
- * The objective a request states: its first line that is not a command,
- * cut to the first sentence when that says enough. Null for a request too
- * short to name one ("yes", "go on").
+ * The objective a request states: its first line that is not a command, a
+ * paste's placeholder or a bare tag, cut to the first sentence when that says
+ * enough. Null for a request too short to name one ("yes", "go on").
  */
 export function objectiveOf(text: string): string | null {
   const first = text
     .replace(/\r/g, '')
     .split('\n')
-    .map(l => l.trim())
-    .find(l => l !== '' && !l.startsWith('/') && !/^\[(image|pasted)[^\]]*\]$/i.test(l))
+    .map(l => l.replace(PASTE_WRAPPER, '').trim())
+    .find(l => l !== '' && !l.startsWith('/') && !/^\[(image|pasted)[^\]]*\]$/i.test(l) && !TAG_LINE.test(l))
   if (first === undefined) return null
   const sentence = /^.+?[.!?](?=\s|$)/.exec(first)?.[0] ?? first
   const objective = clean(sentence.length >= 24 ? sentence : first, 140)

@@ -29,6 +29,7 @@ describe('preview', () => {
     on('turn.start', ($, e) => ({ turnId: e.turnId }))
     on('turn.complete', ($, e) => ({ text: e.answer }))
     on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'engine' as const, ref: 0 }))
+    on('session.measure', ($, e) => ({ changed: e.changed }))
     let read = 0
     on('turn.step', async function* ($, e) {
       const usage = { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: read, cache_creation_input_tokens: 240_000 - read, model: e.model }
@@ -38,6 +39,14 @@ describe('preview', () => {
     await $.session.start({ ...SESSION, cwd: 'C:\\work' })
     await w.clock.advance(300)
     await $.command.run(cmd('autopilot on'))
+    await w.clock.advance(300)
+    // A plan's five-hour window, as a response reports it: 36%, resetting in 1h 43m (the reading is wider than its caption).
+    const rateLimits = [
+      { kind: 'five_hour', percentUsed: 36, resetsAt: new Date(Date.now() + 103 * 60_000 + 30_000).toISOString() },
+      { kind: 'seven_day', percentUsed: 16, resetsAt: new Date(Date.now() + 6 * 86_400_000).toISOString() },
+    ]
+    w.live.usage = { ...w.live.usage, rateLimits: rateLimits as never }
+    await $.session.measure({ context: w.live.usage.context, rateLimits: rateLimits as never, cost: { usd: 1.25 }, changed: ['rateLimits'] })
     await w.clock.advance(300)
     const dump = async (name: string, surfaces: readonly ('desktop' | 'terminal')[] = ['desktop']) => {
       for (const surface of surfaces) {
