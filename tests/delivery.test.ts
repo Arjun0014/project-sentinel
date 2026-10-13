@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { Runtime } from '../hooks/app/runtime'
 import * as Views from '../hooks/app/views'
-import { defaultSettings } from '../hooks/core/settings'
+import { classicSettings, defaultSettings } from '../hooks/core/settings'
 import type { Settings } from '../hooks/core/settings'
 import { fakeHost, flush } from './fixtures/fake-host'
 
@@ -14,7 +14,7 @@ type Fake = ReturnType<typeof fakeHost>
 
 async function started(patch: (s: Settings) => void, options: { memory?: Record<string, unknown>; fake?: Fake } = {}) {
   const f = options.fake ?? fakeHost()
-  const s = defaultSettings()
+  const s = classicSettings()
   patch(s)
   f.kept.store['settings.v1'] = s
   if (options.memory !== undefined) f.kept.store['cache.v1'] = options.memory

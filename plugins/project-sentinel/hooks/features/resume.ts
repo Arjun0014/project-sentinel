@@ -33,6 +33,8 @@ export type ResumeInput = {
   /** Queued items that a fresh context carries, and decisions open or answered and not yet with Claude. */
   queued: number
   decisions: number
+  /** Completed milestones whose verification is stale (features/evidence.ts): told to the fresh context, never a reason not to start it. */
+  stale?: readonly { subject: string; status: 'stale' | 'changing' | 'rebaselined'; line: string }[]
 }
 
 export type ResumeHealth = { isHealthy: boolean; problems: string[] }
@@ -93,6 +95,7 @@ export function resumePreviewOf(i: ResumeInput): ResumeView {
     queued: i.queued,
     decisions: i.decisions,
     next,
+    stale: [...(i.stale ?? [])],
   }
 }
 
@@ -105,5 +108,6 @@ export function previewLine(p: ResumeView): string {
   ]
   if (p.queued > 0) parts.push(`${p.queued} queued item${p.queued === 1 ? '' : 's'}`)
   if (p.decisions > 0) parts.push(`${p.decisions} open decision${p.decisions === 1 ? '' : 's'}`)
+  if (p.stale.length > 0) parts.push(`${p.stale.length} milestone${p.stale.length === 1 ? "'s" : "s'"} verification stale (told to rerun ${p.stale.length === 1 ? 'its' : 'their'} checks)`)
   return parts.join(', ')
 }

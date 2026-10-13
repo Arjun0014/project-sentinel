@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { Runtime } from '../hooks/app/runtime'
 import * as Views from '../hooks/app/views'
-import { defaultSettings } from '../hooks/core/settings'
+import { classicSettings, defaultSettings } from '../hooks/core/settings'
 import type { Settings } from '../hooks/core/settings'
 import { fakeHost, flush } from './fixtures/fake-host'
 
@@ -15,7 +15,8 @@ type Fake = ReturnType<typeof fakeHost>
 /** A session with Control Room started, the context at 300k tokens; `memory` is what earlier sessions learned (store `cache.v1`). */
 async function started(patch: (s: Settings) => void, memory?: Record<string, unknown>) {
   const f = fakeHost()
-  const s = defaultSettings()
+  // Classic: every optional system off, the baseline these tests were written against (1.7.0 made Normal opinionated).
+  const s = classicSettings()
   patch(s)
   f.kept.store['settings.v1'] = s
   if (memory !== undefined) f.kept.store['cache.v1'] = memory
@@ -82,7 +83,25 @@ describe('Cache Guardian', () => {
     expect((kept.store['cache.v1'] as { verified: string }).verified).toBe('yes')
   })
 
-  test('Keep warm stands down while a handoff is about to clear the context; a handoff that compacts keeps the cache warm', async () => {
+  test('the debug log gets one line per refresh plan, not one per look at it', async () => {
+    // Seen live (1.7.0): a turn's end and the Autopilot step it caused each wrote the same plan.
+    const f = await started(s => void (s.cache.keepWarm = true), ONE_HOUR)
+    const { rt, kept } = f
+    await turn(f, rt, [{ prompt: 300_000, read: 0 }])
+    const plans = () => kept.traces.filter(t => t.startsWith('keep warm: next refresh at') || t.startsWith('keep warm: no refresh planned'))
+    const before = plans().length
+    rt.cache.schedule()
+    rt.cache.schedule()
+    expect(plans().length).toBe(before)
+    // A plan that changes is written again.
+    rt.update(s => void (s.cache.keepWarm = false))
+    rt.cache.schedule()
+    expect(plans().at(-1)).toBe('keep warm: no refresh planned (Off)')
+  })
+
+  test('Keep warm stands down only once the old context is about to be discarded: never for a handoff that is due, written, waiting or stuck', async () => {
+    // Seen in a real run (1.6.3): a written handoff held by a Vite preview server stood Keep warm down
+    // ("a handoff will start a fresh context") for two hours, and a 775k-token cache went cold.
     const f = await started(s => {
       s.cache.keepWarm = true
       s.autopilot.enabled = true
@@ -90,16 +109,38 @@ describe('Cache Guardian', () => {
     const { rt, kept, advance } = f
     await turn(f, rt, [{ prompt: 300_000, read: 0 }])
     const t0 = rt.cache.state.lastRequestAt ?? 0
-    rt.autopilot = { ...rt.autopilot, state: 'pending' }
+    const warm = { at: t0 + 50 * MIN, isProbe: false }
+    // Every state whose next turn reads the old context again keeps it warm: the step that crossed the
+    // threshold, the handoff turn, each notification's turn while it waits, the person's own message.
+    for (const state of ['armed', 'pending', 'requested', 'handoff', 'waiting-background', 'awaiting', 'compacting'] as const) {
+      rt.autopilot = { ...rt.autopilot, state }
+      rt.cache.schedule()
+      expect(rt.cache.plan, state).toEqual(warm)
+    }
+    // Past the handoff point too: the handoff turn re-reads the whole context.
+    rt.autopilot = { ...rt.autopilot, state: 'armed' }
+    rt.usage = { ...rt.usage, tokens: 950_000 }
     rt.cache.schedule()
-    expect(rt.cache.plan).toEqual({ at: null, reason: 'A handoff will start a fresh context, so this cache is about to be discarded' })
+    expect(rt.cache.plan).toEqual(warm)
+    // About to be discarded: the notes checked before the clear, the clear, the fresh context resuming.
+    const verifying = { at: null, reason: 'The handoff notes are being checked before the clear, so this cache is about to be discarded' }
+    const discarding = { at: null, reason: 'A handoff is starting a fresh context, so this cache is about to be discarded' }
+    for (const [state, plan] of [['verifying', verifying], ['clearing', discarding], ['resuming', discarding]] as const) {
+      rt.autopilot = { ...rt.autopilot, state }
+      rt.cache.schedule()
+      expect(rt.cache.plan, state).toEqual(plan)
+    }
+    // A handoff that compacts reads the whole conversation once more: its check keeps the cache warm.
     rt.update(s => void (s.autopilot.continuation = 'compact'))
-    expect(rt.cache.plan).toEqual({ at: t0 + 50 * MIN, isProbe: false })
-    rt.autopilot = { ...rt.autopilot, state: 'awaiting' }
+    rt.autopilot = { ...rt.autopilot, state: 'verifying' }
     rt.cache.schedule()
-    expect(rt.cache.plan.at).toBeNull()
+    expect(rt.cache.plan).toEqual(warm)
+    // A written handoff waiting for background work for 70 minutes: the cache was refreshed, never left to lapse.
+    rt.autopilot = { ...rt.autopilot, state: 'waiting-background' }
+    rt.cache.schedule()
     await advance(70 * MIN)
-    expect(kept.forks).toEqual([])
+    expect(kept.forks.length).toBeGreaterThan(0)
+    expect(kept.forks[0]).toBe(t0 + 50 * MIN)
   })
 
   test('a chain of refreshes is proven by the conversation reading the cache after the expiry the first one replaced (seen live: a wake six seconds after the third refresh read as unproven)', async () => {

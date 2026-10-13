@@ -43,11 +43,13 @@ import {
   note,
   row,
   segmented,
+  subNav,
   switchControl,
   timelineStrip,
   workTrack,
 } from '../primitives'
 import { ACCENT, G, STATE_MARK, SVG_COLOR, TIMELINE, toneProps } from '../theme'
+import { agentsPage } from './agents'
 import { operationsPage } from './operations'
 
 const CALL_STATUS: Record<string, { glyph: string; tone: Tone }> = {
@@ -66,7 +68,7 @@ const TASK_LOOK: Record<string, { glyph: string; tone: Tone; word?: string }> = 
   in_progress: { glyph: G.arrow, tone: 'info' },
   verifying: { glyph: G.verify, tone: 'info', word: 'verifying' },
   waiting: { glyph: G.wait, tone: 'info', word: 'waiting' },
-  blocked: { glyph: G.stop, tone: 'warn', word: 'blocked' },
+  blocked: { glyph: G.stop, tone: 'bad', word: 'blocked' },
   pending: { glyph: G.ring, tone: 'muted' },
 }
 
@@ -113,19 +115,25 @@ function runCard(kit: Kit, view: ActivityView, isAnimated: boolean): RenderEleme
               {plan.earlier > 0 ? <Text key="run-earlier" dimColor>{`${plan.earlier} earlier done`}</Text> : null}
               {plan.tasks.map((t, i) => {
                 const look = TASK_LOOK[t.status] ?? TASK_LOOK.pending!
+                // A finished milestone whose files changed since it was verified: amber, with what changed and what to rerun.
+                const ev = t.evidence
+                const isStale = ev !== null && ev.status === 'stale'
                 return listItem(k, {
                   key: `milestone-${i}`,
-                  glyph: t.isCurrent && t.status === 'in_progress' ? G.arrow : look.glyph,
-                  tone: t.isCurrent && t.status === 'in_progress' ? 'info' : look.tone,
+                  glyph: isStale ? G.warn : t.isCurrent && t.status === 'in_progress' ? G.arrow : look.glyph,
+                  tone: isStale ? 'warn' : t.isCurrent && t.status === 'in_progress' ? 'info' : look.tone,
                   text: t.subject,
-                  right: look.word,
-                  rightTone: t.status === 'blocked' ? 'warn' : t.status === 'waiting' ? 'info' : 'muted',
-                  // What it waits for, or how it is being verified.
-                  detail: t.status === 'blocked' || t.status === 'waiting' || t.status === 'verifying' ? t.detail : null,
-                  isDim: t.status === 'completed' || (!t.isCurrent && t.status === 'pending'),
+                  right: isStale ? 'verification stale' : (look.word ?? (ev?.status === 'changing' ? 'being changed' : undefined)),
+                  rightTone: isStale ? 'warn' : t.status === 'blocked' ? 'bad' : t.status === 'waiting' ? 'info' : 'muted',
+                  // What it waits for, how it is being verified, or what became of its evidence.
+                  detail: t.status === 'blocked' || t.status === 'waiting' || t.status === 'verifying' ? t.detail : (ev?.line ?? null),
+                  isDim: (t.status === 'completed' && !isStale) || (!t.isCurrent && t.status === 'pending'),
                   isBold: t.isCurrent,
                 })
               })}
+              {plan.staleEarlier.map((e, i) =>
+                listItem(k, { key: `milestone-stale-${i}`, glyph: G.warn, tone: 'warn', text: e.subject, right: 'verification stale', rightTone: 'warn', detail: e.line }),
+              )}
               {plan.later > 0 ? <Text key="run-later" dimColor>{`${plan.later} more to come`}</Text> : null}
             </Box>
           </Box>
@@ -268,19 +276,28 @@ function attentionRow(kit: Kit, a: AttentionView): RenderElement {
       return listItem(kit, { key: `att-${a.id}`, glyph: G.run, tone: 'info', text: a.title, right: `running ${elapsed(kit, a.since)}`, rightTone: 'info' })
     case 'slow':
       return listItem(kit, { key: `att-${a.id}`, glyph: G.warn, tone: 'warn', text: a.title, detail: 'Took longer than usual', right: a.durationMs === null ? 'slow' : fmt.duration(a.durationMs) })
+    // A finished milestone whose files changed since it was verified: its verification is stale, never "wrong".
+    case 'stale':
+      return listItem(kit, { key: `att-${a.id}`, glyph: G.warn, tone: 'warn', text: a.title, detail: a.reason, right: 'verification stale', rightTone: 'warn' })
   }
 }
 
 function attentionCard(kit: Kit, view: ActivityView): RenderElement | null {
   if (view.attention.length === 0) return null
-  const open = view.attention.filter(a => (a.kind === 'failed' && a.state === 'unresolved') || a.kind === 'blocked' || a.kind === 'held').length
+  const open = view.attention.filter(a => (a.kind === 'failed' && a.state === 'unresolved') || a.kind === 'blocked' || a.kind === 'held' || a.kind === 'stale').length
   const running = view.attention.filter(a => a.kind === 'running').length
   return card(kit, {
     key: 'attention',
     title: 'Attention',
     accent: ACCENT.activity,
     aside: open > 0 ? `${open} open` : running > 0 ? `${running} still running` : 'all clear',
-    rows: k => view.attention.map(a => attentionRow(k, a)),
+    rows: k => [
+      ...view.attention.map(a => attentionRow(k, a)),
+      // Stale verification: rerun the checks (Claude is told), or accept the files as they are now.
+      view.attention.some(a => a.kind === 'stale')
+        ? buttons(k, [{ key: 'evidence-accept', label: 'Accept files as they are', onPress: () => k.actions.acceptEvidence(null) }], 'attention-evidence')
+        : null,
+    ],
   })
 }
 
@@ -504,22 +521,32 @@ export function activityPage(kit: Kit, pane: PaneModel, view: ActivityView | und
   const u = kit.actions.update
   const accent = ACCENT.activity
 
-  const switcher = (
-    <Box key="activity-switch" marginTop={1}>
-      {
-        segmented(kit, {
-          key: 'sub',
-          value: sub,
-          options: [
-            { value: 'summary', label: 'Summary' },
-            { value: 'ops', label: opsLabel(ops) },
-            { value: 'raw', label: view === undefined || view.sessionTools === 0 ? 'All tool calls' : `All tool calls (${view.sessionTools})` },
-          ],
-          onSelect: v => kit.actions.setActivitySub(v === 'raw' ? 'raw' : v === 'ops' ? 'ops' : 'summary'),
-        }).element
-      }
-    </Box>
-  )
+  // Agents is a view only while agents run or ran lately (or it is the one open).
+  const agentCount = ops === undefined ? 0 : ops.agents.filter(a => ['running', 'starting', 'pending', 'waiting', 'idle'].includes(a.status)).length
+  const hasAgents = (ops !== undefined && ops.agents.length > 0) || sub === 'agents'
+  // The second level of navigation: Activity's views, never drawn like a setting's choice.
+  const switcher = subNav(kit, {
+    key: 'sub',
+    section: 'Activity',
+    accent,
+    current: sub,
+    options: [
+      { value: 'summary', label: 'Summary' },
+      { value: 'ops', label: opsLabel(ops) },
+      ...(hasAgents ? [{ value: 'agents' as const, label: agentCount > 0 ? `Agents (${agentCount})` : 'Agents' }] : []),
+      { value: 'raw', label: view === undefined || view.sessionTools === 0 ? 'Tool calls' : `Tool calls (${view.sessionTools})` },
+    ],
+    onSelect: v => kit.actions.setActivitySub(v),
+  })
+
+  if (sub === 'agents') {
+    return (
+      <Box flexDirection="column">
+        {switcher}
+        {agentsPage(kit, ops)}
+      </Box>
+    )
+  }
 
   if (sub === 'ops') {
     return (

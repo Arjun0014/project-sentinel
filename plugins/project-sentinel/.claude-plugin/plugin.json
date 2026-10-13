@@ -1,7 +1,7 @@
 {
   "name": "project-sentinel",
   "displayName": "Project Sentinel",
-  "version": "1.6.3",
+  "version": "1.7.0",
   "description": "Project Sentinel keeps long Claude Code runs on track: a status bar, the Control Room panel, Context Autopilot (automatic handoff to a fresh context), Cache Guardian (the prompt cache in view, kept warm on request), Operations (work queued for later, decisions Claude leaves for you, watchers that wake a parked run, a Cold Resume Guard), permission categories that ask or deny, a run chain, Frontier Max, a lazy-exit guard, a model router, subagent limits, Focus view, machine load and Kit, an optional pixel companion.",
   "author": {
     "name": "Project Sentinel contributors"

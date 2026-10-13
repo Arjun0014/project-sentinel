@@ -240,7 +240,7 @@ export function agentsText(ops: OpsView, now: number): string {
   const lines = [`◆ Agents · ${active === 0 ? 'none running' : `${active} active`}`, `  Claude (main) · ${ops.main.text}`]
   for (const a of ops.agents) lines.push(`  ${agentLine(a, now)}`)
   if (ops.agents.length === 0) lines.push('  No subagents in this context.')
-  lines.push('As Claude Code reports them. Stop and Message are in Activity → Operations, where Claude Code accepts them. What Claude may start: /cr agents unlimited|off|ask|<n>.')
+  lines.push('As Claude Code reports them. Stop and Message are in Activity → Agents, where Claude Code accepts them. What Claude may start: /cr agents unlimited|off|ask|<n>.')
   return lines.join('\n')
 }
 
@@ -342,6 +342,7 @@ export async function opsCommand(rt: Runtime, args: string, words: readonly stri
     case 'watch':
       return watchCommand(rt, args, words)
     case 'watchers':
+      await rt.openOps(undefined, 'ops-watchers')
       return { text: watchersText(rt.ops.view(), rt.clock()) }
     case 'decisions':
     case 'review':
@@ -353,7 +354,7 @@ export async function opsCommand(rt: Runtime, args: string, words: readonly stri
     case 'agents':
     case 'subagents':
       if (words.length > 1) return null
-      await rt.openOps(undefined, 'ops-agents')
+      await rt.openActivity('agents')
       return { text: agentsText(rt.ops.view(), Date.now()) }
     case 'budget':
       return budgetCommand(rt, words)

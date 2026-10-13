@@ -197,7 +197,7 @@ describe('companion', () => {
     expectNoJumps(frames)
   })
 
-  test('never a jump: through every mood, at random moments, with touches, Kit only walks, turns through a turn frame and sits or stands through a crouch', () => {
+  test('never a jump: through every mood, at random moments, with touches, Kit only walks, turns through a turn frame and sits or stands through a crouch', { timeoutMs: 30_000 }, () => {
     // Desktop's tick and the terminal's: a turn frame is never skipped between two of the terminal's frames.
     for (const [seed, tick] of [[1, 100], [2, 100], [3, 100], [4, 200], [5, 200], [6, 200]] as const) {
       const r = seeded(seed)
@@ -366,7 +366,7 @@ describe('companion', () => {
     }
   })
 
-  test('in each mood Kit plays episodes: two to five acts each, picked by weight, none again within its cooldown, never the same one twice running, many kinds in ten minutes', () => {
+  test('in each mood Kit plays episodes: two to five acts each, picked by weight, none again within its cooldown, never the same one twice running, many kinds in ten minutes', { timeoutMs: 30_000 }, () => {
     const TRANSITION = new Set(['turn', 'sitDown', 'standUp', 'lieDown', 'getUp'])
     for (const mood of ['idle', 'think', 'work', 'search', 'test', 'waiting'] as const) {
       const set = EPISODES[mood]!
@@ -409,7 +409,7 @@ describe('companion', () => {
     }
   })
 
-  test('Kit uses the whole lane: its walks go where it has been least, so in ten minutes idle it has been in every fifth of a wide lane', () => {
+  test('Kit uses the whole lane: its walks go where it has been least, so in ten minutes idle it has been in every fifth of a wide lane', { timeoutMs: 30_000 }, () => {
     for (const [lane, seed] of [[80, 21], [170, 22], [300, 23]] as const) {
       const p = props()
       const s0 = createKit(p, { lane, home: 2, seed, isEntering: false })

@@ -10,6 +10,7 @@
 
 import { LIMITS } from '../constants'
 import type { HandoffRecord } from './handoff'
+import type { EvidenceStore } from './evidence'
 import { type RunOps, emptyOps } from './ops'
 import { type Plan, emptyPlan } from './plan'
 import type { RunQuest } from './quest'
@@ -74,6 +75,12 @@ export type Run = {
    * Absent before 1.6.0; read through `opsOf`, which validates it.
    */
   ops?: RunOps
+  /**
+   * Milestone evidence (features/evidence.ts): the files each milestone's work changed while under way,
+   * and a snapshot of what each completed milestone stood on (its green checks, its files' blob ids),
+   * compared with the workspace later. Absent before 1.7.0; read through `evidenceOf`.
+   */
+  evidence?: EvidenceStore
 }
 
 export function newSession(id: string, index: number, start: SessionStart, now: number): SessionEntry {

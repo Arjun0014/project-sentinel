@@ -13,7 +13,7 @@
 
 import type { RenderElement } from 'claude-code'
 
-import type { AgentRowView, DecisionView, OpsView, PaneModel, QueueItemView, QueueTarget, Tone, WatchStrategy, WatcherView } from '../../../types'
+import type { DecisionView, OpsView, PaneModel, QueueItemView, QueueTarget, Tone, WatchStrategy, WatcherView } from '../../../types'
 import * as fmt from '../../core/format'
 import { sentenceCase } from '../../core/text'
 import { howWords } from '../../features/ops'
@@ -21,6 +21,7 @@ import { clockAhead, untilWords } from '../../features/when'
 import type { Kit } from '../kit'
 import { buttons, callout, card, clip, footnote, isNative, link, listItem, meterBar, note, picker, row, spaced, stepper, switchControl } from '../primitives'
 import { ACCENT, G, toneProps } from '../theme'
+import { agentsLink } from './agents'
 
 const accent = ACCENT.activity
 
@@ -40,21 +41,11 @@ const STRATEGIES: readonly { value: WatchStrategy; label: string; hint: string }
 const STATUS_LOOK: Record<string, { glyph: string; tone: Tone }> = {
   armed: { glyph: G.wait, tone: 'info' },
   paused: { glyph: G.ring, tone: 'muted' },
-  due: { glyph: G.brand, tone: 'accent' },
-  stale: { glyph: G.brand, tone: 'accent' },
+  due: { glyph: G.warn, tone: 'warn' },
+  stale: { glyph: G.warn, tone: 'warn' },
   waking: { glyph: G.run, tone: 'info' },
   done: { glyph: G.ok, tone: 'good' },
   dismissed: { glyph: G.ring, tone: 'muted' },
-}
-
-const AGENT_LOOK: Record<string, { glyph: string; tone: Tone; word: string }> = {
-  running: { glyph: G.run, tone: 'info', word: 'Running' },
-  pending: { glyph: G.ring, tone: 'muted', word: 'Starting' },
-  waiting: { glyph: G.wait, tone: 'info', word: 'Waiting' },
-  idle: { glyph: G.ring, tone: 'muted', word: 'Idle' },
-  completed: { glyph: G.ok, tone: 'good', word: 'Completed' },
-  failed: { glyph: G.fail, tone: 'bad', word: 'Failed' },
-  killed: { glyph: G.stop, tone: 'warn', word: 'Stopped' },
 }
 
 const isOpen = (ops: OpsView, id: string): boolean => ops.ui.expanded.includes(id)
@@ -73,7 +64,7 @@ function decisionBlock(k: Kit, d: DecisionView): RenderElement {
   const meta = spaced(k, [d.id, d.milestone, d.isBlocking ? 'blocks the run' : d.urgency === 'high' ? 'urgent' : null])
   return (
     <Box key={`dec-${d.id}`} flexDirection="column" rowGap={isNative(k) ? 1 : 0}>
-      {listItem(k, { key: `dec-${d.id}-q`, glyph: isAnswered ? G.ok : G.brand, tone: isAnswered ? 'good' : d.isBlocking ? 'accent' : 'warn', text: d.question, right: isAnswered ? 'answered' : undefined, detail: meta })}
+      {listItem(k, { key: `dec-${d.id}-q`, glyph: isAnswered ? G.ok : G.warn, tone: isAnswered ? 'good' : d.isBlocking ? 'bad' : 'warn', text: d.question, right: isAnswered ? 'answered' : undefined, detail: meta })}
       {d.context === null ? null : (
         <Box key={`dec-${d.id}-ctx`} marginLeft={3} {...clip(k)}>
           <Text dimColor wrap="wrap">
@@ -109,7 +100,7 @@ function watcherNeeds(k: Kit, w: WatcherView, ops: OpsView): RenderElement {
   const canFresh = ops.resume.isHealthy && (w.strategy !== 'warm')
   return callout(k, {
     key: `needs-${w.id}`,
-    tone: 'accent',
+    tone: 'warn',
     title: `Watcher due · ${w.label}`,
     text: w.needs ?? undefined,
     actions: [
@@ -343,74 +334,6 @@ function watchersCard(kit: Kit, pane: PaneModel, ops: OpsView): RenderElement {
 }
 
 // ---------------------------------------------------------------------------
-// Agents
-
-function agentBlock(k: Kit, ops: OpsView, a: AgentRowView): RenderElement {
-  const { Box, Input, Text } = k.ui
-  const look = AGENT_LOOK[a.status] ?? { glyph: G.ring, tone: 'muted' as Tone, word: a.status }
-  const elapsed = a.startedAt === null ? null : fmt.duration((a.endedAt ?? k.now) - a.startedAt)
-  const name = a.name ?? (a.description || a.type)
-  const isMessaging = ops.ui.messaging === a.id
-  return (
-    <Box key={`agent-${a.id}`} flexDirection="column" rowGap={isNative(k) ? 1 : 0}>
-      {listItem(k, {
-        key: `agent-${a.id}-line`,
-        glyph: look.glyph,
-        tone: look.tone,
-        text: spaced(k, [name, a.name !== null && a.description !== '' ? a.description : null]),
-        right: spaced(k, [look.word, elapsed]),
-        rightTone: a.isFailed ? 'bad' : look.tone === 'info' ? 'info' : 'muted',
-        detail: a.activity ?? a.result ?? spaced(k, [a.type, a.model === null ? null : a.model.replace(/^claude-/, '')]),
-      })}
-      {isOpen(ops, a.id) ? (
-        <Box key={`agent-${a.id}-details`} marginLeft={3} flexDirection="column">
-          <Text dimColor wrap="wrap">{spaced(k, [a.type, a.model === null ? 'model not known' : a.model, a.isBackground === null ? null : a.isBackground ? 'background' : 'foreground', a.isFork ? 'fork' : null])}</Text>
-          <Text dimColor wrap="wrap">{spaced(k, [`${fmt.plural(a.calls, 'tool call')}`, a.parentId === null ? 'started by the main conversation' : `started by ${a.parentId}`, a.startedAt === null ? 'started before a reload' : `started ${fmt.clock(a.startedAt)}`])}</Text>
-          {a.result === null ? null : <Text wrap="wrap">{a.result}</Text>}
-          <Text dimColor wrap="truncate-end">{a.id}</Text>
-        </Box>
-      ) : null}
-      {isMessaging && Input !== undefined ? (
-        <Box key={`agent-${a.id}-msg`} marginLeft={3} flexDirection="column" rowGap={isNative(k) ? 1 : 0}>
-          <Input key={`agent-${a.id}-text`} value="" placeholder="Stop after this file" submitLabel={isNative(k) ? 'Send' : 'send'} onSubmit={text => k.actions.agentMessage(a.id, text)} />
-          {buttons(k, [{ key: `agent-${a.id}-msg-cancel`, label: 'Cancel', onPress: () => k.actions.editMessage(null) }], `agent-${a.id}-msg-acts`, true)}
-        </Box>
-      ) : (
-        <Box key={`agent-${a.id}-acts`} marginLeft={3} flexDirection="row" columnGap={2} flexWrap="wrap">
-          {buttons(
-            k,
-            [
-              { key: `agent-${a.id}-stop`, label: 'Stop', onPress: () => k.actions.agentStop(a.id), isHidden: !a.canStop },
-              { key: `agent-${a.id}-message`, label: 'Message', onPress: () => k.actions.editMessage(a.id), isHidden: !a.canMessage || Input === undefined },
-            ],
-            `agent-${a.id}-buttons`,
-            true,
-          )}
-          {detailsLink(k, ops, a.id).element}
-        </Box>
-      )}
-    </Box>
-  )
-}
-
-function agentsCard(kit: Kit, ops: OpsView): RenderElement {
-  const active = ops.agents.filter(a => a.status === 'running' || a.status === 'pending' || a.status === 'waiting' || a.status === 'idle').length
-  return card(kit, {
-    key: 'ops-agents',
-    title: 'Agents',
-    accent,
-    aside: ops.agents.length === 0 ? undefined : active === 0 ? 'None running' : `${active} active`,
-    link: { label: 'What Claude may start', onPress: () => kit.actions.setTab('guardrails') },
-    footer: ops.agents.length === 0 ? undefined : 'As Claude Code reports them. Stop and Message are Claude Code’s own TaskStop and SendMessage, offered where it accepts them. No cost per agent is reported.',
-    rows: k => [
-      listItem(k, { key: 'agent-main', glyph: G.dot, tone: ops.isTurnRunning ? 'info' : 'muted', text: 'Claude', right: 'Main', detail: ops.main.text }),
-      ...ops.agents.map(a => agentBlock(k, ops, a)),
-      ops.agents.length === 0 ? note(k, 'No subagents in this context.', 'agents-none') : null,
-    ],
-  })
-}
-
-// ---------------------------------------------------------------------------
 // Run budget
 
 /** A wall-clock span without its trailing zero: "6h", "2h 14m", "5m 3s". */
@@ -518,7 +441,7 @@ export function operationsPage(kit: Kit, pane: PaneModel, ops: OpsView | undefin
         ? null
         : callout(kit, {
             key: 'ops-held',
-            tone: 'accent',
+            tone: 'warn',
             title: 'Your message was not sent',
             text: `${ops.held.text.length > 300 ? `${ops.held.text.slice(0, 300)}…` : ops.held.text}${ops.held.hasAttachments ? ' (its attachments were not kept)' : ''}`,
             actions: [
@@ -544,7 +467,7 @@ export function operationsPage(kit: Kit, pane: PaneModel, ops: OpsView | undefin
       {reviewCard(kit, pane, ops)}
       {queueCard(kit, ops)}
       {watchersCard(kit, pane, ops)}
-      {agentsCard(kit, ops)}
+      {agentsLink(kit, ops)}
       {budgetCard(kit, ops)}
       {ops.log.length === 0
         ? null

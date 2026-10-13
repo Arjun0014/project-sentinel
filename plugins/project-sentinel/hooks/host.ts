@@ -154,6 +154,14 @@ export type Host = {
   repoRoot(): Promise<string | null>
   /** `git status --porcelain=v1 --branch` in the session's folder (read-only; Git runs with repo hooks off). */
   gitStatus(): Promise<ProcessRunResult>
+  /**
+   * Milestone evidence: `git hash-object --no-filters -- <paths>`, Git's blob id of each file's content,
+   * one per line in order (read-only: nothing is written to the repository; `--no-filters` runs no
+   * filter a repository's configuration names). Only the ids are kept, never the content.
+   */
+  hashFiles(paths: readonly string[]): Promise<ProcessRunResult>
+  /** Milestone evidence: `git rev-parse --verify -q HEAD`, the commit the work tree is on. */
+  gitHead(): Promise<ProcessRunResult>
 
   publishHud(value: HudModel): Promise<void>
   publishPane(value: PaneModel): Promise<void>

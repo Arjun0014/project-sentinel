@@ -1,8 +1,13 @@
 # Troubleshooting
 
 Start with `/cr status`, which prints every system's state on one screen. For anything deeper,
-run Claude Code with `claude --debug`. The debug log names every Project Sentinel hook that ran,
-anything the engine refused, and why.
+run Claude Code with `claude --debug` (or `--debug-file <path>`). The debug log names every Project
+Sentinel hook that ran, anything the engine refused, and why. Project Sentinel's own lines start
+with what they are about: `autopilot:` (each handoff step), `supervisor:` (what holds a handoff),
+`background:` (each background task: waited for or not, its end), `handoff guard:` (a message typed
+while a handoff is under way), `agents:`, `evidence:` (milestone evidence verdicts), `plan usage:`
+(five-hour readings), `settings:` (fresh install or update), `policy:` (what reached Claude, per
+request), `ops:`, `cold resume:` and `keep warm:`. They are never shown on screen.
 
 ## Project Sentinel doesn't load
 
@@ -68,8 +73,10 @@ anything the engine refused, and why.
   progress is the work under way.
 - **CPU and RAM left the status bar:** calm readings stay in the panel (Overview, Guardrails).
   The status bar names them only near a ceiling.
-- **The cost in the status bar is higher than this session's:** it is the whole run's total, which a
-  handoff never resets. Each session's own cost is in Context → Run.
+- **The cost left the status bar** (1.7.0): its cell shows the plan's five-hour usage now (see
+  [Five-hour usage](#five-hour-usage-5h)). The run's cost (the whole run's total, which a handoff
+  never resets) is in Overview, `/cr status`, the Run Budget and Context → Run, which also has each
+  session's own.
 - **The names went from the readings:** below 72 columns the instruments stand alone, and the
   meter and the track shorten before a reading is dropped. Widen the terminal, or close the docked
   panel, to see them again. On Desktop each reading keeps its caption at every width.
@@ -84,6 +91,43 @@ anything the engine refused, and why.
 - **No Cache reading:** it appears once Claude has answered in this context, and only for a prompt
   of 4,096 tokens or more.
 - **Kit is missing:** see [Kit](#kit-the-companion).
+
+## Five-hour usage (5H)
+
+The status bar's `5H` cell is Claude Code's own reading of the plan's five-hour window
+(`$.session.usage().rateLimits`), never an estimate. `claude --debug-file <path>` logs each new
+reading (`plan usage: five-hour 32%, resets 2026-10-13T09:20:00.000Z`).
+
+| What it shows | Why |
+| --- | --- |
+| `5H —` (Desktop: a dash) | No reading yet: Claude Code reports the windows with each API response, and a session (a headless one in particular) has none before its first. It fills in when Claude first answers. |
+| Nothing at all in the terminal, *Plan usage —* on Desktop | Claude Code answered and reported no five-hour window: an API key or a provider other than a claude.ai plan has none (`plan usage: no five-hour window`). |
+| `5H reset · new window`, with no number | The window's reset time has passed (or the window left the list at its reset). The old percentage says nothing about the new window, and Claude Code reports the new one only with the next response. |
+| The countdown stands still between turns | It is redrawn once a minute, only while a window counts down. A reading itself changes only when Claude Code reports one (after a response). |
+| `5H limit` in red | The window reads 100%, or Claude Code ended a request on the rate limit (`classic.StopFailure` `rate_limit`; *Rate limited* when no window reads full, as with the seven-day one). It clears when a turn is answered again, a reading under 100% comes, or the window resets. |
+| Amber | 80% or more of the window is used. |
+| The percentage differs from claude.ai's usage page by a point | Claude Code reports a window again only when it moves a whole point. Context → Run shows both windows (5-hour and 7-day) with their resets. |
+
+## Milestone evidence
+
+| Symptom | Cause and fix |
+| --- | --- |
+| *Verification stale* on a completed milestone (Run progress, Activity → Attention, Context → Last handoff, Ready to resume) | A file the milestone's work changed is different now from when it was verified, and no check of the kinds it had passed (Tests, Type-check, …) has passed since. It says which files and since when, and what to rerun. It never means the milestone is wrong. Fix: rerun those checks (the next comparison, at most a minute after a turn ends, re-baselines it: *re-verified by Tests at 14:05*), or, if the change is fine as it is, **Accept files as they are** in Activity or `/cr evidence accept [n\|all]`. |
+| A later milestone changed the same file and nothing says stale | By design: while the later milestone is under way the earlier one reads *being changed by …* (quiet), and once the latest run of each kind of check the earlier milestone had passes after the change, it is re-baselined. Documentation, and milestones verified with no check, belong to the later milestone once that is completed. |
+| Stale after I only opened or saved a file unchanged | A file whose size and time are unchanged is not even hashed; one saved again unchanged is hashed and its Git blob id is the same, so it stays current. Without Git (`git hash-object` cannot run), size and time stand in, and a save that changes only the time reads as a change (`evidence: git hash-object … size and time stand in`). |
+| A milestone has no evidence | Only files edited through Claude's tools while it was under way (or outputs Claude named in the milestones tool) are its evidence; generated and temporary files and the handoff notes never are. A milestone with no files keeps its checks only. `/cr evidence` lists what each one stood on. |
+| What does it run? | `git hash-object --no-filters -- <the milestone's files>` and `git rev-parse --verify -q HEAD`, at a milestone's completion and when comparing; only blob ids come back. See [SECURITY.md](../SECURITY.md). The debug log's `evidence:` lines say each verdict. |
+
+## Fresh install and the update (1.7.0)
+
+| Symptom | Cause and fix |
+| --- | --- |
+| Setup reads **Classic** after the update; I had Normal | Normal changed in 1.7.0 (Autopilot and Frontier Max on). Your saved Normal kept every value and is now called Classic, so it does not read "edited" against the new Normal. To take the new defaults, pick Normal in Setup (`/cr profile normal`). |
+| Autopilot and Frontier Max are on, and I never turned them on | A fresh install (no settings and no runs in the store) starts on the new Normal. Turn either off in Context / Behavior, or pick **Classic**. |
+| A card *Sentinel is on* at the top of Overview | A fresh install's one-time summary of what is on and where things live. **Got it** dismisses it for good (`onboarding.v1` in the store). An install that was used before never shows it. |
+| An install that never changed a setting kept the old behaviour | Settings are saved only when one changes, so its store held runs but no settings: Project Sentinel saved Classic for it rather than treat it as new (`settings: none saved, earlier use found: Classic kept`). |
+| Frontier Max no longer turns the lazy-exit guard on | Since 1.7.0 the switch does only what it says. The Frontier Max profile still sets both; or turn the guard on in Behavior. |
+| My permissions were not changed to Default | On purpose: a fresh install keeps the protective defaults (force push, resets and dangerous commands Deny; installs, downloads, edits outside the project, deletes, push and deploy Ask). Guardrails shows each value and whether it is the default. |
 
 ## Answer styles and the Quest log
 
@@ -148,6 +192,13 @@ Claude Code reports how many tokens each request read from the cache and wrote t
   idle limit (*Stop after*; 45 minutes at most for the five-minute cache, past which refreshing
   costs more than a rebuild). If the machine slept past the expiry, the cache lapsed and the next
   request rebuilds it.
+- **It stood down during a handoff**: since 1.7.0 only once the old context is about to be
+  discarded: while the notes are checked before the clear, during the clear, and while the fresh
+  context resumes (*The handoff notes are being checked before the clear, so this cache is about to
+  be discarded*). A handoff that is due, being written, waiting for background work or for you, or
+  stuck keeps the cache warm, since each of those reads the old context again. (1.6.3 stood down for
+  all of them, and a handoff held by a preview server let a 775k-token cache lapse.) A handoff that
+  compacts keeps it throughout.
 - **"Retrying in 2 min"**: a refresh failed (the API refused it, or no reply came). It tries again
   while the cache can still be saved.
 - **Fork HIT, Main cache AWAITING VERIFICATION / VERIFIED / FAILED**: a refresh is a fork of the
@@ -224,9 +275,12 @@ after each turn, at most every 15 seconds, so a change you make by hand shows af
 | "This fresh context started working at 66k, close to the 64k handoff point, so it hands off at 86k" | A context after a handoff starts with the system prompt and tools, then reads the notes, the docs and the code before it works. With a threshold close to that, every context would hand off after a step or less. So it gets room to work from where it started working (20k, or a tenth of the threshold). Raise the handoff point (Context → *Hands off at*) so each context has room. |
 | "The fresh context filled up before work began" (waiting for you) | It passed the handoff point and its room while still reading itself in: handing off again would only repeat that. Raise the handoff point, then **Start fresh** or carry on. |
 | The handoff seems stuck at "Handing off" | Every step moves on when its turn starts or ends. `claude --debug-file <path>` traces each step (`autopilot: … → …`, `turn … started (handoff)`) to see where it stopped. A turn you queued runs first; the `/clear` waits for it. |
-| *Handoff written · waiting for background work* | The handoff turn ended while background work it left running (a render, a build, a test run) was still in flight, as Claude Code's Stop listed it. The fresh context starts by itself once that work ends: Claude Code's notification starts a turn, Claude records the result in the notes, and when a turn ends with nothing in flight the notes are checked and the context cleared. Context lists each task with **Stop**; `/cr handoff` says what it waits for. A task that never ends by itself (a dev server, a watcher) keeps the handoff waiting until you stop it (**Stop**, or `/tasks`). The debug log says `autopilot: turnComplete · handoff → waiting-background`, `background: <id> ended (completed), as its notification says`, then `waiting-background → verifying`. |
+| *Handoff written · waiting for background work* | The handoff turn ended while finite work it left running (a render, a build, a test run) was still in flight, as Claude Code's Stop listed it. The fresh context starts by itself once that work ends (its notification starts a turn, Claude records the result, the notes are checked), or when the wait's limit passes (Context → Autopilot → *Wait for background work*, 20 minutes by default): then the work keeps running and its result reaches the fresh context, which is told. A server or watcher (a Vite preview, a `--watch`) is never waited for (1.7.0). To end the wait now: **Hand off now** (Context or the status bar), type "handoff now", or `/cr handoff now`; **Stop & hand off** or `/cr handoff stop`; **Keep waiting** or `/cr handoff wait 30m`; **Call off** or `/cr handoff cancel`. The debug log says `background: not waited for (…)`, `supervisor: …`, `autopilot: turnComplete · handoff → waiting-background`, then `→ verifying`. |
 | Stuck at "Claude is writing the handoff" after the handoff turn ended (1.6.2) | 1.6.2 counted the turn a background task's notification starts as yours, so a handoff that waited for background work never moved on, `/cr fresh` said *No written handoff is waiting* and `/cr handoff` said *Handing off* without doing anything. Fixed in 1.6.3. A session left in that state by 1.6.2 recovers after the update with `/cr fresh` (or **Start fresh context** in Context): it checks that the notes were written for this handoff and that nothing is in flight, then clears and continues as a handoff would. |
-| `/cr fresh` keeps the context | It says why: background work still running (it names it), `NEXT_SESSION_PROMPT.md` missing, empty or not written since this handoff began (run `/cr handoff`), no handoff under way (run `/cr handoff`), or a handoff already finishing by itself (checking the notes, starting the fresh context). It never clears a context whose notes it could not verify. |
+| `/cr fresh` keeps the context | It says why: finite background work still running (it names it; `/cr fresh now` starts the fresh context anyway and leaves that work running, its result arriving there), `NEXT_SESSION_PROMPT.md` missing, empty or not written since this handoff began (run `/cr handoff`), no handoff under way (run `/cr handoff`), or a handoff already finishing by itself (checking the notes, starting the fresh context). A server alone never keeps it: the fresh context starts and is told the server runs. It never clears a context whose notes it could not verify. |
+| A server I started (Vite, `npm run dev`, `--watch`) and a handoff | Since 1.7.0 a server, watcher, tunnel or log follower is never waited for: the handoff goes on, the server keeps running (Claude Code keeps background work across `/clear`), and the fresh context's first message says it runs, so Claude reuses it instead of starting another. The debug log says `background: not waited for (b7x: a preview server …)`. |
+| Something I typed while the handoff waited was not sent | While a handoff is under way, a short instruction about it is acted on and not sent: "handoff now", "don't wait for the background process", "start the fresh session now", "keep waiting", "stop the server and hand off", "cancel the handoff" (the debug log: `handoff guard: "…" read as "…"`). Any other message, once the handoff is written or being written, is asked about: give it to the fresh context (it waits in the Mission Queue, Activity → Operations, and goes first thing), send it here, or back to the prompt box. A longer sentence of work is never taken for an instruction. |
+| The alert line reads *Handoff: The handoff turn ended without Sentinel seeing it end* (or Context → Autopilot names what holds the handoff, and for how long) | The Handoff Supervisor looks every 30 s at a handoff under way and says what holds it: finite work within its wait, work that outlasted the wait (it goes on by itself), a task nothing recognises (after a minute a small isolated classifier is asked once what it is, from its command and description only), a question waiting for you, or a step whose event never came (each with its ways out). It never moves a step on a timer except at the wait's end, and never under a running turn. The debug log has one `supervisor: <step> for 12m · stalled · …` line per change. |
 | *Last handoff* shows items missing | It counts what it saw in tool calls: *Project docs updated* needs a documentation file edited in the handoff turn, *Validation recorded* a check run in that context, and *Project docs read* a documentation file opened by the fresh context. `○` marks an item that was not needed (no milestones to save, CLAUDE.md left alone). The handoff itself went ahead; the list says what the fresh context may lack. |
 | "Compaction failed: … not available in a headless (-p / SDK) session" (before 1.5.0) | Desktop and other SDK sessions compact only inside a turn, so the *Compact* continuation (and the fallback when `/clear` is refused) stopped there. Autopilot now runs `/compact` as a command in those sessions and carries on when Claude Code has compacted; the debug log says `autopilot: this session compacts only inside a turn: running /compact`. If nothing compacts within ten minutes it waits for you. |
 | "Control Room reloaded in the middle of a handoff" | The plugin was reloaded (`/reload-plugins`, an update) while a handoff was under way. Autopilot picks up where it was; only when it cannot tell whether a step already happened (the handoff prompt was about to go out, or a compaction) does it wait for you, so nothing runs twice. Press **Hand off now** or **Start fresh**. |
@@ -256,9 +310,12 @@ due`, `ops: W-1 wakes the run in this context`, `cold resume: asking …`).
 | After *Start fresh* or *Compact first* my message was still in the prompt box | Claude Code puts a dropped prompt's text back in the box. Since 1.6.2 Project Sentinel clears it while it holds just that message, because the message goes on by itself; a draft you typed since is left alone. Do not send it again: it reaches Claude once. |
 | *Start fresh from resume state* is missing from its question | The resume state is not healthy; the question says why. Context → *Ready to resume* shows the same. |
 | My message was not sent and is not in the prompt box | Where the box cannot take text back (some Desktop hosts), the message is kept in Operations (and the status bar's alert line): **Put back**, **Send now** or **Discard**. It is kept in memory only, so a restart loses it. |
-| An agent has no Stop or Message | Claude Code's `TaskStop` and `SendMessage` take background agents and teammates only; a foreground agent ends with its turn. An agent shows as running only while Claude Code lists it so. Since 1.6.2 a reload of the plugin keeps what the session saw of its agents (before, a running background agent lost both after a reload). |
+| An agent has no Stop or Message | Claude Code's `TaskStop` and `SendMessage` take background agents and teammates only; a foreground agent ends with its turn, and a workflow's agents end with their run. Since 1.6.2 a reload of the plugin keeps what the session saw of its agents (before, a running background agent lost both after a reload). |
+| Claude Code shows agents running, but Project Sentinel said none (before 1.7.0) | Project Sentinel used to show only what Claude Code's agent list named, read before a spawn and polled only once it already showed a running agent: a foreground agent stayed invisible until its call returned, and a workflow's agents (which the list never names) never showed. Since 1.7.0 an agent shows from its spawn (*starting* until listed), the list is read every 2 s from any spawn while one is alive, and a workflow's agents are followed through their own calls. The debug log has `agents: <id> started (<type>: <description>…)` per spawn. |
+| An agent reads *no longer listed* | Claude Code's list stopped naming it for three looks over six seconds without Project Sentinel seeing it end. A brief gap keeps the last status; one that lasts reads so rather than inventing an end. |
+| No Agents view in Activity, or no band above the status bar | Both show only while subagents run (the view also for ten minutes after the last one ended, and while it is open). No percent is shown for an agent unless it keeps its own task list or milestones: then its plan is drawn as a track. |
 | Claude says it does not know who stopped an agent | Claude Code tells the conversation that an agent was *stopped by Claude* even when you pressed **Stop**. Since 1.6.2 Claude is told, with its next tool results or your next message, what you did from the Agents panel. |
-| A chip or `/cr agents` opened Operations, but not at its card | Since 1.6.2 it scrolls to the card once the panel has drawn it, trying again for about two seconds; a card near the end of Operations shows where the panel's end allows. If it stays at the top, `claude --debug-file <path>` says why: `ops: scroll to card-ops-agents refused (try 1): …` with Claude Code's reason. |
+| A chip or `/cr watchers` opened Operations, but not at its card | Since 1.6.2 it scrolls to the card once the panel has drawn it, trying again for about two seconds; a card near the end of Operations shows where the panel's end allows. If it stays at the top, `claude --debug-file <path>` says why: `ops: scroll to card-ops-watchers refused (try 1): …` with Claude Code's reason. (`/cr agents` and the agents chip open Activity → Agents since 1.7.0.) |
 | `/cr queue` opened Operations, but typing went to the prompt box | Before 1.6.2, with the panel already open, the prompt box kept the keyboard and Claude Code refused to focus the field. Now the panel asks for the keyboard first; Claude Code gives it only while the prompt box is empty. The trace says so if it is refused: `ops: focus ops-queue-input refused (try 1): …`. |
 | "Run 41 left open work" | An ended run of this project left watchers, queued work or open decisions. Nothing moves by itself: resume that session to carry it on there, or **Bring them here**. |
 
@@ -272,6 +329,10 @@ due`, `ops: W-1 wakes the run in this context`, `cold resume: asking …`).
   leave it to Claude Code's own behaviour.
 - **Headless runs (`claude -p`, CI) failing on installs, deletes or pushes:** with no one to
   answer, a call set to Ask is refused. Set those categories to *Default* for headless use.
+- **A server check like `curl -s -o /dev/null -w "%{http_code}" http://localhost:5173/` was asked
+  about as a download (before 1.7.0):** output sent to `/dev/null`, `NUL` or stdout keeps no file, so
+  since 1.7.0 it is *Network* (Default) only. A fetch that names a file (`-o page.html`, `-O`,
+  `> page.html`) is still *Downloading files*.
 - **Allow is gone (1.4.0):** answering permission prompts is left to Claude Code: add an allow
   rule (`/permissions`) or use one of its permission modes. A saved Allow reads as *Default*; a toast
   says so once, and Guardrails for that session. In Bypass permissions mode nothing changes.
@@ -321,18 +382,21 @@ due`, `ops: W-1 wakes the run in this context`, `cold resume: asking …`).
 - **It continued when the work was done:** use strictness *lenient*, or end the work with the
   verification evidence (tests run, results). The guard credits completion evidence.
 - **It never triggers:** it only judges turns you started, stands down during handoffs, in plan
-  mode and while Claude's background work runs, and has per-turn and per-session caps (Behavior).
+  mode and while Claude's finite background work runs (a server or watcher does not count, since
+  1.7.0), and has per-turn and per-session caps (Behavior).
+- **It came on with Frontier Max before, and does not now:** since 1.7.0 the Frontier Max switch no
+  longer turns it on. The Frontier Max profile still sets both.
 
 ## Focus view
 
 It changes presentation only. Press `▸` on a row to expand it, or see everything in Activity
-(the summary, or *All tool calls*). `/cr focus off` restores Claude Code's own rows.
+(the summary, or *Tool calls*). `/cr focus off` restores Claude Code's own rows.
 
 ## Activity
 
 - **A check is not under Validation:** checks are recognised by their runner (`npm test`, `pytest`,
   `cargo build`, `tsc`, `eslint`, `npm run check`, a script named for a simulation, …). A custom
-  script with another name shows under *All tool calls* only.
+  script with another name shows under *Tool calls* only.
 - **"in the background"**: a check sent to the background has no outcome Project Sentinel can see.
 - **"diff unavailable"**: no tool reported the lines (a file a shell command created, or a diff
   Claude Code skipped). Project Sentinel never shows `+0 −0` for an unknown change.

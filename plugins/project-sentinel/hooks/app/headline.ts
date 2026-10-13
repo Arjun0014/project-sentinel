@@ -24,6 +24,7 @@
 import type { HudChip, HudHeadline, HudModel, HudOps, Tone, TrackStop } from '../../types'
 import * as fmt from '../core/format'
 import { clean } from '../core/text'
+import { blockingOf } from '../features/autopilot'
 import { doingOf } from '../features/digest'
 import type { PlanStatus, PlanTask } from '../features/plan'
 import type { Runtime } from './runtime'
@@ -46,21 +47,27 @@ const HANDOFF_WORDS: Record<string, string> = {
  */
 function waitingLine(rt: Runtime): HudHeadline {
   const a = rt.autopilot
-  const first = a.background[0]
+  // The wait's end was set by the engine's clock: measured by it.
+  const now = rt.engineTime()
+  // What it waits for: a server running beside the handoff is not (it keeps running for the fresh context).
+  const waiting = blockingOf(a.background)
+  const first = waiting[0]
   if (first === undefined) {
     return {
       state: 'handoff',
       text: 'Handoff · background work finished',
       detail: rt.turn.isRunning ? 'Claude records the result, then the notes are checked' : 'then the notes are checked',
-      tone: 'accent',
+      tone: 'info',
     }
   }
-  const more = a.background.length > 1 ? ` · ${a.background.length - 1} more` : ''
+  const more = waiting.length > 1 ? ` · ${waiting.length - 1} more` : ''
+  // How much longer it waits at most, then it goes on and leaves the work running.
+  const left = a.skipWait ? ' · goes on when this turn ends' : a.waitUntil === null ? '' : a.waitUntil > now ? ` · goes on in ${fmt.countdown(a.waitUntil - now)} at most` : ' · going on'
   return {
     state: 'handoff',
     text: a.notesWritten === true ? 'Handoff written · waiting for background work' : 'Handoff · waiting for background work',
-    detail: `${clean(first.description, 80)} · running${more}`,
-    tone: 'accent',
+    detail: `${clean(first.description, 80)} · running${more}${left}`,
+    tone: rt.supervisor?.status === 'stalled' ? 'warn' : 'info',
   }
 }
 
@@ -110,11 +117,11 @@ export function headlineOf(rt: Runtime, now: number, summary: { text: string; du
   const tasks = rt.plan().tasks
   if (ap === 'waiting-background') return waitingLine(rt)
   const handoff = HANDOFF_WORDS[ap]
-  if (handoff !== undefined) return { state: 'handoff', text: handoff, detail: rt.run === null ? null : `run ${rt.run.number}`, tone: 'accent' }
+  if (handoff !== undefined) return { state: 'handoff', text: handoff, detail: rt.run === null ? null : `run ${rt.run.number}`, tone: rt.supervisor?.status === 'stalled' ? 'warn' : 'info' }
 
   // A call set to Ask waits for the person's answer to Control Room's question.
   const approval = rt.pendingApprovals[0]
-  if (approval !== undefined) return { state: 'waitingUser', text: `Waiting for you to approve: ${approval.label.toLowerCase()}`, detail: approval.what, tone: 'accent' }
+  if (approval !== undefined) return { state: 'waitingUser', text: `Waiting for you to approve: ${approval.label.toLowerCase()}`, detail: approval.what, tone: 'warn' }
 
   if (rt.turn.isRunning) {
     const running = rt.activity.runningItems().filter(i => i.agentId === null)
@@ -136,22 +143,24 @@ export function headlineOf(rt: Runtime, now: number, summary: { text: string; du
   }
 
   // Between turns: what the run waits for, if anything, comes before what the last turn did.
-  if (ap === 'awaiting') return { state: 'waitingUser', text: 'Waiting for you to start the fresh context', detail: null, tone: 'accent' }
+  if (ap === 'awaiting') return { state: 'waitingUser', text: 'Waiting for you to start the fresh context', detail: null, tone: 'warn' }
   // The orchestration layer: a decision that blocks the run, a watcher that waits for the person, the run asleep.
   const ops = rt.ops.hud()
   if (ops !== null) {
-    if (ops.blocking > 0) return { state: 'waitingUser', text: `Needs you · ${fmt.plural(ops.blocking, 'decision')}`, detail: ops.blockingQuestion === null ? null : clean(ops.blockingQuestion, 100), tone: 'accent' }
+    if (ops.blocking > 0) return { state: 'waitingUser', text: `Needs you · ${fmt.plural(ops.blocking, 'decision')}`, detail: ops.blockingQuestion === null ? null : clean(ops.blockingQuestion, 100), tone: 'warn' }
     const w = ops.watcher
-    if (w !== null && (w.status === 'due' || w.status === 'stale') && w.needs !== null) return { state: 'waitingUser', text: `Watcher due: ${w.label}`, detail: w.needs, tone: 'accent' }
+    if (w !== null && (w.status === 'due' || w.status === 'stale') && w.needs !== null) return { state: 'waitingUser', text: `Watcher due: ${w.label}`, detail: w.needs, tone: 'warn' }
     if (w !== null && ops.isSleeping) {
       const how = w.isHeldWarm ? 'cache held warm' : w.mode === 'fresh' ? 'fresh wake · no keep-alive' : w.mode === null ? 'Smart decides at the wake' : 'wakes in this context'
       return { state: 'sleeping', text: `Sleeping until ${w.at} · ${w.label}`, detail: how, tone: 'info' }
     }
   }
   const stop = rt.lastStop
-  if (stop !== null && stop.background.length > 0) {
-    const first = stop.background[0]!
-    const more = stop.background.length > 1 ? `${stop.background.length - 1} more running` : 'running in the background'
+  // A result that will come by itself: work whose notification brings the turn back, never a server.
+  const inFlight = blockingOf(stop?.background ?? [])
+  if (inFlight.length > 0) {
+    const first = inFlight[0]!
+    const more = inFlight.length > 1 ? `${inFlight.length - 1} more running` : 'running in the background'
     return { state: 'waitingExternal', text: `Waiting for ${first.description}`, detail: more, tone: 'info' }
   }
   if (stop !== null && stop.wakeups.length > 0) {
@@ -162,7 +171,7 @@ export function headlineOf(rt: Runtime, now: number, summary: { text: string; du
   if (waiting !== undefined) return { state: 'waitingExternal', text: `Waiting for ${waiting.detail ?? waiting.subject}`, detail: stepOf(tasks, waiting), tone: 'info' }
   const blocked = p.blocked.at(-1)
   if (blocked !== undefined) return { state: 'blocked', text: `Blocked: ${blocked.detail ?? blocked.subject}`, detail: stepOf(tasks, blocked), tone: 'warn' }
-  if (stop !== null && stop.isQuestion) return { state: 'waitingUser', text: 'Waiting for your answer', detail: summary?.text ?? null, tone: 'accent' }
+  if (stop !== null && stop.isQuestion) return { state: 'waitingUser', text: 'Waiting for your answer', detail: summary?.text ?? null, tone: 'warn' }
   if (p.total > 0 && p.done === p.total) {
     return { state: 'complete', text: `All ${fmt.plural(p.total, 'milestone')} done`, detail: summary?.text ?? null, tone: 'good' }
   }
@@ -208,7 +217,7 @@ export function chipsOf(hud: Pick<HudModel, 'failing' | 'attention' | 'guard' | 
   // A watcher armed while the run is not asleep (Claude works, or the person does): its countdown.
   if (ops?.watcher != null && !ops.isSleeping && ops.watcher.status === 'armed') chips.push({ key: 'watcher', text: `Watcher ${ops.watcher.left}`, tone: 'info', opens: 'ops' })
   if (ops != null && ops.due > 0 && hud.isWorking === true) chips.push({ key: 'queued', text: `Queued ${ops.due}`, tone: 'info', opens: 'ops' })
-  if (hud.agents.running > 0) chips.push({ key: 'agents', text: hud.agents.limit === null ? fmt.plural(hud.agents.running, 'agent') : `${hud.agents.running} of ${hud.agents.limit} agents`, tone: 'info', opens: 'ops' })
+  if (hud.agents.running > 0) chips.push({ key: 'agents', text: hud.agents.limit === null ? fmt.plural(hud.agents.running, 'agent') : `${hud.agents.running} of ${hud.agents.limit} agents`, tone: 'info', opens: 'agents' })
   if (hud.quest !== null) chips.push({ key: 'quest', text: `Lv ${hud.quest.level}`, tone: 'accent' })
   return chips
 }

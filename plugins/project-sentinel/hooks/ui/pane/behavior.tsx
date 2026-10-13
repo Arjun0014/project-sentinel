@@ -133,24 +133,21 @@ export function behaviorPage(kit: Kit, pane: PaneModel): RenderElement {
         title: 'Frontier Max',
         accent,
         aside: s.frontier.enabled ? st.frontier.text : undefined,
+        // What it is, plainly: a policy in Claude's instructions and an effort request. Never the model.
+        footer: s.frontier.enabled
+          ? 'Frontier Max adds Sentinel’s strongest engineering policy to Claude’s instructions: investigate before acting, finish the job, verify before calling it done, never stop at the first plausible answer. It asks for the effort above on each request where the model has an effort setting; it never changes the model.'
+          : 'Adds a finish-and-verify engineering policy to Claude’s instructions and asks for more reasoning effort where the model supports it. It never changes the model.',
         rows: k => [
           row(k, {
             key: 'fr-on',
             label: 'Hold Claude to senior-engineer standards',
-            control: switchControl(k, {
-              key: 'fr-on',
-              isOn: s.frontier.enabled,
-              onPress: () =>
-                u(d => {
-                  d.frontier.enabled = !d.frontier.enabled
-                  if (d.frontier.enabled) d.guard.enabled = true
-                }),
-            }),
+            control: switchControl(k, { key: 'fr-on', isOn: s.frontier.enabled, onPress: () => u(d => void (d.frontier.enabled = !d.frontier.enabled)) }),
           }),
           s.frontier.enabled &&
             row(k, {
               key: 'fr-effort',
               label: 'Effort',
+              subtitle: s.frontier.effort === 'keep' ? 'Policy only: the effort is left as it is' : 'Asked for where the model supports it',
               control: picker(k, {
                 key: 'fr-effort',
                 value: s.frontier.effort,

@@ -14,11 +14,12 @@
 
 import type { RenderElement } from 'claude-code'
 
-import type { ChainRunView, ChainSessionView, ChainView, HudModel, OpsView, PaneModel } from '../../../types'
+import type { AutopilotView, ChainRunView, ChainSessionView, ChainView, HudModel, OpsView, PaneModel } from '../../../types'
 import * as fmt from '../../core/format'
 import type { Kit } from '../kit'
-import { buttons, card, clip, columns, emptyState, listItem, meterBar, pair, row, segmented, spaced, steps, stepper, switchControl } from '../primitives'
+import { buttons, card, clip, columns, emptyState, listItem, meterBar, note, pair, row, segmented, spaced, steps, stepper, switchControl } from '../primitives'
 import { ACCENT, G, toneProps } from '../theme'
+import { planDetail, planWords } from '../hud'
 import { cacheCards, coldResumeCard } from './cache'
 import { handoffCard, resumeCard } from './handoff'
 
@@ -46,7 +47,7 @@ function sessionItem(kit: Kit, s: ChainSessionView, isActive: boolean): RenderEl
   return listItem(kit, {
     key: `session-${s.id}`,
     glyph: isActive ? G.dot : s.end === 'handoff' ? G.chevron : G.ok,
-    tone: isActive ? 'accent' : 'muted',
+    tone: isActive ? 'info' : 'muted',
     text: spaced(kit, [`Session ${s.index}`, time, s.peakTokens > 0 && `${fmt.tokens(s.peakTokens)} peak`, !isActive && (END[s.end ?? 'other'] ?? 'ended')]),
     right: fmt.cost(s.costUsd),
     isDim: !isActive,
@@ -88,6 +89,28 @@ function runChart(kit: Kit, run: ChainRunView, threshold: number | null, window:
   )
 }
 
+/** WAIT_STEPS: how long a written handoff may wait for finite background work, in minutes (0: never waits). */
+const WAIT_STEPS = [0, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240] as const
+
+const waitWords = (minutes: number): string => (minutes === 0 ? 'Never' : minutes % 60 === 0 ? `${minutes / 60} h` : `${minutes} min`)
+
+/** The Handoff Supervisor's line: the step, how long it has stood, what holds it, and when the wait ends by itself. */
+function supervisorLine(kit: Kit, a: AutopilotView): RenderElement | null {
+  const d = a.supervisor
+  if (d === null || d.status === 'idle') return null
+  const since = d.forMs >= 60_000 ? ` for ${fmt.duration(d.forMs)}` : ''
+  const goes = d.goesOnInMs === null || a.skipWait ? '' : d.goesOnInMs > 0 ? ` · goes on in ${fmt.countdown(d.goesOnInMs)} at most, leaving it running` : ' · going on, leaving it running'
+  const tone = d.status === 'stalled' || d.status === 'needs-you' ? 'warn' : d.status === 'waiting' ? 'info' : 'muted'
+  return note(kit, `${d.phase}${since}${d.blocker === null ? '' : ` · ${d.blocker.text}`}${goes}`, 'ap-supervisor', tone)
+}
+
+/** The plan's windows in Context → Run: the status bar's 5H reading, with each window's use and reset spelled out. */
+function planRow(kit: Kit, hud: HudModel): RenderElement {
+  const five = hud.plan.five
+  const tone = five.kind === 'limited' ? 'bad' : five.kind === 'reading' && five.isHigh ? 'warn' : five.kind === 'reading' ? 'normal' : 'muted'
+  return row(kit, { key: 'run-plan', label: 'Plan usage', value: planWords(five, true) ?? G.none, valueTone: tone, subtitle: planDetail(hud.plan, kit.now) })
+}
+
 export function contextPage(kit: Kit, pane: PaneModel, hud: HudModel, chain: ChainView | undefined, ops?: OpsView): RenderElement {
   const { Box, Text } = kit.ui
   const a = pane.autopilot
@@ -125,7 +148,18 @@ export function contextPage(kit: Kit, pane: PaneModel, hud: HudModel, chain: Cha
   const current = chain?.current ?? null
   // Ready to resume sits by the handoff while Autopilot waits for the person to start the fresh context.
   const isAwaiting = a.state === 'awaiting'
-  const resume = ops === undefined ? null : resumeCard(kit, ops.resume, isAwaiting)
+  // A handoff under way (anything past armed): its card leads with what holds it and the ways out.
+  const isUnderWay = s.enabled && a.state !== 'armed' && a.state !== 'off'
+  // A written handoff that waits for work it must wait for: its ways out replace the usual actions.
+  const isWaiting = s.enabled && a.state === 'waiting-background' && a.background.some(t => t.isBlocking) && !a.skipWait
+  const isCancellable = s.enabled && (a.state === 'pending' || a.state === 'requested' || a.state === 'handoff' || a.state === 'waiting-background')
+  // Ready to resume speaks up (red and amber) only while a fresh start is in play: a handoff under way, the
+  // Cold Resume Guard armed, a watcher that may wake fresh. Otherwise "not ready" is just how a run begins.
+  const isResumeRelevant =
+    isUnderWay || (ops !== undefined && (ops.cold.isArmed || ops.watchers.some(w => (w.status === 'armed' || w.status === 'due') && w.strategy !== 'warm')))
+  const resume = ops === undefined ? null : resumeCard(kit, ops.resume, isAwaiting, isResumeRelevant)
+  // What a handoff does, in one sentence while Autopilot simply watches; the numbered steps teach it while it is off.
+  const howWords = `At ${at} Claude finishes the step it is on and writes ${s.handoffFile}. ${thirdStep}`
 
   return (
     <Box flexDirection="column">
@@ -157,30 +191,49 @@ export function contextPage(kit: Kit, pane: PaneModel, hud: HudModel, chain: Cha
 
       {card(kit, {
         key: 'ap-how',
-        title: s.enabled ? (a.background.length > 0 ? 'Handoff · waiting for background work' : 'Handoff') : 'How it works',
+        title: s.enabled ? (isWaiting ? 'Handoff · waiting for background work' : 'Handoff') : 'How it works',
         aside: s.enabled ? `at ${at}` : undefined,
         accent,
         rows: k => [
-          // A written handoff waiting for background work: each task Claude Code reports still running, and a way to end the wait.
+          // The Handoff Supervisor's look while a handoff is under way: what holds it, and since when.
+          supervisorLine(k, a),
+          // A written handoff waiting for background work: each task Claude Code reports still running, what it is, and Stop.
           ...a.background.map(t => {
             const stop = buttons(k, [{ key: `ap-stop-${t.id}`, label: 'Stop', onPress: () => kit.actions.stopTask(t.id) }], `ap-stop-wrap-${t.id}`, true)
             return row(k, {
               key: `ap-bg-${t.id}`,
               label: t.description,
-              subtitle: 'Running · the fresh context starts after it ends',
+              subtitle: `${t.classWords}${t.why === null ? '' : ` · ${t.why}`}`,
               ...(stop === null ? {} : { control: { element: stop, width: 8 } }),
             })
           }),
-          steps(k, 'ap-steps', ['Claude finishes the step it is on. No new large tasks.', `It writes handoff notes to ${s.handoffFile}.`, thirdStep], accent),
-          buttons(
-            k,
-            [
-              { key: 'ap-handoff', label: 'Hand off now', onPress: kit.actions.handoff, isHidden: s.enabled && !a.canHandoff, isPrimary: a.state === 'pending' },
-              { key: 'ap-fresh', label: 'Start fresh context', onPress: kit.actions.fresh, isPrimary: true, isHidden: !a.canFresh },
-              { key: 'ap-snooze', label: 'Later', onPress: kit.actions.snooze, isHidden: !a.canSnooze },
-            ],
-            'ap-actions',
-          ),
+          isWaiting || isUnderWay
+            ? null
+            : s.enabled
+              ? note(k, howWords, 'ap-how-line')
+              : steps(k, 'ap-steps', ['Claude finishes the step it is on. No new large tasks.', `It writes handoff notes to ${s.handoffFile}.`, thirdStep], accent),
+          isWaiting
+            ? buttons(
+                k,
+                [
+                  { key: 'ap-now', label: 'Hand off now', onPress: kit.actions.handoffNow, isPrimary: true },
+                  { key: 'ap-stop-all', label: 'Stop & hand off', onPress: () => kit.actions.stopAndHandoff() },
+                  { key: 'ap-wait', label: 'Keep waiting', onPress: kit.actions.keepWaiting },
+                  { key: 'ap-cancel', label: 'Call off', onPress: kit.actions.cancelHandoff },
+                ],
+                'ap-wait-actions',
+              )
+            : buttons(
+                k,
+                [
+                  { key: 'ap-handoff', label: 'Hand off now', onPress: kit.actions.handoff, isHidden: s.enabled && !a.canHandoff, isPrimary: a.state === 'pending' },
+                  { key: 'ap-fresh', label: 'Start fresh context', onPress: kit.actions.fresh, isPrimary: true, isHidden: !a.canFresh },
+                  { key: 'ap-snooze', label: 'Later', onPress: kit.actions.snooze, isHidden: !a.canSnooze },
+                  { key: 'ap-cancel', label: 'Call off', onPress: kit.actions.cancelHandoff, isHidden: !isCancellable },
+                ],
+                'ap-actions',
+              ),
+          isWaiting ? note(k, 'Hand off now leaves the work running: Claude Code keeps it across the clear and hands its result to the fresh context, which is told what still runs.', 'ap-wait-note') : null,
         ],
       })}
 
@@ -243,6 +296,18 @@ export function contextPage(kit: Kit, pane: PaneModel, hud: HudModel, chain: Cha
               subtitle: s.fallbackToCompact ? 'Compact instead' : 'Wait for you',
               control: switchControl(k, { key: 'ap-fallback', isOn: s.fallbackToCompact, onPress: () => u(d => void (d.autopilot.fallbackToCompact = !d.autopilot.fallbackToCompact)) }),
             }),
+          s.enabled &&
+            row(k, {
+              key: 'ap-waitmin',
+              label: 'Wait for background work',
+              subtitle: s.waitMinutes === 0 ? 'Never: finite work keeps running for the fresh context' : 'Tests, builds, renders, at most this long. Servers: never',
+              control: stepper(k, {
+                key: 'ap-waitmin',
+                display: waitWords(s.waitMinutes),
+                onDecrease: s.waitMinutes > 0 ? () => u(d => void (d.autopilot.waitMinutes = [...WAIT_STEPS].reverse().find(m => m < d.autopilot.waitMinutes) ?? 0)) : undefined,
+                onIncrease: s.waitMinutes < 240 ? () => u(d => void (d.autopilot.waitMinutes = WAIT_STEPS.find(m => m > d.autopilot.waitMinutes) ?? 240)) : undefined,
+              }),
+            }),
           s.enabled && row(k, { key: 'ap-file', label: 'Notes file', value: s.handoffFile, valueTone: 'muted' }),
         ],
       })}
@@ -260,11 +325,12 @@ export function contextPage(kit: Kit, pane: PaneModel, hud: HudModel, chain: Cha
         title: current === null ? 'This run' : `Run ${current.number}`,
         accent,
         aside: current === null ? undefined : `${current.handoffs > 0 ? `${fmt.plural(current.handoffs, 'handoff')} · ` : ''}${fmt.cost(current.costUsd)}${current.isCostPartial ? '+' : ''}`,
-        footer: 'Costs are as Claude Code reports them. Nothing is estimated.',
+        footer: 'Costs and plan usage are as Claude Code reports them. Nothing is estimated.',
         rows: k =>
           current === null
-            ? [emptyState(k, 'The run starts with the first response.', 'run-empty')]
+            ? [planRow(k, hud), emptyState(k, 'The run starts with the first response.', 'run-empty')]
             : [
+                planRow(k, hud),
                 runChart(k, current, s.enabled ? a.threshold : null, a.window),
                 ...current.sessions.map((x, i) => sessionItem(k, x, i === current.sessions.length - 1 && current.status === 'active' && x.endedAt === null)),
               ],

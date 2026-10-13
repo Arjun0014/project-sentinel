@@ -55,6 +55,20 @@ export function duration(ms: number | undefined | null): string {
   return `${Math.floor(h / 24)}d ${h % 24}h`
 }
 
+/**
+ * Time left, to the minute and never less than it is: 14 min → "14m", 2 h 14 min → "2h 14m", under a
+ * minute → "<1m". `isTight` drops the space ("2h14m") for a status bar's narrow cell.
+ */
+export function countdown(ms: number | undefined | null, isTight = false): string {
+  if (ms === undefined || ms === null || !Number.isFinite(ms) || ms < 0) return '—'
+  if (ms < 60_000) return '<1m'
+  const m = Math.ceil(ms / 60_000)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  if (h >= 48) return `${Math.floor(h / 24)}d${isTight ? '' : ' '}${h % 24}h`
+  return m % 60 === 0 ? `${h}h` : `${h}h${isTight ? '' : ' '}${m % 60}m`
+}
+
 /** A setting in minutes, as a person says it: 45 → "45 min", 120 → "2 h", 90 → "1 h 30 min". */
 export function minutes(n: number): string {
   const m = Math.max(0, Math.round(n))

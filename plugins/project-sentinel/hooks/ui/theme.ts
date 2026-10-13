@@ -111,6 +111,11 @@ export const G = {
   stepJoin: '─',
   /** The cache's time left, as a clock face emptying: full, three quarters, half, a quarter, none. */
   clock: ['○', '◔', '◑', '◕', '●'] as const,
+  /**
+   * The plan's five-hour use: a thin bar on the line's foot, used in its tone over the quietest gray.
+   * Thin, so it never reads as the context meter's solid bar, the cache's clock or the work track.
+   */
+  thin: '▂',
 } as const
 
 /** A sparkline of 0–100 values: "▁▂▄▆█". */
@@ -327,6 +332,22 @@ export function svgLevel(input: { fraction: number; tone: Tone; height?: number 
   )
 }
 
+/** The plan's five-hour use as SVG: a thin rounded bar (4 px) on a quiet track, filled in its tone. */
+export function svgThinMeter(input: { fraction: number; tone: Tone; width: number; height?: number }): string {
+  const w = Math.max(16, Math.round(input.width))
+  const h = input.height ?? 14
+  const bar = 4
+  const y = (h - bar) / 2
+  const f = Number.isFinite(input.fraction) ? Math.min(1, Math.max(0, input.fraction)) : 0
+  const fill = f > 0 ? Math.max(bar, Math.round(f * w)) : 0
+  return svgDoc(
+    w,
+    h,
+    `<rect x="0" y="${y}" width="${w}" height="${bar}" rx="2" fill="#8E8E93" fill-opacity="0.22"/>` +
+      (fill > 0 ? `<rect x="0" y="${y}" width="${fill}" height="${bar}" rx="2" fill="${SVG_COLOR[input.tone]}"/>` : ''),
+  )
+}
+
 /**
  * The context meter as SVG: a rounded bar, filled in its tone, with the
  * handoff point as an orange notch that stands proud of the bar above and
@@ -356,13 +377,13 @@ export const STATE_MARK: Record<HudState, { glyph: string; tone: Tone }> = {
   thinking: { glyph: '◌', tone: 'muted' },
   working: { glyph: '▸', tone: 'info' },
   validating: { glyph: '◎', tone: 'info' },
-  waitingUser: { glyph: '◆', tone: 'accent' },
+  waitingUser: { glyph: '◆', tone: 'warn' },
   waitingExternal: { glyph: '◷', tone: 'info' },
-  blocked: { glyph: '⊘', tone: 'warn' },
-  handoff: { glyph: '↻', tone: 'accent' },
+  blocked: { glyph: '⊘', tone: 'bad' },
+  handoff: { glyph: '↻', tone: 'info' },
   done: { glyph: '✓', tone: 'good' },
   complete: { glyph: '✓', tone: 'good' },
-  failing: { glyph: '✗', tone: 'warn' },
+  failing: { glyph: '✗', tone: 'bad' },
   sleeping: { glyph: '◷', tone: 'info' },
 }
 

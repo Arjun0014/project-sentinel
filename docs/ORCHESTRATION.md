@@ -3,7 +3,10 @@
 > **Status: released in 1.6.1** (1.6.0 was pushed, not tagged); **1.6.2** drove each part live and
 > fixed what that found. Built as described here, tested over the in-memory host and the engine
 > (`tests/ops.test.ts`, `tests/operations.test.ts`, `tests/opsui.test.ts`) and live with a real
-> model (the changelog's *Verified live* lists what was proven, and how).
+> model (the changelog's *Verified live* lists what was proven, and how). **1.7.0**
+> moved the agents to a view of their own (Activity → Agents, and a band above the status bar while
+> they run), and gave the Mission Queue a third way in: a message typed while a written handoff
+> waits, which the person sends on to the fresh context.
 
 How Project Sentinel orchestrates a long run over time: work queued for later, decisions Claude
 leaves for the person, runs parked until a result is due, the cost of coming back to a cold cache,
@@ -18,16 +21,21 @@ Everything here answers one question: **what happens next in this run, and who i
 for?** So it is one layer with one home.
 
 ```
-Activity
-  Summary · Operations · All tool calls
+Activity › Operations
+  View  Summary  [ Operations ]  Agents (2)  Tool calls
 
   Operations
     NEEDS REVIEW      what waits for the person: Claude's decisions, a watcher that needs a choice,
                       a message held back by the Cold Resume Guard
     MISSION QUEUE     work the person gave Claude for later (person → Claude)
     WATCHERS          the run parked until a time, then woken (and Claude Code's own wake-ups, read only)
-    AGENTS            what is actually running, as Claude Code reports it
+    2 agents running  one line, leading to Activity › Agents
     RUN BUDGET        optional limits on the run's cost, time and handoffs
+
+  Agents              (a view of its own while agents run or ran in the last ten minutes)
+    RUNNING NOW       each agent under its parent, a workflow's agents under their run: what it is
+                      doing, its calls, its model, its own plan when it keeps one, Stop and Message
+    EARLIER           agents that ended lately: their result, or why they stopped
 
 Context
   Autopilot · Cache (with the Cold Resume Guard) · Ready to resume · Last handoff · Run
@@ -38,7 +46,10 @@ Overview
 ```
 
 The status bar stays a HUD: it shows this layer only when it matters (`Review 2`, the run
-sleeping until a watcher wakes it, a decision blocking the run), never as a row of counters.
+sleeping until a watcher wakes it, a decision blocking the run), never as a row of counters. While
+subagents run, a band above it gives each one a line (what it is doing, for how long), or past three
+one line counting them by what they do; pressed, it opens Activity → Agents. With no agent running
+the band is gone.
 
 ## What belongs to what
 
@@ -46,7 +57,7 @@ sleeping until a watcher wakes it, a decision blocking the run), never as a row 
 | --- | --- | --- |
 | **The run** (its record in the plugin store) | `/clear`, Autopilot handoffs, a reload of the plugin, a resumed session, a watcher's sleep and wake | Mission Queue, Decision Inbox, Watchers, Run Budget, run progress |
 | **The context** (module memory, reset at a fresh context) | a reload (through `$.state`, as 1.5.0 kept the policy section) | context use, the prompt cache, what this context was told |
-| **The process** (Claude Code's own agent list) | nothing: it is read again | the agents running |
+| **The process** (Claude Code's own agent list, and Project Sentinel's agent ledger beside it) | the ledger survives a reload (through `$.state`); the list is read again | the agents running, and those that ended in the last ten minutes |
 
 A run is the work of one `claude` process, or of a session resumed into it (1.0's rule). An
 **ended run keeps its operations inert**: no timer of an ended run fires, and its queue, decisions and
@@ -63,7 +74,7 @@ works (1.5.0's rule). Every delivery happens at one of these boundaries:
 
 | Boundary | What it is | What may go out |
 | --- | --- | --- |
-| **Turn end** | Claude's turn ended cleanly (not aborted, nothing still running that brings it back) | a queued item, a decision's answer, a due watcher, as a prompt of its own |
+| **Turn end** | Claude's turn ended cleanly (not aborted, nothing still running that brings it back: a server or a watcher Claude left running is not such work, 1.7.0) | a queued item, a decision's answer, a due watcher, as a prompt of its own |
 | **Milestone done** | a milestone that was under way is marked completed, mid-turn | a queued item set *After the current milestone*, as a note with the next batch of tool results |
 | **Fresh context** | the first message of a context after Project Sentinel's own `/clear` | items set *After the handoff*, inside that context's first message |
 | **Prompt** | the person sends a message | answers to non-blocking decisions, as that prompt's context |
@@ -96,6 +107,19 @@ There is no "at 14:00" for queued work: a time is a watcher. Items can be edited
 delivered now or deleted. A sleeping run keeps its queue; at the wake, due items follow the
 watcher's check in order.
 
+**A third way in: a message typed while a handoff is under way** (1.7.0). Once Autopilot's handoff
+is written or being written, a message the person sends is not let into the old context unasked.
+Claude Code's question dialog offers *Hand off now, then give it to the fresh context* (while the
+handoff waits for background work; *Give it to the fresh context* while Claude writes the notes;
+*Start fresh now, then …* while it waits for the person), *Send it here (this context)* and *Back to
+the prompt box*. Given on, it waits in the Mission Queue *After the handoff* (at the next boundary
+instead when the handoff compacts) and goes into the fresh context's first message; Operations shows
+it meanwhile, and it can still be changed. While the fresh context is already starting (the notes
+being checked, the clear) it is carried there without asking. A message with attachments cannot be
+carried, so only *Send it here* and *Back to the prompt box* are offered for it. Short
+handoff-control words ("handoff now", "keep waiting", "cancel the handoff") are acted on instead, and
+never queued.
+
 ## Decision Inbox (Claude → person)
 
 Claude is offered one tool, `decision_request` (with Behavior → *Decisions* on, the default),
@@ -127,7 +151,8 @@ fingerprint when it parked (its turns, its milestones, its context).
 strategy), or `/cr watch in 2h S-002 result`, `/cr watch at 14:00 Check the score`. Times are read
 by a small strict grammar (minutes and hours from now; a 24-hour clock time; a 12-hour time with am
 or pm; `tomorrow`): `at 2:30` with no am or pm is ambiguous, and Project Sentinel asks which one
-rather than choose. Every watcher shows its local time and a countdown.
+rather than choose. Every watcher shows its local time and a countdown. `/cr watchers` lists them
+and opens Operations at the watchers.
 
 **Strategies:**
 
@@ -217,19 +242,32 @@ updated), the queued items and open decisions it carries, and the next action. A
 does not stop for it: it is logged, and the wake stops for the person only when the resume state is
 not healthy or the run changed.
 
-## Agent Command Center
+## Agents (Activity → Agents)
 
-What Claude Code reports, nothing else: `$.agent.list()` (id, type, description, status:
-pending, running, waiting, idle, completed, failed, killed; its parent; its name), the spawn
-(`agent.spawn`: its model, whether it runs in the background or is a fork), its loop's tool calls
-(what it is doing now), and its end (`turn.complete`: the first line of its answer, or why it
-stopped). Shown: status, type, elapsed time, current activity, model, result or failure, parent
-and child. Controls: **Stop** (Claude Code's `TaskStop`, which takes background agents and
+What Claude Code lets Project Sentinel observe, nothing else. An agent exists from its spawn
+(`agent.spawn`: its type, description, model, whether it runs in the background or is a fork, its
+parent, a workflow run's id and place): it shows at once, *starting*, before Claude Code lists it.
+Claude Code's list (`$.agent.list()`: status pending, running, waiting, idle, completed, failed,
+killed; its parent; its name; a teammate's address) then reconciles it, read every two seconds from
+any spawn while an agent is alive. An agent the list leaves out for a moment keeps its last status,
+and reads *no longer listed* only after three looks over six seconds; an end seen first outranks a
+list a moment behind. Its own loop says what it is doing (its latest tool call), how many calls, when
+it last did anything and its model; a task list or milestones it keeps in its own loop are its
+**plan**, drawn as a Work-style track. Its end (`turn.complete`) gives the first line of its answer,
+or why it stopped. A workflow's agents are never in Claude Code's list (seen live): they show from
+their spawn and their loop's events, grouped under their run, and end with it.
+
+Shown: the hierarchy (children under their parent, a workflow's agents under their run), name and
+type, model, status, elapsed time, current activity and when it last acted, calls, its plan, result
+or failure. Controls: **Stop** (Claude Code's `TaskStop`, which takes background agents and
 teammates by id) and **Message** (Claude Code's own `SendMessage` delivery, `$.session.send`, for
 agents that take messages), only where Claude Code accepts them; its refusal is shown as it words
-it. No cost per agent (Claude Code reports none), no invented status. After a reload, agents are read
-again from Claude Code; the details only this runtime saw read as not known. Guardrails says what
-Claude may start; Agents shows what runs.
+it. No percent complete made up from time or calls, no cost per agent (Claude Code reports none), no
+invented status. The view is in Activity's second row only while agents run or ran in the last ten
+minutes; Operations keeps one line leading to it, as do the agents chip, `/cr agents` and
+Guardrails. After a reload the ledger is kept (`$.state`) and the list read again; an agent first
+seen in the list after a reload shows with its start not known. Guardrails says what Claude may
+start; Agents shows what runs.
 
 ## Run Budget
 

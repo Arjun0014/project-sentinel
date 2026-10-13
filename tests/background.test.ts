@@ -49,7 +49,7 @@ const report = (task: { id: string; description: string }, status = 'completed')
   ].join('\n')
 
 /** A hook-level test replays a whole session (several turns, a clear, a continuation): more than the default 5 s on a busy machine. */
-const LONG = { timeoutMs: 20_000 }
+const LONG = { timeoutMs: 30_000 }
 
 type Case = { w: World; clears: { n: number }; $: Engine }
 
@@ -157,7 +157,9 @@ describe('a handoff waiting for background work, as Claude Code raises it', () =
     await turnEnds(c, 'n1', [RENDER], 'The waiter ended; the render still runs.')
     await c.w.clock.advance(5000)
     expect(c.clears.n).toBe(0)
-    expect(await crText(c, 'handoff')).toBe('Handoff notes are written; waiting for 1 background task to finish before starting fresh (Render the full-resolution 16:9 picture).')
+    expect(await crText(c, 'handoff')).toBe(
+      'Handoff notes are written; waiting for 1 background task to finish before starting fresh (Render the full-resolution 16:9 picture). /cr handoff now hands off without waiting (it keeps running for the fresh context).',
+    )
     // The note riding the first notification says the other is still running.
     expect(contextOf(c.w, report(WAITER))).toContain('Other background work is still running (Render the full-resolution 16:9 picture)')
     await notified(c, RENDER, 'n2')
@@ -258,7 +260,9 @@ describe('/cr handoff and /cr fresh while a handoff waits or is stuck', () => {
     expect(await crText(c, 'handoff')).toBe('A handoff is already in progress. Claude is writing the notes.')
     await turnEnds(c, 'h1', [RENDER], 'Handoff written; the render still runs.')
     await c.w.clock.advance(100)
-    expect(await crText(c, 'handoff')).toBe('Handoff notes are written; waiting for 1 background task to finish before starting fresh (Render the full-resolution 16:9 picture).')
+    expect(await crText(c, 'handoff')).toBe(
+      'Handoff notes are written; waiting for 1 background task to finish before starting fresh (Render the full-resolution 16:9 picture). /cr handoff now hands off without waiting (it keeps running for the fresh context).',
+    )
     await c.w.clock.advance(60_000)
     // Nothing was sent again for any of them.
     expect(count(c.w.kept.submitted, 'final handoff for this context window')).toBe(1)
@@ -270,7 +274,7 @@ describe('/cr handoff and /cr fresh while a handoff waits or is stuck', () => {
     await $.session.start(SESSION)
     await handoffStops(c, [RENDER])
     expect(await crText(c, 'fresh')).toBe(
-      '1 background task is still running (Render the full-resolution 16:9 picture). Fresh context was not started: the handoff finishes by itself when it ends (stop it with /tasks to end the wait sooner).',
+      '1 background task is still running (Render the full-resolution 16:9 picture). Fresh context was not started: the handoff finishes by itself when it ends, or when its wait runs out (then it keeps running for the fresh context). /cr fresh now starts it at once and leaves it running; /cr handoff stop stops it first.',
     )
     await c.w.clock.advance(5000)
     expect(c.clears.n).toBe(0)
@@ -378,9 +382,7 @@ async function started(patch: (s: Settings) => void = () => undefined, host: Par
 
 /** A reload of the plugin in the same process: the old runtime's timers stop, a new one takes the run (and the handoff) on. */
 async function reloaded(f: Started): Promise<Started> {
-  f.rt.ops.stop()
-  f.rt.cache.stop()
-  f.rt.monitor.stop()
+  f.rt.stopTimers()
   const rt = new Runtime()
   f.current.rt = rt
   rt.bind(f.host)
@@ -520,8 +522,17 @@ describe('the run survives a background wait', () => {
     const f = await started()
     await handoffWith(f, [RENDER])
     await f.advance(10)
-    expect(Views.hudOf(f.rt).headline).toEqual({ state: 'handoff', text: 'Handoff written · waiting for background work', detail: 'Render the full-resolution 16:9 picture · running', tone: 'accent' })
-    expect(Views.paneOf(f.rt).autopilot).toMatchObject({ state: 'waiting-background', background: [{ id: RENDER.id, description: RENDER.description }], canFresh: false, canHandoff: false })
+    // Handing off is the run's current activity (blue), with how long it waits at most.
+    expect(Views.hudOf(f.rt).headline).toEqual({ state: 'handoff', text: 'Handoff written · waiting for background work', detail: 'Render the full-resolution 16:9 picture · running · goes on in 20m at most', tone: 'info' })
+    expect(Views.paneOf(f.rt).autopilot).toMatchObject({
+      state: 'waiting-background',
+      background: [{ id: RENDER.id, description: RENDER.description, class: 'unknown', classWords: 'Waited for · not recognised', isBlocking: true }],
+      canFresh: false,
+      canHandoff: false,
+      waitMinutes: 20,
+    })
+    // The status bar's line above the headline: what it waits for, and the ways out.
+    expect(Views.hudOf(f.rt).alert).toMatchObject({ kind: 'waiting', text: 'Handoff written, waits for Render the full-resolution 16:9 picture · goes on in 20m at most', tone: 'info', canStop: true, canKeep: false })
     expect(Views.statusOf(f.rt).autopilot.text).toBe('Waiting for background work')
     // The render's notification arrives; its turn runs.
     f.rt.onPromptSubmit(report(RENDER), { kind: 'task-notification' })

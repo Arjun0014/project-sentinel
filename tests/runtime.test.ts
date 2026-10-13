@@ -6,13 +6,13 @@ import type { ResourcesView } from '../types'
 import { withAllowRemoved } from '../hooks/app/persist'
 import { Runtime } from '../hooks/app/runtime'
 import * as Views from '../hooks/app/views'
-import { defaultSettings, systemsOf } from '../hooks/core/settings'
+import { classicSettings, defaultSettings, systemsOf } from '../hooks/core/settings'
 import type { Settings } from '../hooks/core/settings'
 import { fakeHost, flush, typeperfLine } from './fixtures/fake-host'
 
 async function started(patch: (s: Settings) => void, options: Parameters<typeof fakeHost>[0] = {}) {
   const f = fakeHost(options)
-  const s = defaultSettings()
+  const s = classicSettings()
   patch(s)
   f.kept.store['settings.v1'] = s
   const rt = new Runtime()
@@ -282,13 +282,13 @@ describe('runtime', () => {
     expect(kept.submitted.some(t => t.includes('Context Autopilot continuation'))).toBe(true)
   })
 
-  test('a handoff waiting by choice reads calm; one that went wrong reads red', async () => {
+  test('a handoff waiting by choice reads amber (waiting for you, nothing wrong); one that went wrong reads red', async () => {
     const { rt } = await started(s => {
       s.autopilot.enabled = true
     })
     rt.autopilot = { ...rt.autopilot, state: 'awaiting', lastError: null }
-    expect(Views.hudOf(rt).alert).toMatchObject({ kind: 'awaiting', tone: 'accent' })
-    expect(Views.autopilotStatus(rt).tone).toBe('accent')
+    expect(Views.hudOf(rt).alert).toMatchObject({ kind: 'awaiting', tone: 'warn' })
+    expect(Views.autopilotStatus(rt).tone).toBe('warn')
     rt.autopilot = { ...rt.autopilot, lastError: 'the context was not cleared' }
     expect(Views.hudOf(rt).alert).toMatchObject({ kind: 'awaiting', tone: 'bad' })
     expect(Views.autopilotStatus(rt).tone).toBe('bad')

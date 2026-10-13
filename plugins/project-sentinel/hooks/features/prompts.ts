@@ -95,6 +95,11 @@ export const MILESTONES_TOOL = {
             doing: { type: 'string', description: 'While in progress or verifying: what you are doing now, a few present-tense words ("Rewriting the scheduler").' },
             evidence: { type: 'string', description: 'For verifying or completed: what showed it works, in a few words ("42 of 42 tests pass").' },
             blocker: { type: 'string', description: 'For waiting or blocked: what it waits for, in a few words ("the S-002 run to finish", "needs the API key").' },
+            outputs: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Optional, for verifying or completed: files this milestone produced that its verification covers and no editing tool wrote (generated files, renders, reports), as paths.',
+            },
           },
           required: ['title', 'status'],
         },
@@ -278,7 +283,12 @@ export function handoffPrompt(input: {
   sessionNumber: number
   /** Where the run's milestones are kept: Control Room's milestones tool by name, Claude Code's task list, or null for none. */
   planTool?: string | null
+  /** How long the handoff waits for finite background work before it goes on and leaves it running (0: never). */
+  waitMinutes?: number
+  /** Completed milestones whose verification went stale (features/evidence.ts staleText), or null. */
+  stale?: string | null
 }): string {
+  const wait = input.waitMinutes ?? 20
   const used = input.tokens === undefined ? '' : ` (${fmt.tokens(input.tokens)}${input.window ? ` of ${fmt.tokens(input.window)}` : ''} tokens used)`
   const where = input.runNumber === null ? '' : ` — run #${input.runNumber}, session ${input.sessionNumber}`
   const tool = input.planTool ?? null
@@ -300,9 +310,34 @@ export function handoffPrompt(input: {
     '   - CLAUDE.md: only for durable instructions or invariants every future session must follow. Never use it as a progress log.',
     `   - \`${input.handoffFile}\` at the project root: the prompt you would want to receive to continue this work effectively. You decide its contents from the project and its documentation.`,
     '',
+    ...(input.stale === undefined || input.stale === null ? [] : [`${input.stale} If you cannot rerun them in this turn, say in the notes that their verification is stale.`, '']),
     'Do not start new feature work in this turn. When the handoff is written, end your turn with a short summary.',
-    'If background work is still running when you end the turn (a build, a render, a test run), leave it running and say so in the notes: the fresh context starts only after it finishes and you have recorded its result.',
+    'Background work keeps running across the clear, and the fresh context is told what still runs. A server or watcher you started (a dev or preview server, a --watch) is never waited for: name it in the notes (what it serves, its port, its task id) so the fresh session reuses it instead of starting another.',
+    wait > 0
+      ? `Finite work still running when you end the turn (a build, a render, a test run): leave it running and say so in the notes. The fresh context starts after it finishes and you have recorded its result, or after ${wait} minutes at most; then it keeps running and its result reaches the fresh session instead.`
+      : 'Finite work still running when you end the turn (a build, a render, a test run): leave it running and say so in the notes; the fresh context starts at once and its result reaches the fresh session instead.',
   ].join('\n')
+}
+
+/**
+ * What a fresh context is told of the background work the old one left running (Claude Code keeps it
+ * across the clear and reports each task's end to the fresh context: seen live). Null with none.
+ */
+export function leftRunningText(tasks: readonly { id: string; description: string; class?: string }[]): string | null {
+  if (tasks.length === 0) return null
+  const services = tasks.filter(t => t.class === 'persistent')
+  const work = tasks.filter(t => t.class !== 'persistent')
+  const list = (ts: readonly { id: string; description: string }[]) => ts.map(t => `${t.description} (task ${t.id})`).join('; ')
+  const parts: string[] = []
+  if (services.length > 0) parts.push(`Still running from the previous context: ${list(services)}. ${services.length === 1 ? 'It is a long-running service' : 'They are long-running services'}: reuse ${services.length === 1 ? 'it' : 'them'}, and do not start another on the same port; stop ${services.length === 1 ? 'it' : 'them'} (TaskStop) only when no longer needed.`)
+  if (work.length > 0) parts.push(`Still running from the previous context, not waited for: ${list(work)}. ${work.length === 1 ? 'Its result arrives' : 'Their results arrive'} here as a task notification; when ${work.length === 1 ? 'it does' : 'each does'}, record the outcome in the handoff notes and the milestones.`)
+  return parts.join(' ')
+}
+
+/** After a handoff that compacted instead of clearing: the same word on what still runs, as a note with the first prompt. */
+export function leftRunningNote(tasks: readonly { id: string; description: string; class?: string }[]): string | null {
+  const text = leftRunningText(tasks)
+  return text === null ? null : `Control Room · Context Autopilot: ${text}`
 }
 
 /**
@@ -333,12 +368,19 @@ export function continuationContext(input: {
   objective?: string | null
   /** Why the previous context was cleared, when it was not a handoff ("for a watcher's fresh wake"). */
   cause?: string
+  /** Background work the old context left running (servers, work not waited for). */
+  leftRunning?: readonly { id: string; description: string; class?: string }[]
+  /** Completed milestones whose verification went stale (features/evidence.ts staleText), or null. */
+  stale?: string | null
 }): string {
   const run = input.runNumber === null ? '' : ` (Control Room run #${input.runNumber}, session ${input.sessionNumber})`
   const lines = [
     `Control Room · Context Autopilot: this is a fresh context continuing earlier work${run}. The previous context was cleared on purpose ${input.cause ?? 'after a handoff'}.`,
     `The handoff notes are in ${input.handoffPath}. Read them and the project documentation they point to before acting.`,
   ]
+  const left = leftRunningText(input.leftRunning ?? [])
+  if (left !== null) lines.push(left)
+  if (input.stale !== undefined && input.stale !== null) lines.push(input.stale)
   if (input.policies.length > 0) lines.push(`Active Control Room policies remain in force: ${input.policies.join(', ')}.`)
   const milestones = input.milestones ?? []
   const open = milestones.filter(m => m.status !== 'completed')

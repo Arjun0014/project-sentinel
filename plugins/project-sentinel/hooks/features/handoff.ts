@@ -34,7 +34,16 @@ export type HandoffRecord = {
   total: number
   /** Null until the fresh context's first turn ends. */
   continuity: Check[] | null
+  /**
+   * Background work still running as the context was cleared (1.7.0): a server or watcher (never waited
+   * for), or work the handoff stopped waiting for. Claude Code keeps it running across the clear and
+   * reports its end to the fresh context, which was told; its end is filled in when it is reported.
+   */
+  leftRunning?: LeftTask[]
 }
+
+/** One task a handoff left running, and its end once Claude Code reported it (its notification, a stop). */
+export type LeftTask = { id: string; description: string; class: 'persistent' | 'finite' | 'agent' | 'unknown'; endedAt: number | null; status: string | null }
 
 /** A short subject for a line's right-hand note. */
 const short = (text: string, max = 32): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
@@ -65,6 +74,13 @@ export type HealthFacts = {
   isClaudeMdEdited: boolean
   /** A handoff that waited for background work: how many tasks, and whether the notes were written again after the last ended. */
   background?: { tasks: number; isNotesAfter: boolean } | null
+  /** Work still running as the handoff went on: services (never waited for) and work it stopped waiting for. */
+  left?: { services: number; work: number; names: string } | null
+  /**
+   * Milestone evidence (features/evidence.ts) as the handoff leaves it: how many verified milestones keep
+   * a snapshot of their files, which of them are stale now, and the checks to run again. Null with none.
+   */
+  evidence?: { verified: number; stale: readonly string[]; rerun: readonly string[] } | null
 }
 
 /** A handoff at a clean boundary: the last milestone finished, the next not begun, and the list sent again to say so. */
@@ -126,6 +142,31 @@ export function healthOf(f: HealthFacts): Check[] {
             label: 'Background work recorded',
             state: f.background.isNotesAfter ? ('ok' as const) : ('missing' as const),
             detail: `${f.background.tasks === 1 ? '1 task' : `${f.background.tasks} tasks`} finished · ${f.background.isNotesAfter ? 'notes updated after' : 'notes not updated after'}`,
+          },
+        ]),
+    // Verified milestones whose files changed since: their verification is stale (never "wrong"); the fresh context is told what to rerun.
+    ...(f.evidence === undefined || f.evidence === null
+      ? []
+      : [
+          {
+            id: 'evidence',
+            label: 'Verification current',
+            state: f.evidence.stale.length === 0 ? ('ok' as const) : ('missing' as const),
+            detail:
+              f.evidence.stale.length === 0
+                ? `${f.evidence.verified === 1 ? '1 verified milestone' : `${f.evidence.verified} verified milestones`} unchanged`
+                : `${f.evidence.stale.length === 1 ? short(f.evidence.stale[0] ?? '', 24) : `${f.evidence.stale.length} milestones`} stale · ${f.evidence.rerun.length === 0 ? 'review' : `rerun ${f.evidence.rerun.join(', ')}`}`,
+          },
+        ]),
+    // Neither good nor missing: a fact the fresh context was told (servers to reuse, results that arrive there).
+    ...(f.left === undefined || f.left === null || f.left.services + f.left.work === 0
+      ? []
+      : [
+          {
+            id: 'leftRunning',
+            label: 'Left running',
+            state: 'none' as const,
+            detail: [f.left.services > 0 ? `${f.left.services === 1 ? '1 service' : `${f.left.services} services`}` : '', f.left.work > 0 ? `${f.left.work === 1 ? '1 task' : `${f.left.work} tasks`} not waited for` : ''].filter(Boolean).join(' · ') + ' · fresh context told',
           },
         ]),
   ]
@@ -219,7 +260,31 @@ function checksOf(raw: unknown): Check[] | null {
       detail: typeof c.detail === 'string' ? c.detail.slice(0, 80) : '',
     }))
     .filter(c => c.id !== '' && c.label !== '')
+    .slice(0, 12)
+}
+
+const CLASSES = ['persistent', 'finite', 'agent', 'unknown'] as const
+
+function leftOf(raw: unknown): LeftTask[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  return raw
+    .filter(isRecord)
+    .filter(t => typeof t.id === 'string' && typeof t.description === 'string')
+    .map(t => ({
+      id: String(t.id).slice(0, 80),
+      description: String(t.description).slice(0, 120),
+      class: CLASSES.find(c => c === t.class) ?? 'unknown',
+      endedAt: typeof t.endedAt === 'number' && Number.isFinite(t.endedAt) ? t.endedAt : null,
+      status: typeof t.status === 'string' ? t.status.slice(0, 40) : null,
+    }))
     .slice(0, 8)
+}
+
+/** A task the handoff left running ended (its notification reached the fresh context, or it was stopped): the record says so. */
+export function noteLeftEnded(record: HandoffRecord, id: string, status: string | null, at: number): HandoffRecord {
+  const left = record.leftRunning
+  if (left === undefined || !left.some(t => t.id === id && t.endedAt === null)) return record
+  return { ...record, leftRunning: left.map(t => (t.id === id && t.endedAt === null ? { ...t, endedAt: at, status } : t)) }
 }
 
 /** A stored handoff record, validated: anything malformed reads as none. */
@@ -228,6 +293,7 @@ export function handoffRecordOf(raw: unknown): HandoffRecord | null {
   const health = checksOf(raw.health)
   if (health === null || typeof raw.at !== 'number' || typeof raw.fromSession !== 'number') return null
   const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+  const left = leftOf(raw.leftRunning)
   return {
     at: raw.at,
     fromSession: raw.fromSession,
@@ -239,5 +305,6 @@ export function handoffRecordOf(raw: unknown): HandoffRecord | null {
     done: num(raw.done),
     total: num(raw.total),
     continuity: checksOf(raw.continuity),
+    ...(left === undefined ? {} : { leftRunning: left }),
   }
 }

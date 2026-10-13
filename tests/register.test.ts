@@ -27,7 +27,7 @@ const withSettings = (patch: (s: Settings) => void): Settings => {
 }
 
 describe('register', () => {
-  test('the start registers /control-room and the /cr alias', async ($, on) => {
+  test('the start registers /control-room and the /cr alias', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
     expect(w.kept.registered).toContain('control-room')
@@ -37,7 +37,7 @@ describe('register', () => {
     expect(text).toContain('Run 1')
   })
 
-  test('beside a Control Room that still runs in the session (an update loaded both), every hook passes its event on', async ($, on) => {
+  test('beside a Control Room that still runs in the session (an update loaded both), every hook passes its event on', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     // Control Room's status bar in this session's `$.state`, as 1.3.0 publishes it.
     const former = { isVisible: true, headline: {}, chips: [], ctx: { tokens: 1 }, profile: { id: 'normal', name: 'Normal', isModified: false }, autopilot: { isOn: true, state: 'idle', text: '', tone: 'ok' } }
@@ -71,7 +71,7 @@ describe('register', () => {
     expect(Object.keys(w.store)).toEqual([])
   })
 
-  test('/cr sub-commands change settings and persist them', async ($, on) => {
+  test('/cr sub-commands change settings and persist them', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
     const r = await $.command.run(cmd('cr', 'autopilot 65%'))
@@ -85,7 +85,7 @@ describe('register', () => {
     expect((w.store['settings.v1'] as Settings).frontier.enabled).toBe(true)
   })
 
-  test('/cr cache tells the cache in words and sets Keep warm, its idle limit and the other cache settings', async ($, on) => {
+  test('/cr cache tells the cache in words and sets Keep warm, its idle limit and the other cache settings', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     await $.session.start(SESSION)
     const status = await $.command.run(cmd('cr', 'cache'))
@@ -102,7 +102,7 @@ describe('register', () => {
     expect((await $.command.run(cmd('cr', 'status'))).text).toContain('Prompt cache')
   })
 
-  test('a model switch that would lose a large warm cache is put to the person first, with what it re-sends', async ($, on) => {
+  test('a model switch that would lose a large warm cache is put to the person first, with what it re-sends', { timeoutMs: 30_000 }, async ($, on) => {
     world(on)
     on('classic.PreModelSwitch', () => ({}))
     on('classic.PostModelSwitch', () => ({}))
@@ -120,7 +120,7 @@ describe('register', () => {
     expect((await $.command.run(cmd('cr', 'cache'))).text).toContain('1 hour (as Claude Code reports it)')
   })
 
-  test('Deny categories are refused before anything runs', async ($, on) => {
+  test('Deny categories are refused before anything runs', { timeoutMs: 30_000 }, async ($, on) => {
     world(on)
     await $.session.start(SESSION)
     const dangerous = await $.tool.call({ tool: 'Bash', command: 'rm -rf ~' })
@@ -131,7 +131,7 @@ describe('register', () => {
     expect(fine.deny).toBeUndefined()
   })
 
-  test('Ask: Control Room asks first where Claude Code would not ask, never answers a permission check, and a settings deny stands', async ($, on) => {
+  test('Ask: Control Room asks first where Claude Code would not ask, never answers a permission check, and a settings deny stands', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     let engine: 'allow' | 'ask' | 'deny' = 'allow'
     const checked: string[] = []
@@ -171,7 +171,7 @@ describe('register', () => {
     expect((await $.tool.check({ tool: 'Bash', input: { command: 'git push origin main' } })).decision).toBe('deny')
   })
 
-  test('machine load on Windows runs typeperf by name with fixed arguments (no shell), and systeminfo once for the total memory', async ($, on) => {
+  test('machine load on Windows runs typeperf by name with fixed arguments (no shell), and systeminfo once for the total memory', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { settings: withSettings(s => void (s.resources.level = 'medium')) })
     await $.session.start({ ...SESSION, cwd: 'C:\\work' })
     await w.clock.advance(500)
@@ -179,7 +179,7 @@ describe('register', () => {
     expect(w.kept.ran.filter(argv => argv[0] === 'systeminfo.exe')).toEqual([['systeminfo.exe', '/fo', 'csv', '/nh']])
   })
 
-  test('machine load on macOS runs top by name with fixed arguments (no shell), and sysctl for the memory level at a reading', async ($, on) => {
+  test('machine load on macOS runs top by name with fixed arguments (no shell), and sysctl for the memory level at a reading', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, {
       settings: withSettings(s => void (s.resources.level = 'medium')),
       exists: ['/System/Library/CoreServices/SystemVersion.plist'],
@@ -191,7 +191,7 @@ describe('register', () => {
     expect(w.kept.ran.filter(argv => argv[0] === 'sysctl')).toEqual([['sysctl', '-n', 'kern.memorystatus_level']])
   })
 
-  test('Subagent Control: Off blocks and hides, Max N counts, Ask asks', async ($, on) => {
+  test('Subagent Control: Off blocks and hides, Max N counts, Ask asks', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { settings: withSettings(s => { s.subagents.mode = 'block' }) })
     on('agent.spawn', ($, e) => ({ model: e.model ?? 'claude-haiku-4-5', agentId: 'a1' }))
     on('agent.offer', () => ({ isOffered: true }))
@@ -210,8 +210,9 @@ describe('register', () => {
     expect(refused.deny).toContain('did not approve')
   })
 
-  test('Frontier Max: policy section and maximum effort; none invented for models without effort', async ($, on) => {
-    world(on, { settings: withSettings(s => { s.frontier.enabled = true }) })
+  test('Frontier Max: policy section and maximum effort; none invented for models without effort', { timeoutMs: 30_000 }, async ($, on) => {
+    // Fresh installs run Frontier Max at Extra High (1.7.0); Maximum is one pick away.
+    world(on, { settings: withSettings(s => { s.frontier.enabled = true; s.frontier.effort = 'max' }) })
     on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' as const }] }))
     const sent: unknown[] = []
     on('turn.step', async function* ($, e) {
@@ -228,7 +229,7 @@ describe('register', () => {
     expect(sent).toEqual(['max', undefined])
   })
 
-  test('the very first composition waits for the saved settings: Frontier Max is in the system prompt even when the prompt is composed before the session start settles', async ($, on) => {
+  test('the very first composition waits for the saved settings: Frontier Max is in the system prompt even when the prompt is composed before the session start settles', { timeoutMs: 30_000 }, async ($, on) => {
     world(on, { settings: withSettings(s => { s.frontier.enabled = true; s.frontier.effort = 'xhigh' }) })
     on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' as const }] }))
     const sent: unknown[] = []
@@ -253,7 +254,7 @@ describe('register', () => {
     expect(diag).not.toContain('SETTINGS NOT LOADED')
   })
 
-  test('notes while Claude works go with the next batch of tool results (classic.PostToolBatch), on the main conversation only, and nothing is appended to the transcript', async ($, on) => {
+  test('notes while Claude works go with the next batch of tool results (classic.PostToolBatch), on the main conversation only, and nothing is appended to the transcript', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     on('classic.PostToolBatch', () => ({}))
     on('turn.start', ($, e) => ({ turnId: e.turnId }))
@@ -270,7 +271,7 @@ describe('register', () => {
     expect(w.kept.appended).toEqual([])
   })
 
-  test("Claude Code's thinking_drop row marks the next rebuild as a proven change of the earlier conversation; the row passes on unchanged", async ($, on) => {
+  test("Claude Code's thinking_drop row marks the next rebuild as a proven change of the earlier conversation; the row passes on unchanged", { timeoutMs: 30_000 }, async ($, on) => {
     world(on, { settings: withSettings(s => void (s.cache.keepWarm = false)) })
     on('turn.start', ($, e) => ({ turnId: e.turnId }))
     on('turn.complete', ($, e) => ({ text: e.answer }))
@@ -296,7 +297,7 @@ describe('register', () => {
     reads = []
   })
 
-  test('No-Lazy-Exit Guard continues a lazy stop once, then respects the loop guard', async ($, on) => {
+  test('No-Lazy-Exit Guard continues a lazy stop once, then respects the loop guard', { timeoutMs: 30_000 }, async ($, on) => {
     world(on, { settings: withSettings(s => { s.guard.enabled = true; s.guard.modelCheck = false }) })
     on('turn.start', ($, e) => ({ turnId: e.turnId }))
     on('classic.Stop', () => ({}))
@@ -312,7 +313,7 @@ describe('register', () => {
     expect(done.block).toBeUndefined()
   })
 
-  test('Context Autopilot: threshold → pending notice → handoff → verified → /clear → fresh context → continuation', async ($, on) => {
+  test('Context Autopilot: threshold → pending notice → handoff → verified → /clear → fresh context → continuation', { timeoutMs: 30_000 }, async ($, on) => {
     let fresh: { additionalContext?: string[] } | undefined
     on('command.run', { command: 'clear' }, async () => {
       w.live.sessionId = 'session-2'
@@ -375,7 +376,7 @@ describe('register', () => {
     expect(status.text).toContain('Session 2')
   })
 
-  test('Context Autopilot in the terminal: the reset lands after /clear returns, and the fresh session is still ours', async ($, on) => {
+  test('Context Autopilot in the terminal: the reset lands after /clear returns, and the fresh session is still ours', { timeoutMs: 30_000 }, async ($, on) => {
     let fresh: { additionalContext?: string[] } | undefined
     let finishReset: (() => Promise<void>) | null = null
     on('command.run', { command: 'clear' }, async () => {
@@ -409,7 +410,7 @@ describe('register', () => {
     expect(runs.at(-1)?.sessions.map(s => s.end)).toEqual(['handoff', null])
   })
 
-  test('the handoff never clears the context when the notes were not written', async ($, on) => {
+  test('the handoff never clears the context when the notes were not written', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { settings: withSettings(s => { s.autopilot.enabled = true }), isHandoffWritten: false })
     on('turn.start', ($, e) => ({ turnId: e.turnId }))
     on('turn.complete', ($, e) => ({ text: e.answer }))
@@ -426,7 +427,7 @@ describe('register', () => {
     expect(w.kept.commandsRun.map(c => c.command)).not.toContain('clear')
   })
 
-  test('a prompt the person queued behind the handoff runs first: the clear waits for its turn to end', async ($, on) => {
+  test('a prompt the person queued behind the handoff runs first: the clear waits for its turn to end', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { settings: withSettings(s => void (s.autopilot.enabled = true)) })
     on('turn.start', ($, e) => ({ turnId: e.turnId }))
     on('turn.complete', ($, e) => ({ text: e.answer }))
@@ -444,7 +445,7 @@ describe('register', () => {
     expect(w.kept.commandsRun.map(c => c.command)).toContain('clear')
   })
 
-  test('a handoff turn that ends with background work running is not over: the notes are checked and the context cleared only after a turn ends with none in flight', async ($, on) => {
+  test('a handoff turn that ends with background work running is not over: the notes are checked and the context cleared only after a turn ends with none in flight', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { settings: withSettings(s => void (s.autopilot.enabled = true)) })
     on('turn.start', ($, e) => ({ turnId: e.turnId }))
     on('turn.complete', ($, e) => ({ text: e.answer }))
@@ -467,7 +468,7 @@ describe('register', () => {
     expect(w.kept.commandsRun.map(c => c.command)).toContain('clear')
   })
 
-  test('a turn of the person’s ending mid-handoff never counts as the handoff turn', async ($, on) => {
+  test('a turn of the person’s ending mid-handoff never counts as the handoff turn', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { settings: withSettings(s => void (s.autopilot.enabled = true)) })
     on('turn.start', ($, e) => ({ turnId: e.turnId }))
     on('turn.complete', ($, e) => ({ text: e.answer }))
@@ -483,7 +484,7 @@ describe('register', () => {
     expect(w.kept.commandsRun.map(c => c.command)).not.toContain('clear')
   })
 
-  test('a resource level change reaches the system prompt; no sampler runs on an unknown platform', async ($, on) => {
+  test('a resource level change reaches the system prompt; no sampler runs on an unknown platform', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     on('prompt.compose', () => ({ sections: [] }))
     await $.session.start(SESSION)

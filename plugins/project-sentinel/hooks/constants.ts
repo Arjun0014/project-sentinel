@@ -26,6 +26,8 @@ export const STORE_ENTRIES = {
   quest: 'quest.v1',
   /** The prompt cache: the lifetime learned and Keep warm's verdict on itself. */
   cache: 'cache.v1',
+  /** A fresh install's first-run card (1.7.0): when it was shown, and when the person dismissed it. */
+  onboarding: 'onboarding.v1',
 } as const
 
 /** The handoff file Context Autopilot asks Claude to create or update. */
@@ -73,7 +75,7 @@ export const LIMITS = {
 } as const
 
 /** The plugin's version, as in its manifest (kept in step on release). */
-export const VERSION = '1.6.3'
+export const VERSION = '1.7.0'
 
 /** Version floor this release was verified on (Desktop 2.1.289, CLI 2.1.292). */
 export const MIN_ENGINE = '2.1.289'

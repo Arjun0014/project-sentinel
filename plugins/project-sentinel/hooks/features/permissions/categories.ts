@@ -159,9 +159,43 @@ function classifyNetwork(cmd: string, args: string[]): string | null {
   return null
 }
 
+/** Where output is thrown away or shown, not kept as a file: the null device (POSIX, cmd, PowerShell) or stdout. */
+const DISCARD = /^(?:\/dev\/null|nul|\$null|-)$/i
+
+/**
+ * The value of an output option at `args[i]`: `-o FILE`, `-sSLo FILE`, `-oFILE`, `-qO-`, `--output FILE`,
+ * `--output=FILE`. Null when `args[i]` is no such option; undefined when the option has no value.
+ */
+function outputTarget(args: string[], i: number, short: string, long: string): string | undefined | null {
+  const a = args[i]!
+  if (a === long) return args[i + 1]
+  if (a.startsWith(`${long}=`)) return a.slice(long.length + 1)
+  if (a.startsWith('--')) return null
+  // A short option takes the rest of its word, or else the next word.
+  const m = new RegExp(`^-[A-Za-z]*?${short}(.*)$`).exec(a)
+  if (m === null) return null
+  return m[1] === '' ? args[i + 1] : m[1]
+}
+
+/** Whether a fetcher keeps what it fetches in a file: an output option or a redirect naming anything but the void. */
+function writesFile(args: string[], text: string, short: string, long: string): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const target = outputTarget(args, i, short, long)
+    if (target !== null && (target === undefined || !DISCARD.test(target))) return true
+  }
+  // A redirect into a file; `2>&1` and a redirect into the null device keep nothing.
+  return [...text.matchAll(/(?:^|\s)\d?>{1,2}\s*(\S+)/g)].some(m => !DISCARD.test(m[1] ?? '') && !/^&\d$/.test(m[1] ?? ''))
+}
+
 function classifyDownload(cmd: string, args: string[], text: string): string | null {
-  if (cmd === 'curl' && (has(args, '-o', '--output', '-O', '--remote-name', '--remote-name-all', '-OJ', '-Lo', '-LO') || hasShort(args, 'O') || /\s>\s*\S/.test(text))) return 'curl download'
-  if (cmd === 'wget' && !has(args, '--spider') && !(has(args, '-O', '-qO') && args.includes('-'))) return 'wget'
+  // `-O` names the file after the URL; `-o /dev/null` (a status check: `curl -s -o /dev/null -w "%{http_code}" URL`) keeps nothing.
+  if (cmd === 'curl' && (has(args, '-O', '--remote-name', '--remote-name-all', '-OJ', '-LO') || hasShort(args, 'O') || writesFile(args, text, 'o', '--output'))) return 'curl download'
+  if (cmd === 'wget') {
+    // wget keeps a file named after the URL unless told otherwise: `--spider`, or `-O` into the void or stdout.
+    if (has(args, '--spider')) return null
+    const hasOutput = args.some((_, i) => outputTarget(args, i, 'O', '--output-document') !== null)
+    return hasOutput && !writesFile(args, text, 'O', '--output-document') ? null : 'wget'
+  }
   if ((cmd === 'invoke-webrequest' || cmd === 'iwr') && hasI(args, '-outfile', '-o')) return 'Invoke-WebRequest -OutFile'
   if (cmd === 'start-bitstransfer' || cmd === 'aria2c') return cmd
   if (cmd === 'git' && lower(gitArgs(args)[0]) === 'clone') return 'git clone'

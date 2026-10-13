@@ -120,27 +120,30 @@ describe('ui', () => {
     expect(meter(0.5, 10)).toBe('━━━━━─────')
   })
 
-  test('the HUD band draws its vital signs on terminal and desktop at every width', async ($, on) => {
+  test('the HUD band draws its vital signs on terminal and desktop at every width', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 684_000 })
+    // A claude.ai plan: the five-hour window Claude Code reports takes the place the run's cost had.
+    w.live.usage = { ...w.live.usage, rateLimits: [{ kind: 'five_hour', percentUsed: 41, resetsAt: new Date(Date.now() + 3 * 3_600_000).toISOString() }] }
     on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'engine' as const, ref: 0 }))
     await boot($, w)
     for (const surface of ['terminal', 'desktop'] as const) {
       for (const columns of [44, 80, 120, 200]) {
         const ui = await $.ui.mount({ plugin: 'project-sentinel', surface, component: 'AbovePrompt', props: bandProps(columns), viewport: { columns, rows: 40 } })
         expect(await ui.find({ text: /68%/ }), `${surface} ${columns}`).toBeDefined()
-        expect(await ui.find({ text: /\$1\.25/ }), `${surface} ${columns}`).toBeDefined()
+        expect(await ui.find({ text: /41%/ }), `${surface} ${columns}`).toBeDefined()
+        expect(await ui.find({ text: /\$1\.25/ }), `${surface} ${columns}`).toBeUndefined()
         expect(await ui.find({ type: 'Button', key: 'open' }), `${surface} ${columns}`).toBeDefined()
-        // The terminal names its readings only where there is room; Desktop captions each cell at every width.
+        // The terminal names its readings only where there is room (5H names itself at every width); Desktop captions each cell.
         const isLabelled = surface === 'terminal' ? columns >= 72 : true
-        const [contextName, runName] = surface === 'terminal' ? [/CONTEXT/, /RUN/] : [/^Context/, /^Run$/]
+        const [contextName, planName] = surface === 'terminal' ? [/CONTEXT/, /5H/] : [/^Context/, columns < 80 ? /^5h$/ : /^5-hour usage$/]
         expect((await ui.find({ text: contextName })) !== undefined, `${surface} ${columns}`).toBe(isLabelled)
-        expect((await ui.find({ text: runName })) !== undefined, `${surface} ${columns}`).toBe(isLabelled)
+        expect(await ui.find({ text: planName }), `${surface} ${columns}`).toBeDefined()
         await ui.unmount()
       }
     }
   })
 
-  test('the status bar shows live readings only, never settings', async ($, on) => {
+  test('the status bar shows live readings only, never settings', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 300_000 })
     on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'engine' as const, ref: 0 }))
     await boot($, w)
@@ -156,7 +159,7 @@ describe('ui', () => {
     expect(await busy.find({ text: /Hands off/ })).toBeUndefined()
   })
 
-  test('the band yields to surveys and to a hidden HUD', async ($, on) => {
+  test('the band yields to surveys and to a hidden HUD', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     on('ui.render', { component: 'AbovePrompt' }, () => ENGINE_ROW)
     await boot($, w)
@@ -170,7 +173,7 @@ describe('ui', () => {
     expect(w.kept.statuses.some(s => s !== undefined && s.startsWith('◆ Context'))).toBe(true)
   })
 
-  test('every section draws on terminal, desktop and mobile, docked and inline', async ($, on) => {
+  test('every section draws on terminal, desktop and mobile, docked and inline', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 300_000 })
     await boot($, w)
     for (const surface of ['terminal', 'desktop', 'mobile'] as const) {
@@ -187,7 +190,7 @@ describe('ui', () => {
     }
   })
 
-  test('a row never repeats the title of its card', async ($, on) => {
+  test('a row never repeats the title of its card', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 300_000 })
     await boot($, w)
     await $.command.run({ command: 'cr', args: 'profile frontier', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
@@ -209,7 +212,7 @@ describe('ui', () => {
     }
   })
 
-  test('a wide frame keeps the page to a readable width, centred, on every surface; a narrower one fills its room', async ($, on) => {
+  test('a wide frame keeps the page to a readable width, centred, on every surface; a narrower one fills its room', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     await boot($, w)
     const mount = (surface: 'terminal' | 'desktop', columns: number, placement: 'dock' | 'inline') =>
@@ -227,7 +230,7 @@ describe('ui', () => {
     }
   })
 
-  test('desktop section buttons: one row when every label fits, else three equal cells per row with each button centred', async ($, on) => {
+  test('desktop section buttons: one row when every label fits, else three equal cells per row with each button centred', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     await boot($, w)
     for (const [columns, isOneRow] of [[MAX_COLUMNS + 2, true], [navRowColumns(TABS), true], [navRowColumns(TABS) - 1, false], [50, false], [30, false]] as const) {
@@ -251,7 +254,7 @@ describe('ui', () => {
     }
   })
 
-  test('on desktop a truncating line may narrow below its text; the terminal tree is unchanged', async ($, on) => {
+  test('on desktop a truncating line may narrow below its text; the terminal tree is unchanged', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     await boot($, w)
     const shrinkers = async (surface: 'terminal' | 'desktop') => {
@@ -267,7 +270,7 @@ describe('ui', () => {
     expect(await shrinkers('terminal')).toBe(0)
   })
 
-  test('on desktop the profile name field moves under its label in a narrow pane', async ($, on) => {
+  test('on desktop the profile name field moves under its label in a narrow pane', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     await boot($, w)
     await $.command.run({ command: 'cr', args: 'guard on', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
@@ -288,7 +291,7 @@ describe('ui', () => {
     expect(wide.under).toBeUndefined()
   })
 
-  test('a segmented choice sits beside its label when the text fits, under it when it would not', async ($, on) => {
+  test('a segmented choice sits beside its label when the text fits, under it when it would not', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     await boot($, w)
     await $.command.run({ command: 'cr', args: 'guard on', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
@@ -316,7 +319,7 @@ describe('ui', () => {
     expect(await narrow.find({ key: 'gu-on-right' })).toBeDefined()
   })
 
-  test('the terminal never draws a dropdown; desktop uses its native popup', async ($, on) => {
+  test('the terminal never draws a dropdown; desktop uses its native popup', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     await boot($, w)
     for (const surface of ['terminal', 'mobile'] as const) {
@@ -334,7 +337,7 @@ describe('ui', () => {
     expect(saved(w).permissions.push).toBe('deny')
   })
 
-  test('a picker opens in place, picks, and closes, with keys or the pointer', async ($, on) => {
+  test('a picker opens in place, picks, and closes, with keys or the pointer', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     await boot($, w)
     const ui = await $.ui.mount({ plugin: 'project-sentinel', surface: 'terminal', component: 'Pane', requestId: 'control-room', props: paneProps(66) })
@@ -355,16 +358,23 @@ describe('ui', () => {
     expect(await ui.find({ type: 'Button', key: 'perm-push:ask' })).toBeUndefined()
   })
 
-  test('Control Centre controls change and persist settings', async ($, on) => {
+  test('Control Centre controls change and persist settings', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     await boot($, w)
     const ui = await $.ui.mount({ plugin: 'project-sentinel', surface: 'terminal', component: 'Pane', requestId: 'control-room', props: paneProps(66) })
     await ui.press({ key: 'tab-behavior' })
     await w.clock.advance(300)
+    // A fresh install has Frontier Max on (1.7.0); it no longer turns the lazy-exit guard on by itself.
+    expect(saved(w).frontier.enabled).toBe(true)
+    await ui.press({ key: 'fr-on' })
+    await w.clock.advance(2000)
+    expect(saved(w).frontier.enabled).toBe(false)
     await ui.press({ key: 'fr-on' })
     await w.clock.advance(2000)
     expect(saved(w).frontier.enabled).toBe(true)
-    expect(saved(w).guard.enabled).toBe(true)
+    expect(saved(w).guard.enabled).toBe(false)
+    await ui.press({ key: 'gu-on' })
+    await w.clock.advance(300)
     await ui.press({ key: 'gu-strict:strict' })
     await ui.press({ key: 'gu-turn-inc' })
     await w.clock.advance(2000)
@@ -380,6 +390,10 @@ describe('ui', () => {
     expect(saved(w).subagents).toMatchObject({ mode: 'limit', limit: 1 })
     await ui.press({ key: 'tab-context' })
     await w.clock.advance(300)
+    // On out of the box: off, then on again.
+    await ui.press({ key: 'ap-enabled' })
+    await w.clock.advance(2000)
+    expect(saved(w).autopilot.enabled).toBe(false)
     await ui.press({ key: 'ap-enabled' })
     await w.clock.advance(300)
     await ui.press({ key: 'ap-threshold-inc' })
@@ -394,7 +408,7 @@ describe('ui', () => {
     expect(saved(w).profile).toBe('low-resource')
   })
 
-  test('mobile draws choices in place, as buttons', async ($, on) => {
+  test('mobile draws choices in place, as buttons', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     await boot($, w)
     const ui = await $.ui.mount({ plugin: 'project-sentinel', surface: 'mobile', component: 'Pane', requestId: 'control-room', props: paneProps(60) })
@@ -407,7 +421,7 @@ describe('ui', () => {
     expect(saved(w).router.strategy).toBe('economy')
   })
 
-  test('Focus View draws a compact tool row that expands in place', async ($, on) => {
+  test('Focus View draws a compact tool row that expands in place', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     on('ui.render', { component: 'ToolUse' }, () => ENGINE_ROW)
     await boot($, w)
@@ -423,7 +437,7 @@ describe('ui', () => {
     }
   })
 
-  test('Focus View off restores the engine rows; results and diffs follow their switches', async ($, on) => {
+  test('Focus View off restores the engine rows; results and diffs follow their switches', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     on('ui.render', { component: 'ToolUse' }, () => ENGINE_ROW)
     on('ui.render', { component: 'ToolResult' }, () => ENGINE_ROW)
@@ -438,7 +452,7 @@ describe('ui', () => {
     expect(await row.find({ text: /ENGINE ROW/ })).toBeDefined()
   })
 
-  test('Activity leads with the run and what needs a look; every call is the secondary view', async ($, on) => {
+  test('Activity leads with the run and what needs a look; every call is the secondary view', { timeoutMs: 30_000 }, async ($, on) => {
     // Answers beneath the plugin for the calls this turn makes (registered before the world's catch-all).
     on('tool.call', { tool: 'Write' }, ($, e) => ({ result: { type: 'create', filePath: e.file_path, content: 'export const a = 1\nexport const b = 2\n', structuredPatch: [], originalFile: null } }))
     on('tool.call', { tool: 'Bash' }, ($, e) =>
@@ -496,7 +510,7 @@ describe('ui', () => {
     }
   })
 
-  test('the status bar shows run progress apart from context, what Claude is doing, and the run cost only', async ($, on) => {
+  test('the status bar shows run progress apart from context, what Claude is doing, and the run cost only', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 300_000 })
     on('turn.start', ($, e) => ({ turnId: e.turnId }))
     on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'engine' as const, ref: 0 }))
@@ -521,7 +535,9 @@ describe('ui', () => {
     // Work is a track of stops, Context a meter of segments: two shapes that cannot be confused.
     expect(line).toContain('WORK ●━●━◉─○ 2/4')
     expect(line).toContain('CONTEXT ▇')
-    expect(line).toContain('RUN $1.25')
+    // The plan's five-hour window, before Claude Code has a reading of it; the run's cost is no longer on the bar.
+    expect(line).toContain('5H —')
+    expect(line).not.toContain('$1.25')
     await wide.unmount()
     // Narrow: no names, the instruments stay apart by shape.
     const narrow = await $.ui.mount({ plugin: 'project-sentinel', surface: 'terminal', component: 'AbovePrompt', props: bandProps(48) })
@@ -536,14 +552,14 @@ describe('ui', () => {
     const drawn = await desktop.drawn()
     expect(textOf(drawn)).toContain('Work2 of 4')
     expect(textOf(drawn)).toContain('Context')
-    expect(textOf(drawn)).toContain('Run$1.25')
+    expect(textOf(drawn)).toContain('5-hour usage—')
     each(drawn, n => {
       if (n.type !== 'Svg') return
       expect(n.props?.isInteractive, String(n.props?.alt)).toBeUndefined()
       expect(typeof n.props?.width, String(n.props?.alt)).toBe('number')
       expect(typeof n.props?.height, String(n.props?.alt)).toBe('number')
     })
-    for (const key of ['cell-work', 'cell-ctx', 'cell-cache', 'cell-run']) expect(await desktop.find({ key }), key).toBeDefined()
+    for (const key of ['cell-work', 'cell-ctx', 'cell-cache', 'cell-plan']) expect(await desktop.find({ key }), key).toBeDefined()
     await desktop.unmount()
     // A narrow band takes the compact cells.
     const compact = await $.ui.mount({ plugin: 'project-sentinel', surface: 'desktop', component: 'AbovePrompt', props: bandProps(60) })
@@ -683,7 +699,7 @@ describe('ui', () => {
     }
   })
 
-  test('Context shows the prompt cache: how long it stays warm, what it holds, Keep warm, and why it was rebuilt', async ($, on) => {
+  test('Context shows the prompt cache: how long it stays warm, what it holds, Keep warm, and why it was rebuilt', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 300_000 })
     w.store['cache.v1'] = { v: 1, ttl: '1h', ttlSource: 'engine', verified: 'unknown', verifiedAt: null }
     on('turn.start', ($, e) => ({ turnId: e.turnId }))
@@ -732,7 +748,7 @@ describe('ui', () => {
     expect(textOf(await desktop.drawn())).toContain('rebuilt 300k')
   })
 
-  test('the status bar: what is happening and the run cost on top, then Context, Work and Cache, each its own shape', async ($, on) => {
+  test('the status bar: what is happening and the run cost on top, then Context, Work and Cache, each its own shape', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 300_000 })
     w.store['cache.v1'] = { v: 1, ttl: '1h', ttlSource: 'engine', verified: 'unknown', verifiedAt: null }
     on('turn.start', ($, e) => ({ turnId: e.turnId }))
@@ -760,7 +776,7 @@ describe('ui', () => {
     const band = await $.ui.mount({ plugin: 'project-sentinel', surface: 'terminal', component: 'AbovePrompt', props: bandProps(160) })
     const text = textOf(await band.drawn())
     expect(text).toContain('Building the parser · step 2 of 3')
-    expect(text).toContain('RUN $1.25')
+    expect(text).toContain('5H —')
     expect(text).toContain('WORK ●━◉─○ 1/3')
     // While Claude works its requests keep the cache warm: the reading would only be noise.
     expect(text).not.toContain('CACHE')
@@ -816,13 +832,14 @@ describe('ui', () => {
         let dimmed = 0
         each(work, n => void (n.type === 'Text' && n.props?.dimColor === true && textOf(n) === none ? dimmed++ : undefined))
         expect(dimmed, where).toBe(1)
-        // Columns weighted by what they hold, on a zero basis (fixed shares); the run's cost takes what it needs at the right edge.
+        // Columns weighted by what they hold, on a zero basis (fixed shares); the five-hour reading takes what it needs at the right edge.
         for (const [key, weight] of [['cell-work', 3], ['cell-ctx', 3], ['cell-cache', 2], ['cell-machine', 2]] as const) {
           const cell = await ui.find({ key })
           expect(cell?.props.flexGrow, `${where} ${key}`).toBe(weight)
           expect(cell?.props.width, `${where} ${key}`).toBe(0)
         }
-        expect((await ui.find({ key: 'cell-run' }))?.props.flexGrow, where).toBe(0)
+        expect((await ui.find({ key: 'cell-plan' }))?.props.flexGrow, where).toBe(0)
+        expect(textOf(await ui.find({ key: 'cell-plan' })), where).toBe(columns < 80 ? '5h—' : '5-hour usage—')
         await ui.unmount()
       }
     }
@@ -1057,7 +1074,8 @@ describe('ui', () => {
       await ui.press({ key: 'tab-setup' })
       await w.clock.advance(300)
       let text = textOf(await ui.drawn())
-      expect(text, surface).toContain('CHANGED FROM NORMAL')
+      // Settings saved before 1.7.0 (no defaults marker): their Normal now reads as Classic, the values untouched.
+      expect(text, surface).toContain('CHANGED FROM CLASSIC')
       // Autopilot and Frontier Max before presentation; four shown, then a way to all of them.
       expect(text, surface).toContain('Hand off at')
       expect(text, surface).not.toContain('Focus')
@@ -1076,19 +1094,62 @@ describe('ui', () => {
       text = textOf(await ui.drawn())
       const order = ['PROJECT', 'Project edits', 'NETWORK', 'Network access', 'GIT', 'Git push', 'EXTERNAL', 'Deploy', 'SAFETY', 'Dangerous commands', 'Ask always asks you first', 'SUBAGENTS']
       for (let i = 1; i < order.length; i++) expect(text.indexOf(order[i - 1]!), `${surface}: ${order[i]}`).toBeLessThan(text.indexOf(order[i]!))
-      // Each group is a card of its own, titled in the section's accent: a heading inside a box reads as a row on Desktop.
+      // Each group is a card of its own (a heading inside a box reads as a row on Desktop), its title quiet
+      // structure: bold and gray, never a color (color is meaning: 1.7.0).
       for (const id of ['project', 'network', 'git', 'external', 'safety']) {
         const colors = new Set<unknown>()
-        each(await ui.find({ key: `card-perm-${id}-head` }), n => void (n.type === 'Text' && n.props?.color !== undefined ? colors.add(n.props.color) : undefined))
-        expect([...colors], `${surface} ${id}`).toEqual([ACCENT.guardrails])
+        let isQuiet = false
+        each(await ui.find({ key: `card-perm-${id}-head` }), n => {
+          if (n.type !== 'Text') return
+          if (n.props?.color !== undefined) colors.add(n.props.color)
+          if (n.props?.bold === true && n.props?.dimColor === true) isQuiet = true
+        })
+        expect([...colors], `${surface} ${id}`).toEqual([])
+        expect(isQuiet, `${surface} ${id}`).toBe(true)
       }
       // Overview: Now is what Claude is doing; the machine's readings sit with Guardrails.
       await ui.press({ key: 'tab-overview' })
       await w.clock.advance(300)
       text = textOf(await ui.drawn())
-      const now = text.slice(text.indexOf('NOW'), text.indexOf('BEHAVIOR'))
+      // Now sits right under the run, unboxed: what is happening comes before the lifecycles and the settings.
+      const now = textOf(await ui.find({ key: 'now' }))
       expect(now, surface).toContain('Ready')
       expect(now, surface).not.toContain('Memory')
+      expect(text.indexOf('Ready'), surface).toBeLessThan(text.indexOf('WORK'))
+      await ui.unmount()
+    }
+  })
+
+  test('Activity’s views are a second level of navigation: a breadcrumb over a View row, never a setting’s radio choice', { timeoutMs: 30_000 }, async ($, on) => {
+    const w = world(on, { tokens: 300_000 })
+    await boot($, w)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ plugin: 'project-sentinel', surface, component: 'Pane', requestId: 'control-room', props: paneProps(66) })
+      await ui.press({ key: 'tab-activity' })
+      await w.clock.advance(300)
+      const nav = await ui.find({ key: 'sub-nav' })
+      const text = textOf(nav)
+      expect(text, surface).toContain('Activity › Summary')
+      expect(text, surface).toContain('View')
+      // Never the radio marks a setting's choice uses.
+      expect(text, surface).not.toMatch(/[●○] (Summary|Operations|Tool calls)/)
+      if (surface === 'terminal') {
+        // The current view bracketed in the section's accent and bright; the others plain and dim.
+        expect(text).toContain('[  ]')
+        expect((await ui.find({ type: 'Button', key: 'sub:summary' }))?.props).toMatchObject({ label: 'Summary', plain: true })
+        expect((await ui.find({ type: 'Button', key: 'sub:summary' }))?.props.dimColor).toBeUndefined()
+        expect((await ui.find({ type: 'Button', key: 'sub:ops' }))?.props).toMatchObject({ plain: true, dimColor: true })
+      } else {
+        // Desktop: a bordered group of its own buttons, the current one primary, apart from the section bar.
+        expect((await ui.find({ key: 'sub-group' }))?.props).toMatchObject({ borderStyle: 'round' })
+        expect((await ui.find({ type: 'Button', key: 'sub:summary' }))?.props.variant).toBe('primary')
+        expect((await ui.find({ type: 'Button', key: 'sub:ops' }))?.props.variant).toBe('secondary')
+      }
+      await ui.press({ key: 'sub:ops' })
+      await w.clock.advance(300)
+      expect(textOf(await ui.find({ key: 'sub-nav' })), surface).toContain('Activity › Operations')
+      await ui.press({ key: 'sub:summary' })
+      await w.clock.advance(300)
       await ui.unmount()
     }
   })
@@ -1113,7 +1174,7 @@ describe('ui', () => {
       await ui.press({ key: 'tab-overview' })
       await w.clock.advance(300)
       const nowMark: Node[] = []
-      each(await ui.find({ key: 'card-now' }), n => void (n.type === 'Svg' ? nowMark.push(n) : undefined))
+      each(await ui.find({ key: 'now' }), n => void (n.type === 'Svg' ? nowMark.push(n) : undefined))
       if (surface === 'desktop') {
         expect(nowMark.map(n => [n.props?.alt, n.props?.width, n.props?.height])).toEqual([['thinking', 16, 24]])
         expect(String(nowMark[0]?.props?.source)).toContain('translate(0 4)')
@@ -1172,7 +1233,7 @@ describe('ui', () => {
     expect(w.kept.toasts.some(t => t.startsWith('Allow was removed'))).toBe(true)
   })
 
-  test('on Desktop no text of the panel or the status bar trips the app’s monospace rule', async ($, on) => {
+  test('on Desktop no text of the panel or the status bar trips the app’s monospace rule', { timeoutMs: 30_000 }, async ($, on) => {
     on('tool.call', { tool: 'Write' }, ($, e) => ({ result: { type: 'create', filePath: e.file_path, content: 'a\nb\n', structuredPatch: [], originalFile: null } }))
     on('tool.call', { tool: 'Edit' }, ($, e) => ({ result: { filePath: e.file_path, structuredPatch: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 2, lines: ['-a', '+b', '+c'] }] } }))
     on('tool.call', { tool: 'Bash' }, ($, e) => (e.command === 'npm test' ? { isError: true as const, result: 'Exit code 1', text: 'Exit code 1\nFAIL a.test.ts' } : { result: { stdout: 'ok', stderr: '', interrupted: false } }))

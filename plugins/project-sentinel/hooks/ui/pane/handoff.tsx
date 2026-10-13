@@ -45,14 +45,19 @@ function checkItem(kit: Kit, prefix: string, c: HandoffCheckView): RenderElement
  * Sentinel starts one for Autopilot's handoff, a watcher's fresh wake and the Cold Resume Guard's
  * Start fresh; the last two only while this reads Ready.
  */
-export function resumeCard(kit: Kit, view: ResumeView, isAwaiting: boolean): RenderElement {
+/**
+ * Ready to resume. `isRelevant`: a fresh start is in play (a handoff under way, the Cold Resume Guard
+ * armed, a watcher that may wake fresh); otherwise what is missing is said quietly, in gray, since an
+ * unready resume state is simply how a run begins, not something wrong.
+ */
+export function resumeCard(kit: Kit, view: ResumeView, isAwaiting: boolean, isRelevant = true): RenderElement {
   const { Text } = kit.ui
   const carries = [view.queued > 0 ? fmt.plural(view.queued, 'queued item') : '', view.decisions > 0 ? fmt.plural(view.decisions, 'open decision') : ''].filter(Boolean).join(' · ')
   return card(kit, {
     key: 'resume',
     title: 'Ready to resume',
     accent: ACCENT.context,
-    aside: view.isHealthy ? 'Ready' : 'Not ready',
+    aside: view.isHealthy ? 'Ready' : isRelevant ? 'Not ready' : 'Not needed yet',
     footer: isAwaiting
       ? 'What the fresh context gets when you start it.'
       : 'What a fresh context would get now. A watcher’s fresh wake and the Cold Resume Guard’s Start fresh are offered only while this is ready.',
@@ -62,10 +67,12 @@ export function resumeCard(kit: Kit, view: ResumeView, isAwaiting: boolean): Ren
         : field(k, { key: 'resume-run', label: 'Run', content: <Text wrap="truncate-end">{[view.run === null ? null : `Run ${view.run}`, view.objective].filter(Boolean).join(' · ')}</Text> }),
       field(k, { key: 'resume-done', label: 'Done', content: <Text wrap="truncate-end">{view.total === 0 ? 'No milestones' : `${view.doneCount} of ${fmt.plural(view.total, 'milestone')}`}</Text> }),
       view.current === null ? null : field(k, { key: 'resume-now', label: 'Under way', content: <Text wrap="truncate-end">{view.current}</Text> }),
-      ...view.reads.map((r, i) => listItem(k, { key: `resume-read-${i}`, glyph: r.isOk ? G.ok : G.fail, tone: r.isOk ? 'good' : 'warn', text: r.label })),
+      ...view.reads.map((r, i) => listItem(k, { key: `resume-read-${i}`, glyph: r.isOk ? G.ok : isRelevant ? G.fail : G.ring, tone: r.isOk ? 'good' : isRelevant ? 'warn' : 'muted', text: r.label, isDim: !r.isOk && !isRelevant })),
       carries === '' ? null : field(k, { key: 'resume-carries', label: 'Carries', content: <Text wrap="truncate-end">{carries}</Text> }),
       view.next === null ? null : field(k, { key: 'resume-next', label: 'Next', content: <Text wrap="truncate-end">{view.next}</Text> }),
-      ...view.problems.map((p, i) => note(k, `${G.warn} ${p}`, `resume-problem-${i}`, 'warn')),
+      ...view.problems.map((p, i) => note(k, isRelevant ? `${G.warn} ${p}` : p, `resume-problem-${i}`, isRelevant ? 'warn' : 'muted')),
+      // Not a reason to hold a fresh start: the fresh context is told to rerun these checks.
+      ...view.stale.map((e, i) => listItem(k, { key: `resume-stale-${i}`, glyph: G.warn, tone: 'warn', text: e.subject, detail: e.line, right: 'verification stale', rightTone: 'warn' })),
     ],
   })
 }
@@ -89,6 +96,22 @@ export function handoffCard(kit: Kit, view: HandoffView): RenderElement {
             ? note(k, 'The context was compacted, so the work carried on in the same session.', 'handoff-compact')
             : null,
       ...(view.continuity ?? []).map(c => checkItem(k, 'continuity', c)),
+      // Finished milestones whose files changed since they were verified (live): stale, or being changed by later work.
+      ...view.evidence.map((e, i) =>
+        listItem(k, { key: `handoff-evidence-${i}`, glyph: e.status === 'stale' ? G.warn : G.wait, tone: e.status === 'stale' ? 'warn' : 'muted', text: e.subject, detail: e.line, right: e.status === 'stale' ? 'verification stale' : 'being changed', rightTone: e.status === 'stale' ? 'warn' : 'muted', isDim: e.status !== 'stale' }),
+      ),
+      // What it left running: a service to reuse, or work whose result reaches the fresh context.
+      ...view.leftRunning.map(t =>
+        listItem(k, {
+          key: `handoff-left-${t.id}`,
+          glyph: t.endedAt === null ? G.wait : t.status === 'failed' || t.status === 'killed' ? G.fail : G.ok,
+          tone: t.endedAt === null ? 'info' : t.status === 'failed' ? 'warn' : 'muted',
+          text: t.description,
+          right: t.endedAt === null ? (t.isService ? 'Service · left running' : 'Left running · result goes to the fresh context') : `${t.status ?? 'Ended'} ${fmt.clock(t.endedAt)}`,
+          rightTone: 'muted',
+          isDim: t.endedAt !== null,
+        }),
+      ),
     ],
   })
 }

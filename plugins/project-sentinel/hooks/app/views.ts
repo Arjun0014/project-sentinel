@@ -14,6 +14,7 @@ import type {
   FileChangeView,
   MissionView,
   ChainView,
+  EvidenceRowView,
   FocusModel,
   HudAlert,
   HudModel,
@@ -33,16 +34,22 @@ import type {
 import { MIN_ENGINE } from '../constants'
 import * as fmt from '../core/format'
 import { findProfile, isModified } from '../core/profiles'
+import { PERMISSION_CATEGORIES } from '../core/settings'
 import { relativeTo, shortPath } from '../core/text'
 import { readingTone } from '../ui/theme'
+import { planWords } from '../ui/hud'
 import { versionAtLeast } from '../core/version'
 import type { ActivityItem, FileChange } from '../features/activity'
-import { handoffPoint, isHandoffActive } from '../features/autopilot'
+import { backgroundWords, blockingOf, classOf, handoffPoint, isHandoffActive } from '../features/autopilot'
+import { CLASS_WORDS, isBlocking } from '../features/background'
+import { bandOf } from '../features/agents'
 import * as Chain from '../features/chain'
 import { GROUP_LABEL, GROUP_ORDER, attentionOf, groupOf, isOpen, nowOf, turnSummaryOf } from '../features/digest'
 import { companionView, moodOf } from '../features/companion'
 import { gitLine } from '../features/git'
 import { ACHIEVEMENTS, levelOf, runQuestOf } from '../features/quest'
+import { planUsageView, windowRows } from '../features/planUsage'
+import { evidenceLine } from '../features/evidence'
 import { type ValidationSummary, summarize } from '../features/validation'
 import { answerStyleLabel } from '../core/answers'
 import { LONG_CALL_MS, chipsOf, headlineOf, runNowOf, trackOf } from './headline'
@@ -72,7 +79,7 @@ const STRATEGY_NAME: Record<string, string> = { off: 'Off', balanced: 'Balanced'
  * A handoff waiting for the person: calm when they asked for it ("Wait for
  * me"), red only when something went wrong (no notes, clearing refused).
  */
-const awaitingTone = (rt: Runtime): Tone => (rt.autopilot.lastError === null ? 'accent' : 'bad')
+const awaitingTone = (rt: Runtime): Tone => (rt.autopilot.lastError === null ? 'warn' : 'bad')
 
 /** "70%" or "700k": the threshold as the person set it. */
 export function thresholdText(rt: Runtime): string {
@@ -90,16 +97,16 @@ export function autopilotStatus(rt: Runtime): StatusView {
       return { text: 'Handoff soon', tone: 'warn' }
     case 'requested':
     case 'handoff':
-      return { text: 'Writing the handoff', tone: 'accent' }
+      return { text: 'Writing the handoff', tone: 'info' }
     case 'waiting-background':
-      return { text: 'Waiting for background work', tone: 'accent' }
+      return { text: 'Waiting for background work', tone: 'info' }
     case 'verifying':
-      return { text: 'Checking the notes', tone: 'accent' }
+      return { text: 'Checking the notes', tone: 'info' }
     case 'clearing':
     case 'compacting':
-      return { text: 'Starting fresh', tone: 'accent' }
+      return { text: 'Starting fresh', tone: 'info' }
     case 'resuming':
-      return { text: 'Resuming', tone: 'accent' }
+      return { text: 'Resuming', tone: 'info' }
     case 'awaiting':
       return { text: 'Waiting for you', tone: awaitingTone(rt) }
   }
@@ -238,19 +245,52 @@ const nowLine = (rt: Runtime) => nowOf({ isTurnRunning: rt.turn.isRunning, runni
 function alertOf(rt: Runtime, ops: HudOps | null): HudAlert | null {
   const s = rt.settings
   if (rt.autopilot.state === 'awaiting') return { kind: 'awaiting', text: rt.autopilot.note, tone: awaitingTone(rt) }
+  const handoff = handoffAlertOf(rt)
+  if (handoff !== null) return handoff
   if (rt.monitor.pressure.level === 'critical' && s.resources.level !== 'off') return { kind: 'load', text: 'Your machine is under heavy load. Claude was asked to ease off.', tone: 'bad' }
   if (rt.autopilot.state === 'pending') return { kind: 'pending', text: 'Finishing this step, then handing off', tone: 'warn' }
   if (rt.turn.isRunning) return null
   const w = ops?.watcher ?? null
   if (w !== null && (w.status === 'due' || w.status === 'stale') && w.needs !== null) {
     const strategy = rt.ops.current().watchers.find(x => x.id === w.id)?.strategy ?? 'warm'
-    return { kind: 'watcher', text: `Watcher due: ${w.label} · ${w.needs}`, tone: 'accent', ref: w.id, canFresh: strategy !== 'warm' && rt.ops.resumeHealth().isHealthy }
+    return { kind: 'watcher', text: `Watcher due: ${w.label} · ${w.needs}`, tone: 'warn', ref: w.id, canFresh: strategy !== 'warm' && rt.ops.resumeHealth().isHealthy }
   }
-  if (rt.ops.held !== null) return { kind: 'held', text: 'Your message was not sent: it is kept in Control Room', tone: 'accent' }
+  if (rt.ops.held !== null) return { kind: 'held', text: 'Your message was not sent: it is kept in Control Room', tone: 'warn' }
   if (rt.ops.budgetHeld !== null) return { kind: 'budget', text: `Run budget reached: ${rt.ops.budgetHeld} waits for you`, tone: 'warn' }
   const sug = rt.ops.suggestion
   if (sug !== null) return { kind: 'suggest', text: `Claude seems to be waiting for a future result. ${suggestionWords(sug, rt.clock())}`, tone: 'info', ref: sug.id, hasTime: sug.when !== null && sug.when.kind === 'at' }
   return null
+}
+
+/** From this close to the wait's end, Keep waiting is offered beside the other ways out. */
+const KEEP_OFFERED_MS = 5 * 60_000
+
+/**
+ * A handoff the person may want to move on, with its ways out (the Handoff Supervisor's): one that
+ * waits for background work (Hand off now and leave it running, Stop & hand off, Keep waiting near
+ * the wait's end, Call off), and one whose step has not moved on (stalled). Null otherwise.
+ */
+function handoffAlertOf(rt: Runtime): HudAlert | null {
+  if (!rt.settings.autopilot.enabled) return null
+  const a = rt.autopilot
+  const d = rt.supervisor
+  // The wait's end was set by the engine's clock: measured by it.
+  const now = rt.engineTime()
+  if (a.state === 'waiting-background') {
+    const waiting = blockingOf(a.background)
+    if (waiting.length === 0 || a.skipWait) return null
+    const left = a.waitUntil === null ? '' : a.waitUntil > now ? ` · goes on in ${fmt.countdown(a.waitUntil - now)} at most` : ' · going on'
+    const isStalled = d?.status === 'stalled'
+    return {
+      kind: 'waiting',
+      text: `Handoff ${a.notesWritten === false ? 'waits' : 'written, waits'} for ${backgroundWords(waiting)}${left}`,
+      tone: isStalled ? 'warn' : 'info',
+      canStop: true,
+      canKeep: isStalled || (a.waitUntil !== null && a.waitUntil - now < KEEP_OFFERED_MS),
+    }
+  }
+  if (d === null || (d.status !== 'stalled' && d.status !== 'needs-you') || d.blocker === null || a.state === 'awaiting' || a.state === 'pending') return null
+  return { kind: 'stuck', text: `Handoff: ${d.blocker.text}`, tone: 'warn', offers: [...d.actions] }
 }
 
 export function hudOf(rt: Runtime): HudModel {
@@ -300,7 +340,15 @@ export function hudOf(rt: Runtime): HudModel {
     isAnimated: !s.ui.reducedMotion,
     companion: companionOf(rt, now, validation),
     git: rt.git === null ? null : gitLine(rt.git),
+    agentBand: bandOf(rt.ops.agentRowsNow(), rt.clock()),
+    plan: planOf(rt),
   }
+}
+
+/** The plan's windows now: `resetsAt` is wall-clock time, so they are read against the system clock. */
+function planOf(rt: Runtime): HudModel['plan'] {
+  const now = rt.clock()
+  return { five: planUsageView(rt.planUsage, now), windows: windowRows(rt.planUsage, now) }
 }
 
 /** While a watcher parks the run, the cache says what becomes of it: held warm to the wake, or left to lapse for a fresh one. */
@@ -353,7 +401,7 @@ function companionOf(rt: Runtime, now: number, validation: readonly ValidationSu
     // The orchestration layer: decisions to review look to the person; a parked run sleeps (or tends a held cache).
     isNeedingYou: (opsHud?.review ?? 0) > 0 || (opsHud?.watcher?.needs ?? null) !== null,
     sleep: opsHud?.isSleeping === true ? (opsHud.watcher?.isHeldWarm === true ? 'warm' : 'parked') : null,
-    isWaiting: rt.lastStop !== null && (rt.lastStop.background.length > 0 || rt.lastStop.wakeups.length > 0 || rt.lastStop.isQuestion) || p.blocked.length > 0 || p.waiting.length > 0,
+    isWaiting: rt.lastStop !== null && (rt.blockingInFlight().length > 0 || rt.lastStop.wakeups.length > 0 || rt.lastStop.isQuestion) || p.blocked.length > 0 || p.waiting.length > 0,
     isBusy,
     isCacheNear: cache !== null && cache.tone === 'warn' && cache.recentMiss === null,
     isRefreshing: rt.cache.state.keepWarm.lastAt !== null && now - rt.cache.state.keepWarm.lastAt < 60_000,
@@ -466,7 +514,8 @@ export function statusLineOf(hud: HudModel): string {
   if (hud.load !== null && isHigh(hud.load.ramTone)) parts.push(`RAM ${pct(hud.load.ram)}`)
   if (hud.agents.running > 0) parts.push(fmt.plural(hud.agents.running, 'agent'))
   if (hud.guard.isOn && hud.guard.continued > 0) parts.push(`Kept going ×${hud.guard.continued}`)
-  parts.push(`Run ${fmt.cost(hud.cost.runUsd ?? hud.cost.usd)}${hud.cost.isRunPartial ? '+' : ''}`)
+  const plan = planWords(hud.plan.five, false)
+  if (plan !== null) parts.push(plan)
   return parts.join(' · ')
 }
 
@@ -498,7 +547,20 @@ export function paneOf(rt: Runtime): PaneModel {
       canHandoff: rt.settings.autopilot.enabled && !isBusy,
       canFresh: canFreshOf(rt),
       canSnooze: a.state === 'pending' || a.state === 'awaiting',
-      background: a.state === 'waiting-background' ? a.background.map(t => ({ id: t.id, description: t.description })) : [],
+      background:
+        a.state === 'waiting-background'
+          ? a.background.map(t => {
+              const c = classOf(t)
+              return { id: t.id, description: t.description, class: c, classWords: CLASS_WORDS[c], why: t.why ?? null, by: t.by ?? null, isBlocking: isBlocking(c) }
+            })
+          : [],
+      supervisor:
+        rt.supervisor === null
+          ? null
+          : { status: rt.supervisor.status, phase: rt.supervisor.phase, forMs: rt.supervisor.forMs, blocker: rt.supervisor.blocker, goesOnInMs: rt.supervisor.goesOnAt === null ? null : Math.max(0, rt.supervisor.goesOnAt - rt.engineTime()), actions: [...rt.supervisor.actions] },
+      waitLeftMs: a.state === 'waiting-background' && a.waitUntil !== null ? Math.max(0, a.waitUntil - rt.engineTime()) : null,
+      skipWait: a.skipWait,
+      waitMinutes: rt.settings.autopilot.waitMinutes,
     },
     agents: {
       running: rt.agents.list
@@ -534,6 +596,7 @@ export function paneOf(rt: Runtime): PaneModel {
     nativeOutputStyle: rt.nativeOutputStyle,
     cache: rt.cache.view(rt.clock()),
     handoff: handoffOf(rt),
+    firstRun: firstRunOf(rt),
   }
 }
 
@@ -546,9 +609,28 @@ function canFreshOf(rt: Runtime): boolean {
   if (!rt.settings.autopilot.enabled || rt.turn.isRunning) return false
   const a = rt.autopilot
   if (a.state === 'awaiting') return true
-  if (a.state === 'waiting-background') return a.background.length === 0
+  // Waiting for nothing it must wait for (a server beside it never holds it): the press finishes it.
+  if (a.state === 'waiting-background') return blockingOf(a.background).length === 0
   return a.state === 'handoff' && rt.turn.kind !== 'handoff' && rt.turn.kind !== 'retry'
 }
+
+/** A fresh install's first-run card, in the live settings' words; null once dismissed, and for an existing install. */
+function firstRunOf(rt: Runtime): PaneModel['firstRun'] {
+  const o = rt.onboarding
+  if (o === null || o.dismissedAt !== null) return null
+  const s = rt.settings
+  const a = s.autopilot
+  const at = a.thresholdMode === 'percent' ? `${a.thresholdPercent}%` : fmt.tokens(a.thresholdTokens)
+  const asks = PERMISSION_CATEGORIES.filter(c => s.permissions[c] === 'ask').length
+  const denies = PERMISSION_CATEGORIES.filter(c => s.permissions[c] === 'deny').length
+  return {
+    autopilot: a.enabled ? at : null,
+    frontier: s.frontier.enabled ? (FIRST_RUN_EFFORT[s.frontier.effort] ?? 'its policy only') : null,
+    guardrails: `${asks} kinds of action ask you first, ${denies} are denied`,
+  }
+}
+
+const FIRST_RUN_EFFORT: Record<string, string> = { max: 'Maximum effort', xhigh: 'Extra High effort', high: 'High effort', keep: 'its policy only (effort left as is)' }
 
 /** The run's latest handoff, as Context shows it. */
 function handoffOf(rt: Runtime): PaneModel['handoff'] {
@@ -563,6 +645,8 @@ function handoffOf(rt: Runtime): PaneModel['handoff'] {
     health: h.health,
     continuity: h.continuity,
     isChecking: h.toSession !== null && h.continuity === null && h.toSession === index,
+    leftRunning: (h.leftRunning ?? []).map(t => ({ id: t.id, description: t.description, isService: t.class === 'persistent', endedAt: t.endedAt, status: t.status })),
+    evidence: [...evidenceRowsOf(rt).values()].filter(e => e.status !== 'rebaselined'),
   }
 }
 
@@ -629,9 +713,21 @@ export function chainOf(rt: Runtime): ChainView {
 /** Milestones shown around the work under way: a few done, the current one, a few next. */
 const PLAN_WINDOW = { done: 2, shown: 7 }
 
+/** The run's completed milestones whose evidence is not plainly current, by milestone key (features/evidence.ts). */
+export function evidenceRowsOf(rt: Runtime): Map<string, EvidenceRowView> {
+  const rows = new Map<string, EvidenceRowView>()
+  for (const s of rt.evidence().snapshots) {
+    const line = evidenceLine(s)
+    if (line === null) continue
+    rows.set(s.key, { subject: s.subject, status: s.status === 'current' ? 'rebaselined' : s.status, line })
+  }
+  return rows
+}
+
 export function missionOf(rt: Runtime): MissionView {
   const p = rt.progress()
   const tasks = rt.plan().tasks
+  const evidence = evidenceRowsOf(rt)
   let plan: MissionView['plan'] = null
   if (tasks.length > 0) {
     const done = tasks.filter(t => t.status === 'completed')
@@ -641,9 +737,10 @@ export function missionOf(rt: Runtime): MissionView {
     plan = {
       done: p.done,
       total: p.total,
-      tasks: [...shownDone, ...shownOpen].map(t => ({ subject: t.subject, status: t.status, isCurrent: t === p.current, detail: t.detail })),
+      tasks: [...shownDone, ...shownOpen].map(t => ({ subject: t.subject, status: t.status, isCurrent: t === p.current, detail: t.detail, evidence: t.status === 'completed' ? (evidence.get(t.key) ?? null) : null })),
       earlier: done.length - shownDone.length,
       later: open.length - shownOpen.length,
+      staleEarlier: done.filter(t => !shownDone.includes(t)).map(t => evidence.get(t.key)).filter((e): e is EvidenceRowView => e !== undefined && e.status === 'stale'),
     }
   }
   const totals = rt.run === null ? null : Chain.totals(rt.run, Date.now())
@@ -705,7 +802,11 @@ export function activityOf(rt: Runtime): ActivityView {
     },
     timeline: timelineOf(turnItems, turn.startedAt, turn.endedAt ?? now, now),
     quest: questOf(rt),
-    attention: attention.slice(0, 12).map(a => ({ id: a.id, kind: a.kind, title: a.title, reason: a.reason, state: a.state, attempts: a.attempts, durationMs: a.durationMs, since: a.since })),
+    attention: [
+      // Verification gone stale first: a finished milestone whose files changed since (never called wrong).
+      ...rt.staleEvidence().map(s => ({ id: `stale-${s.key}`, kind: 'stale' as const, title: s.subject, reason: evidenceLine(s), state: null, attempts: 1, durationMs: null, since: s.verifiedAt })),
+      ...attention.slice(0, 12).map(a => ({ id: a.id, kind: a.kind, title: a.title, reason: a.reason, state: a.state, attempts: a.attempts, durationMs: a.durationMs, since: a.since })),
+    ],
     validation: validation.map(v => ({
       kind: v.kind,
       label: v.label,

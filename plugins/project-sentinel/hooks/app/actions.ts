@@ -42,6 +42,10 @@ export function actionsOf(rt: Runtime): Actions {
     handoff: () => void rt.requestHandoff().then(text => rt.sayToPerson(text)),
     fresh: () => void rt.startFreshContext().then(text => rt.sayToPerson(text)),
     snooze: () => rt.snoozeAutopilot(),
+    handoffNow: () => void rt.handoffNow().then(text => rt.sayToPerson(text)),
+    stopAndHandoff: taskId => void rt.stopAndHandOff(taskId).then(text => rt.sayToPerson(text)),
+    keepWaiting: () => void rt.keepWaiting().then(text => rt.sayToPerson(text)),
+    cancelHandoff: () => rt.sayToPerson(rt.cancelHandoff()),
     stopTask: taskId => void rt.stopBackgroundTask(taskId),
     selectFile: path => rt.selectChangedFile(path),
     clearChanges: () => {
@@ -56,11 +60,14 @@ export function actionsOf(rt: Runtime): Actions {
       }),
     resetSettings: () => {
       rt.update(s => ({ ...defaultSettings(), customProfiles: s.customProfiles }))
-      rt.host?.toast('Settings reset to Normal', 3000)
+      rt.host?.toast('Settings reset to Normal (Autopilot at 70%, Frontier Max at Extra High)', 3000)
     },
     copy: (text, surface) => void rt.host?.copy(text, surface),
+    dismissOnboarding: () => rt.dismissOnboarding(),
 
     openOps: section => void rt.openOps(undefined, section),
+    openAgents: () => void rt.openActivity('agents'),
+    acceptEvidence: key => void rt.acceptEvidence(key).then(text => rt.sayToPerson(text)),
     toggleOpsRow: id => {
       const open = rt.ui.ops.expanded
       rt.ui.ops.expanded = open.includes(id) ? open.filter(x => x !== id) : [...open, id].slice(-12)

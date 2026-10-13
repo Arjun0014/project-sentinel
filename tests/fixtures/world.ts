@@ -20,6 +20,10 @@ export function world(
     samplerLines?: string[]
     /** Paths that exist (`fs.exists`); none by default. */
     exists?: string[]
+    /** Files `fs.stat` answers for (size and time), before its defaults; undefined: not one of them. */
+    stat?: (path: string) => { size: number; mtimeMs: number } | undefined
+    /** Programs `process.run` answers for (a Git command), before its defaults; undefined: not one of them. */
+    run?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined
   } = {},
 ) {
   const clock = mock.clock(on, { now: 1_000_000 })
@@ -114,6 +118,8 @@ export function world(
   on('fs.exists', ($, e) => ({ value: options.exists?.includes(posix(e.path)) ?? false }))
   on('fs.read', () => ({ deny: 'no files in this world' }))
   on('fs.stat', ($, e) => {
+    const own = options.stat?.(posix(e.path))
+    if (own !== undefined) return { value: { kind: 'file' as const, size: own.size, mtimeMs: own.mtimeMs, isLink: false } }
     if (e.path.endsWith('NEXT_SESSION_PROMPT.md')) {
       return live.isHandoffWritten
         ? { value: { kind: 'file' as const, size: 120, mtimeMs: live.notesAt ?? clock.now() + 1, isLink: false } }
@@ -135,6 +141,8 @@ export function world(
   on('process.run', ($, e, next) => {
     kept.ran.push([...e.argv])
     const answered = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    const own = options.run?.(e.argv)
+    if (own !== undefined) return { value: { exitCode: own.exitCode, stdout: own.stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     if (e.argv[0] === 'systeminfo.exe') return answered(SYSTEMINFO_10000_MB)
     if (e.argv[0] === 'sysctl') return answered('63\n')
     return next(e)

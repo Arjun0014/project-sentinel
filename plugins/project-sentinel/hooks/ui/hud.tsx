@@ -4,7 +4,7 @@
  *              ▄▀▄    ▄▀▄                                                       (Kit, when on)
  *   ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ the top edge
  *   ▸ Rewriting the cache scheduler · step 3 of 8               ▲ Tests failing   ◆ Control Room
- *     WORK ●━●━●━◉─○─○─○─○ 3/8    CONTEXT ▇▇▇▇▇▇▇▇▇▇▌▇▇▇ 48% · hands off 70%    CACHE ◕ 42m   RUN $49.55
+ *     WORK ●━●━●━◉─○─○─○─○ 3/8    CONTEXT ▇▇▇▇▇▇▇▇▇▇▌▇▇▇ 48% · hands off 70%    CACHE ◕ 42m   5H ▂▂▂▂▂▂ 63% · 2h14m
  *
  * The headline says what is happening, in words, with a mark for the state
  * (working, thinking, running a check, waiting for you or for a result,
@@ -15,9 +15,12 @@
  * WORK is a track of milestones (it carries across handoffs), CONTEXT a
  * filling meter with the handoff point as a notch (it starts over after one),
  * CACHE a clock face (shown only while it can matter: when you are away, or
- * after a costly rebuild), and the whole run's cost on the right. While a
- * watcher parks the run, WATCHER counts down to its wake (on Desktop it takes
- * the Machine cell: nothing runs, so the machine is not the story).
+ * after a costly rebuild), and on the right 5H, the plan's five-hour use as
+ * Claude Code reports it (a thin bar, the percentage, the time to its reset;
+ * nothing on an account with no five-hour window). The run's cost lives in
+ * Overview, Context → Run and the Run Budget. While a watcher parks the run,
+ * WATCHER counts down to its wake (on Desktop it takes the Machine cell:
+ * nothing runs, so the machine is not the story).
  *
  * Kit, when on, walks a lane of its own: in the terminal it stands on the
  * HUD's top edge; on Desktop it is a short animated image above the headline.
@@ -36,7 +39,7 @@ import * as fmt from '../core/format'
 import { desktopLanePx, kitStillSvg } from '../kit.client'
 import type { Kit } from './kit'
 import { clip, isNative } from './primitives'
-import { G, STATE_MARK, STOP_LOOK, clockGlyph, meterCells, scaleTrack, svgClock, svgContextMeter, svgLevel, svgStateIcon, svgWorkTrack, toneProps } from './theme'
+import { G, STATE_MARK, STOP_LOOK, clockGlyph, meterCells, scaleTrack, svgClock, svgContextMeter, svgLevel, svgStateIcon, svgThinMeter, svgWorkTrack, toneProps } from './theme'
 
 /** The watcher that parks the run, while it sleeps: its countdown is an instrument of its own. */
 const sleepingWatcher = (hud: HudModel): NonNullable<NonNullable<HudModel['ops']>['watcher']> | null =>
@@ -120,6 +123,14 @@ function meterSpans(fraction: number, marker: number | null, tone: Tone, width: 
   )
 }
 
+/** The plan's five-hour meter in the terminal: a thin bar, the used part in its tone, the rest the quietest gray. */
+export function thinMeterSpans(fraction: number, tone: Tone, width: number): Span[] {
+  const w = Math.max(2, Math.floor(width))
+  const f = Number.isFinite(fraction) ? Math.min(1, Math.max(0, fraction)) : 0
+  const filled = f > 0 ? Math.max(1, Math.round(f * w)) : 0
+  return merged(Array.from({ length: w }, (_, i): Span => (i < filled ? { text: G.thin, tone } : { text: G.thin, isTrack: true })))
+}
+
 /** The work track in the terminal: ●━●━◉─○, done in the work color, the stretch to come dim. */
 export function trackSpans(stops: readonly TrackStop[]): Span[] {
   const out: Span[] = []
@@ -170,7 +181,7 @@ export function hudSegments(hud: HudModel, tier: Tier, surface: Kit['surface'] =
     if (event !== null) notes.push(event)
     else if (tier.notes && marker !== null && hud.autopilot.isOn) notes.push(`hands off ${Math.round(marker * 100)}%`)
     if (tier.notes && hud.session.index > 1) notes.push(`session ${hud.session.index}`)
-    const after: Span[] = [pct, ...(notes.length === 0 ? [] : [{ text: ` · ${notes.join(' · ')}`, isDim: event === null, tone: event === null ? undefined : 'accent' } as Span])]
+    const after: Span[] = [pct, ...(notes.length === 0 ? [] : [{ text: ` · ${notes.join(' · ')}`, isDim: event === null, tone: event === null ? undefined : 'info' } as Span])]
     if (isSvg) {
       const px = tier.meter * CELL_PX + 24
       segments.push({ key: 'ctx', priority: 0, side: 'left', spans: label(tier, 'CONTEXT'), graphic: { source: svgContextMeter({ fraction, marker, tone, width: px, height: 14 }), cells: Math.ceil(px / CELL_PX), alt: `Context ${ctx.pct}% used`, height: 14 }, after })
@@ -205,15 +216,102 @@ export function hudSegments(hud: HudModel, tier: Tier, surface: Kit['surface'] =
     )
   }
 
-  // RUN: the whole run's cost, on the right.
-  const run = hud.cost.runUsd ?? hud.cost.usd
-  segments.push({
-    key: 'run',
-    priority: 1,
-    side: 'right',
-    spans: [...label(tier, 'RUN'), { text: `${fmt.cost(run)}${run !== null && hud.cost.isRunPartial ? '+' : ''}`, isDim: run === null, isBold: run !== null }],
-  })
+  // 5H: the plan's five-hour window, on the right; nothing where the account has none.
+  const plan = planSegment(hud.plan.five, tier, isSvg)
+  if (plan !== null) segments.push(plan)
   return segments
+}
+
+/**
+ * Every plan window in a line, for /cr status and Context → Run: "5-hour 63%, resets 14:20 (in 2h 14m)
+ * · 7-day 18%, resets Oct 14 23:00". As Claude Code reports them; nothing is estimated.
+ */
+export function planDetail(plan: HudModel['plan'], now: number): string {
+  const five = plan.five
+  if (five.kind === 'absent') return 'No five-hour window on this account (an API key, or a plan without one)'
+  if (five.kind === 'pending') return 'No reading yet: it comes with the first response'
+  const resets = (at: number | null, leftMs: number | null) => (at === null ? '' : `, resets ${fmt.when(at, now)}${leftMs === null ? '' : ` (in ${fmt.countdown(leftMs)})`}`)
+  const parts = plan.windows.map(w => (w.isReset ? `${w.name} reset at ${fmt.when(w.resetsAt, now)}, no reading of the new window yet` : `${w.name} ${fmt.percent(w.percent)}${resets(w.resetsAt, w.leftMs)}`))
+  if (five.kind === 'limited') {
+    const which = five.window === 'seven_day' ? '7-day limit reached' : five.window === null ? 'A request was refused on the rate limit' : '5-hour limit reached'
+    return [`${which}${resets(five.resetsAt, five.leftMs)}`, ...parts.filter(p => !(five.window === 'five_hour' && p.startsWith('5-hour')))].join(' · ')
+  }
+  return parts.join(' · ')
+}
+
+/**
+ * The five-hour window in a few words, as the status line and the terminal's status bar say it:
+ * "5H 63% · 2h14m", "5H reset · new window", "5H limit · 2h14m", "5H —" before a reading; nothing
+ * where the account has no five-hour window. `isShort` drops the reset's second half.
+ */
+export function planWords(five: HudModel['plan']['five'], isShort: boolean): string | null {
+  switch (five.kind) {
+    case 'absent':
+      return null
+    case 'pending':
+      return '5H —'
+    case 'reset':
+      return isShort ? '5H reset' : '5H reset · new window'
+    case 'reading':
+      return `5H ${fmt.percent(five.percent)}${five.leftMs === null ? '' : ` · ${fmt.countdown(five.leftMs, true)}`}`
+    case 'limited': {
+      const left = five.leftMs === null ? '' : ` · ${fmt.countdown(five.leftMs, true)}`
+      return five.window === 'seven_day' ? `7D limit${left}` : five.window === null ? `Rate limited${left}` : `5H limit${left}`
+    }
+  }
+}
+
+/** The cells of the five-hour meter: a short bar where the readings carry their names, none in the leanest rows. */
+const PLAN_METER = 6
+
+/** What the five-hour reading says to a screen reader (Desktop's image, the plain text). */
+export function planAlt(five: HudModel['plan']['five']): string {
+  switch (five.kind) {
+    case 'pending':
+      return 'Five-hour plan usage: no reading yet'
+    case 'absent':
+      return 'No five-hour plan limit on this account'
+    case 'reset':
+      return 'Five-hour plan window reset; no reading of the new window yet'
+    case 'reading':
+      return `Five-hour plan usage ${fmt.percent(five.percent)}${five.leftMs === null ? '' : `, resets in ${fmt.countdown(five.leftMs)}`}`
+    case 'limited':
+      return `${five.window === 'seven_day' ? 'Seven-day plan limit' : five.window === null ? 'Rate limit' : 'Five-hour plan limit'} reached${five.leftMs === null ? '' : `, resets in ${fmt.countdown(five.leftMs)}`}`
+  }
+}
+
+/**
+ * The status bar's 5H reading: "5H ▂▂▂▂▂▂ 63% · 2h14m" (the bar only where the readings carry their
+ * names), "5H reset · new window" once the window has reset and no response has read the new one,
+ * "5H limit · 2h14m" in red at the limit (the one reading that never drops for room), "5H —" before
+ * the first response. Null on an account with no five-hour window.
+ */
+function planSegment(five: HudModel['plan']['five'], tier: Tier, isSvg: boolean): Segment | null {
+  const name: Span = { text: '5H ', isDim: true }
+  const left = (ms: number | null, tone?: Tone): Span[] => (ms === null ? [] : [{ text: ` · ${fmt.countdown(ms, true)}`, isDim: tone === undefined, tone }])
+  switch (five.kind) {
+    case 'absent':
+      return null
+    case 'pending':
+      return { key: 'plan', priority: 1, side: 'right', spans: [name, { text: G.none, isDim: true }] }
+    case 'reset':
+      return { key: 'plan', priority: 1, side: 'right', spans: [name, { text: tier.notes ? 'reset · new window' : 'reset', isDim: true }] }
+    case 'limited': {
+      const word: Span = { text: five.window === 'seven_day' ? '7D limit' : five.window === null ? 'Rate limited' : 'limit', tone: 'bad', isBold: true }
+      return { key: 'plan', priority: 0, side: 'right', spans: [...(five.window === 'five_hour' ? [name] : []), word, ...left(five.leftMs, 'bad')] }
+    }
+    case 'reading': {
+      const tone: Tone = five.isHigh ? 'warn' : 'info'
+      const value: Span = { text: ` ${fmt.percent(five.percent)}`, tone: five.isHigh ? 'warn' : undefined, isBold: true }
+      if (!tier.labels) return { key: 'plan', priority: 1, side: 'right', spans: [{ text: '5H', isDim: true }, value, ...left(five.leftMs)] }
+      const fraction = five.percent / 100
+      if (isSvg) {
+        const px = PLAN_METER * CELL_PX
+        return { key: 'plan', priority: 1, side: 'right', spans: [name], graphic: { source: svgThinMeter({ fraction, tone, width: px, height: 14 }), cells: PLAN_METER, alt: planAlt(five), height: 14 }, after: [value, ...left(five.leftMs)] }
+      }
+      return { key: 'plan', priority: 1, side: 'right', spans: [name, ...thinMeterSpans(fraction, tone, PLAN_METER), value, ...left(five.leftMs)] }
+    }
+  }
 }
 
 /** A track from counts alone (a stored plan without statuses): done, the one under way, the rest. */
@@ -300,8 +398,8 @@ function chipsThatFit(chips: readonly HudChip[], room: number): HudChip[] {
   return out
 }
 
-/** The Operations card a chip opens at: pressed, Agents 2 shows the agents, not the top of Operations. */
-const CHIP_SECTION: Record<string, string> = { review: 'ops-review', queued: 'ops-queue', watcher: 'ops-watchers', agents: 'ops-agents', budget: 'ops-budget' }
+/** The Operations card a chip opens at: pressed, Review 2 shows the decisions, not the top of Operations. */
+const CHIP_SECTION: Record<string, string> = { review: 'ops-review', queued: 'ops-queue', watcher: 'ops-watchers', budget: 'ops-budget' }
 
 /**
  * A chip: its mark in its tone, then its words. One that `opens` is a control: pressed, it opens
@@ -313,11 +411,12 @@ function chipEl(kit: Kit, chip: HudChip): RenderElement {
   const { Box, Text, Button } = kit.ui
   const mark = chip.key === 'failing' ? G.fail : chip.tone === 'bad' || chip.tone === 'warn' ? G.warn : chip.key === 'quest' ? G.star : chip.key === 'watcher' ? G.wait : G.dot
   const markEl = <Text key={`chip-${chip.key}-mark`} {...toneProps(chip.tone)}>{`${mark} `}</Text>
-  if (chip.opens === 'ops') {
+  if (chip.opens !== undefined) {
+    const onPress = chip.opens === 'agents' ? () => kit.actions.openAgents() : () => kit.actions.openOps(CHIP_SECTION[chip.key])
     return (
       <Box key={`chip-${chip.key}-box`} flexDirection="row" flexShrink={0}>
         {markEl}
-        <Button key={`chip-${chip.key}`} label={chip.text} plain onPress={() => kit.actions.openOps(CHIP_SECTION[chip.key])} />
+        <Button key={`chip-${chip.key}`} label={chip.text} plain onPress={onPress} />
       </Box>
     )
   }
@@ -369,7 +468,7 @@ function headlineRow(kit: Kit, hud: HudModel): RenderElement {
   )
 }
 
-/** The instruments: Work, Context and Cache on the left, the run's cost on the right. */
+/** The instruments: Work, Context and Cache on the left, the plan's five-hour use on the right. */
 function instrumentsRow(kit: Kit, hud: HudModel): RenderElement {
   const { Box } = kit.ui
   const room = Math.max(10, kit.columns - INDENT)
@@ -414,6 +513,23 @@ export function alertActions(kit: Kit, alert: NonNullable<HudModel['alert']>): A
         { key: 'fresh', label: 'Start fresh', onPress: a.fresh, isPrimary: true },
         { key: 'snooze', label: 'Later', onPress: a.snooze },
       ]
+    // A written handoff waiting for background work: the ways out, never only words.
+    case 'waiting':
+      return [
+        { key: 'handoff-go', label: 'Hand off now', onPress: a.handoffNow, isPrimary: true },
+        ...(alert.canStop === true ? [{ key: 'handoff-stop', label: 'Stop & hand off', onPress: () => a.stopAndHandoff() }] : []),
+        ...(alert.canKeep === true ? [{ key: 'handoff-wait', label: 'Keep waiting', onPress: a.keepWaiting }] : []),
+        { key: 'handoff-cancel', label: 'Call off', onPress: a.cancelHandoff },
+      ]
+    case 'stuck': {
+      const offers = alert.offers ?? []
+      const out: AlertAction[] = []
+      if (offers.includes('start-fresh')) out.push({ key: 'stuck-fresh', label: 'Start fresh', onPress: a.fresh, isPrimary: true })
+      if (offers.includes('handoff-now')) out.push({ key: 'stuck-now', label: 'Hand off now', onPress: a.handoffNow, isPrimary: out.length === 0 })
+      if (offers.includes('hand-off')) out.push({ key: 'stuck-again', label: 'Hand off again', onPress: a.handoff, isPrimary: out.length === 0 })
+      if (offers.includes('cancel')) out.push({ key: 'stuck-cancel', label: 'Call off', onPress: a.cancelHandoff })
+      return out
+    }
     case 'watcher':
       return [
         { key: 'watch-check', label: 'Check now', onPress: () => a.watchCheck(ref), isPrimary: true },
@@ -445,7 +561,7 @@ export function alertActions(kit: Kit, alert: NonNullable<HudModel['alert']>): A
   }
 }
 
-const ALERT_MARK: Record<NonNullable<HudModel['alert']>['kind'], string> = { pending: G.warn, awaiting: G.dot, load: G.warn, watcher: G.wait, held: G.warn, budget: G.warn, suggest: G.wait }
+const ALERT_MARK: Record<NonNullable<HudModel['alert']>['kind'], string> = { pending: G.warn, awaiting: G.dot, waiting: G.wait, stuck: G.warn, load: G.warn, watcher: G.wait, held: G.warn, budget: G.warn, suggest: G.wait }
 
 /** What needs the person now, on a line of its own above, with its actions. */
 function alertLine(kit: Kit, alert: NonNullable<HudModel['alert']>): RenderElement {
@@ -468,6 +584,36 @@ function alertLine(kit: Kit, alert: NonNullable<HudModel['alert']>): RenderEleme
           <Button key={a.key} label={a.label} variant={a.isPrimary === true ? 'primary' : 'secondary'} onPress={a.onPress} />
         ))}
       </Box>
+    </Box>
+  )
+}
+
+/**
+ * The agent band, above everything else and only while subagents run: one line per agent (what it is
+ * doing, for how long, its plan's count when it keeps one), or past three one line counting them by what
+ * they do. Each line is a control: pressed, it opens Activity → Agents. Gone when no agent runs.
+ */
+function agentBand(kit: Kit, hud: HudModel): RenderElement | null {
+  const band = hud.agentBand
+  if (band === null) return null
+  const { Box, Text, Button } = kit.ui
+  const lineOf = (key: string, label: string, isStarting: boolean) => (
+    <Box key={`band-${key}`} flexDirection="row" alignItems="center" {...clip(kit)}>
+      <Box width={INDENT} flexShrink={0}>
+        <Text {...toneProps('info')}>{isStarting ? G.ring : G.run}</Text>
+      </Box>
+      <Box flexShrink={1} {...clip(kit)}>
+        <Button key={`band-${key}-open`} label={label} plain onPress={kit.actions.openAgents} />
+      </Box>
+    </Box>
+  )
+  const rows =
+    band.summary !== null
+      ? [lineOf('all', `${band.summary} ${G.chevron}`, false)]
+      : band.lines.map(l => lineOf(l.id, [l.name, l.doing, l.plan === null ? null : `plan ${l.plan}`, l.elapsedMs === null ? null : fmt.duration(l.elapsedMs)].filter((p): p is string => p !== null && p !== '').join(' · '), l.status === 'starting' || l.status === 'pending'))
+  return (
+    <Box key="hud-agents" flexDirection="column">
+      {rows}
     </Box>
   )
 }
@@ -514,11 +660,11 @@ function edgeRow(kit: Kit, hud: HudModel, hasLane: boolean): RenderElement | nul
 // Desktop and mobile: the same readings laid out by the surface, not by counted cells.
 //
 //   (▸) Running tests · step 8 of 10                                         ▲ 1 issue   [◆ Control Room]
-//   Work                     Context · hands off at 80%     Cache              Machine              Run
-//   ●━●━◉─○─○  2 of 10       ▬▬▬▬▬▬▬▬┃▬▬▬  24%              ◔ warm · 345k      CPU ▮ 34%  RAM ▮ 85%   $43.00
+//   Work                     Context · hands off at 80%     Cache              Machine              5-hour usage
+//   ●━●━◉─○─○  2 of 10       ▬▬▬▬▬▬▬▬┃▬▬▬  24%              ◔ warm · 345k      CPU ▮ 34%  RAM ▮ 85%   ▂▂▂ 63% · 2h14m
 //
 // Each reading is a column weighted by what it holds (Work and Context wider, Cache and Machine
-// narrower; the run's cost takes what it needs at the right edge), on a zero basis, so the columns
+// narrower; the plan's five-hour use takes what it needs at the right edge), on a zero basis, so the columns
 // never drift as values change and no cell is left with a hole. Every reading keeps its column, a
 // quiet `—` standing in for one with nothing yet. Width decides the detail: three tiers, each sized
 // so every cell fits (from about 500 pixels to a full window). Every graphic is an image of a fixed
@@ -544,8 +690,14 @@ const PITCH: Record<CellTier, number> = { compact: 12, medium: 14, wide: 16 }
 /** CSS pixels per column, on the low side (Desktop's text is about 8): graphics sized by it always fit their column. */
 const PX_PER_COLUMN = 7.5
 
-/** Columns the row spends outside the weighted cells: four gaps of three, and the run's cost. */
-const ROW_OVERHEAD = 19
+/**
+ * Columns the row spends outside the weighted cells: four gaps of three, and the five-hour reading at
+ * the right edge (its thin bar and "63% · 2h14m"; "63%" alone in the compact tier).
+ */
+const ROW_OVERHEAD: Record<CellTier, number> = { compact: 21, medium: 30, wide: 30 }
+
+/** The five-hour bar's width in pixels at each tier. */
+const PLAN_PX: Record<CellTier, number> = { compact: 24, medium: 32, wide: 40 }
 
 /**
  * The graphics' sizes for a width: each fills its column (its weight's share of the row) less the
@@ -553,7 +705,7 @@ const ROW_OVERHEAD = 19
  * They depend on the width alone, never on the values, so nothing drifts as readings change.
  */
 export function graphicsFor(columns: number, tier: CellTier): { stops: number; pitch: number; meter: number } {
-  const share = Math.max(0, columns - ROW_OVERHEAD) / (WEIGHT.work + WEIGHT.ctx + WEIGHT.cache + WEIGHT.machine)
+  const share = Math.max(0, columns - ROW_OVERHEAD[tier]) / (WEIGHT.work + WEIGHT.ctx + WEIGHT.cache + WEIGHT.machine)
   const pitch = PITCH[tier]
   // Work: the track, a gap and "12 of 16" (or "2/10"); Context: the meter, a gap and "100%".
   const workPx = WEIGHT.work * share * PX_PER_COLUMN - (tier === 'wide' ? 10 : 6) * PX_PER_COLUMN
@@ -619,7 +771,7 @@ export function hudCells(hud: HudModel, columns: number): Cell[] {
     // The handoff point is the meter's notch; the wide tier also says it in words.
     const note: Span[] =
       event !== null
-        ? [{ text: ` · ${event}`, tone: 'accent' }]
+        ? [{ text: ` · ${event}`, tone: 'info' }]
         : marker !== null && hud.autopilot.isOn && tier === 'wide'
           ? [{ text: ` · hands off at ${Math.round(marker * 100)}%`, isDim: true }]
           : []
@@ -682,15 +834,44 @@ export function hudCells(hud: HudModel, columns: number): Cell[] {
     })
   }
 
-  const run = hud.cost.runUsd ?? hud.cost.usd
-  cells.push({
-    key: 'run',
-    caption: caption('Run'),
-    parts: [{ key: 'v', value: [{ text: `${fmt.cost(run)}${run !== null && hud.cost.isRunPartial ? '+' : ''}`, isDim: run === null, isBold: run !== null }] }],
-    weight: 0,
-    isEnd: true,
-  })
+  cells.push({ ...planCell(hud.plan.five, tier), weight: 0, isEnd: true })
   return cells
+}
+
+/**
+ * The plan's five-hour use at the right edge: its thin bar, the percentage and the time to its reset
+ * (the percentage alone when compact); the reset and the limit in words; "—" before a reading, under
+ * "Plan usage" on an account with no five-hour window.
+ */
+function planCell(five: HudModel['plan']['five'], tier: CellTier): Omit<Cell, 'weight' | 'isEnd'> {
+  const caption: Span[] = [{ text: tier === 'compact' ? '5h' : '5-hour usage', isDim: true }]
+  const left = (ms: number | null, tone?: Tone): Span[] => (ms === null || tier === 'compact' ? [] : [{ text: ` · ${fmt.countdown(ms, true)}`, isDim: tone === undefined, tone }])
+  switch (five.kind) {
+    case 'absent':
+      return { key: 'plan', caption: [{ text: 'Plan usage', isDim: true }], parts: [{ key: 'v', value: none() }] }
+    case 'pending':
+      return { key: 'plan', caption, parts: [{ key: 'v', value: none() }] }
+    case 'reset':
+      return { key: 'plan', caption, parts: [{ key: 'v', value: none(tier === 'compact' ? 'reset' : 'reset · new window') }] }
+    case 'limited': {
+      const word = five.window === 'seven_day' ? '7-day limit' : five.window === null ? 'rate limited' : 'limit reached'
+      return { key: 'plan', caption, parts: [{ key: 'v', value: [{ text: tier === 'compact' && five.window === 'five_hour' ? 'limit' : word, tone: 'bad', isBold: true }, ...left(five.leftMs, 'bad')] }] }
+    }
+    case 'reading': {
+      const width = PLAN_PX[tier]
+      return {
+        key: 'plan',
+        caption,
+        parts: [
+          {
+            key: 'v',
+            graphic: { source: svgThinMeter({ fraction: five.percent / 100, tone: five.isHigh ? 'warn' : 'info', width, height: 14 }), alt: planAlt(five), width, height: 14 },
+            value: [{ text: fmt.percent(five.percent), tone: five.isHigh ? 'warn' : undefined, isBold: true }, ...left(five.leftMs)],
+          },
+        ],
+      }
+    }
+  }
 }
 
 function cellsRow(kit: Kit, hud: HudModel): RenderElement {
@@ -703,7 +884,7 @@ function cellsRow(kit: Kit, hud: HudModel): RenderElement {
         <Box
           key={`cell-${c.key}`}
           flexDirection="column"
-          // Weighted columns on a zero basis: fixed shares that never drift; the run's cost takes what it needs at the right edge.
+          // Weighted columns on a zero basis: fixed shares that never drift; the five-hour reading takes what it needs at the right edge.
           flexGrow={c.isEnd === true ? 0 : c.weight}
           flexShrink={c.isEnd === true ? 0 : 1}
           width={c.isEnd === true ? undefined : 0}
@@ -734,6 +915,7 @@ function nativeHud(kit: Kit, hud: HudModel, stage: RenderElement | null): Render
   const { Box } = kit.ui
   return (
     <Box flexDirection="column" rowGap={1}>
+      {agentBand(kit, hud)}
       {hud.alert === null ? null : alertLine(kit, hud.alert)}
       {laneRow(kit, hud, stage)}
       {headlineRow(kit, hud)}
@@ -748,6 +930,7 @@ export function hudView(kit: Kit, hud: HudModel, stage: RenderElement | null = n
   const lane = laneRow(kit, hud, stage)
   return (
     <Box flexDirection="column">
+      {agentBand(kit, hud)}
       {hud.alert === null ? null : alertLine(kit, hud.alert)}
       {lane}
       {edgeRow(kit, hud, lane !== null)}

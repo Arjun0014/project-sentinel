@@ -13,8 +13,28 @@ Project Sentinel keeps `settings.v1` (settings and custom profiles), its run rec
 learned about the prompt cache (`cache.v1`) there, in `project-sentinel_<source>-<id>.json`. The
 store is validated on load: unknown values fall back to defaults, numbers are clamped to the
 ranges below, and a permission saved as `allow` (a state removed in 1.4.0) reads as `default`.
-Hand-editing is possible but not needed. `/cr reset confirm` restores the defaults and keeps
-custom profiles.
+Hand-editing is possible but not needed. `/cr reset confirm` restores the defaults (Normal) and
+keeps custom profiles. A fresh install also keeps `onboarding.v1`: when the first-run card first
+showed, and when you dismissed it.
+
+**Fresh installs and updates** (1.7.0). The defaults in the tables below are a fresh install's, the
+**Normal** profile. Settings are saved with a `defaults` marker, the generation of defaults they
+were saved under (2 since 1.7.0; absent before it, read as 1). At the first load after an update:
+
+| What the store holds | What happens |
+| --- | --- |
+| no `settings.v1`, and nothing else of Project Sentinel's (no run, run counter, cache memory or Quest log) | a fresh install: the 1.7.0 defaults are saved (Normal, so the panel never reads "Normal · edited"), the first-run card shows in Overview until *Got it*, and one toast says what is on |
+| no `settings.v1`, but runs, a run counter, cache memory or a Quest log | an install used before that never changed a setting (settings are saved only when one changes): **Classic** is saved, so its behaviour is unchanged and no card shows |
+| `settings.v1` without a `defaults` marker (saved before 1.7.0) | every value is kept, read against Classic so a group an older version never saved is not switched on by the new defaults; a profile named Normal is relabelled **Classic** (the values were Normal's before 1.7.0, so it does not read "edited" against the new Normal); then the marker is saved |
+| `settings.v1` with the marker | read as it is |
+
+Settings carried over from Control Room's store (below) win over a fresh install's defaults
+written moments earlier at the same first load: that install is not new, so no card shows.
+
+**Classic**, an install from before 1.7.0, differs from Normal in two places: Autopilot is off
+(`autopilot.enabled`), and Frontier Max is off with its effort at Maximum (`frontier.enabled`,
+`frontier.effort`). The permission defaults are the same in both, and were not changed (see
+Permissions).
 
 **Coming from Control Room.** Before 1.4.0 the plugin was called Control Room, and Claude Code
 keeps a plugin's store under its name. When Project Sentinel first loads after the rename, before
@@ -35,7 +55,7 @@ In the panel: **Context**.
 
 | Setting | Values | Default | Notes |
 | --- | --- | --- | --- |
-| `enabled` | on / off | off | `/cr autopilot on\|off` |
+| `enabled` | on / off | on (Classic: off) | `/cr autopilot on\|off` |
 | `thresholdMode` | `percent` / `tokens` | `percent` | |
 | `thresholdPercent` | 10–95 | 70 | Percent of the live context window |
 | `thresholdTokens` | 10,000–10,000,000 | 700,000 | `/cr autopilot 700k` |
@@ -43,6 +63,7 @@ In the panel: **Context**.
 | `fallbackToCompact` | on / off | on | Compact only if `/clear` is refused |
 | `autoContinue` | on / off | on | Submit the continuation prompt automatically in the fresh context |
 | `handoffFile` | a relative path inside the project | `NEXT_SESSION_PROMPT.md` | Paths that would leave the project are rejected |
+| `waitMinutes` | 0–240 | 20 | How long a written handoff waits for finite background work (tests, builds, renders, agents) before it goes on and leaves that work running for the fresh context (0: never waits). Servers and watchers are never waited for. Context → Autopilot → *Wait for background work*. `/cr handoff wait [30m]` gives a waiting handoff longer once. |
 
 The effective threshold is capped at 97% of the window. It is also kept below Claude Code's own
 auto-compact point (minus 5% of the window), so the handoff runs before Claude Code would
@@ -54,9 +75,15 @@ In the panel: **Behavior**.
 
 | Setting | Values | Default | Notes |
 | --- | --- | --- | --- |
-| `enabled` | on / off | off | `/cr frontier on` also turns the guard on |
-| `effort` | `max` / `xhigh` / `high` / `keep` | `max` | Sent only to models that take an effort setting. `keep` leaves the session's effort alone and applies only the policy. |
+| `enabled` | on / off | on (Classic: off) | `/cr frontier on\|off`. Since 1.7.0 it no longer turns the lazy-exit guard on; the Frontier Max profile still sets both. |
+| `effort` | `max` / `xhigh` / `high` / `keep` | `xhigh`, *Extra High* (Classic: `max`) | Sent only to models that take an effort setting. `keep` leaves the session's effort alone and applies only the policy. |
 | `subagentEffort` | on / off | off | Also raise subagents' effort (costs more) |
+
+Frontier Max adds Project Sentinel's strongest engineering policy (finish the work, verify it,
+report what was and was not verified) to Claude's system prompt, and asks for the chosen effort on
+each request where the model has an effort setting. It never changes the model. Behavior → *This
+context* shows whether and how it reached Claude: in the system prompt, as a note while a warm cache
+holds the earlier prompt, or with a prompt where the system prompt's hook is not reached.
 
 ### Release check (`qa`)
 
@@ -283,7 +310,11 @@ see [SECURITY.md](../SECURITY.md#what-it-observes) for how they are measured.
 
 In the panel: **Guardrails**.
 
-Each category is `default` (shown as *Default*: Claude Code decides), `ask` or `deny`.
+Each category is `default` (shown as *Default*: Claude Code decides), `ask` or `deny`. Guardrails
+says each one's value in words and whether it is the default ("Asks you first · default"); a changed
+one is amber and names its default. 1.7.0 changed none of these defaults: making the categories
+Default would remove two Deny and six Ask protections and hand those calls back to Claude Code's
+own rules.
 
 | Category | Examples | Default |
 | --- | --- | --- |
@@ -324,10 +355,29 @@ In the panel: **Setup**.
 | `reducedMotion` | on / off | off | *Reduce motion*: still drawings instead of animation (Kit holds one pose for its mood, and the milestone under way on Desktop stops pulsing). `/cr motion off` turns it on. |
 | `openOnStart` | on / off | off | Open the Control Room panel when a session starts. In the terminal it seats from 144 columns. |
 
+### Nothing to set
+
+Some 1.7.0 features have no setting, because they only report what Claude Code and the workspace
+say:
+
+- **Five-hour plan usage** on the status bar (`5H 63% · 2h14m`) is Claude Code's own reading of the
+  plan's windows. With no five-hour window (an API key) the terminal shows nothing there and
+  Desktop *Plan usage —*. The status bar as a whole follows `ui.hud`.
+- **Milestone evidence** is kept for every completed milestone while `progress.milestones` (or
+  Claude Code's own task list) gives Project Sentinel milestones to keep it for. It runs `git
+  hash-object` and `git rev-parse` only for a completed milestone's own files (see
+  [SECURITY.md](../SECURITY.md)). `/cr evidence` lists it; `/cr evidence accept` takes stale files as
+  they are.
+- **The agent band** shows while subagents run and is gone when none do.
+- **The Handoff Supervisor** runs while a handoff is under way; its one setting is
+  `autopilot.waitMinutes`.
+
 ## Profiles
 
 A profile is a complete set of the systems above (everything except Display). The built-in
-profiles are described in the [README](../README.md#profiles). Custom profiles are saved from
+profiles are Normal (a fresh install's defaults), Classic (Normal before 1.7.0: Autopilot and
+Frontier Max off), Frontier Max, Low Resource and Release / QA; the last three are built on Classic,
+as they always were, and are described in the [README](../README.md#profiles). Custom profiles are saved from
 Setup with a name. Saving a name again replaces that profile, and custom profiles can be
 deleted there. `profile` records which profile was applied last. When the current settings differ from it, the
 panel reads "Normal · edited" and Setup lists each change in the panel's own words

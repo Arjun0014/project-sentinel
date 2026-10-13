@@ -24,6 +24,27 @@ export async function loadSettings(
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
 /**
+ * Whether this install was used before, though it never saved a setting (settings are saved only when one
+ * changes): a run, its counter, the cache's memory or the Quest log in the store. Such an install keeps the
+ * defaults it had (Classic); only a store with none of them is a fresh install.
+ */
+export async function hasPriorUse(host: Host): Promise<boolean> {
+  for (const key of [STORE_ENTRIES.runCounter, STORE_ENTRIES.runsIndex, STORE_ENTRIES.cache, STORE_ENTRIES.quest]) {
+    const value = await host.storeGet(key).catch(() => undefined)
+    if (value !== undefined && value !== null) return true
+  }
+  return false
+}
+
+/** The first-run card's record: shown at, dismissed at (null while it shows). */
+export type Onboarding = { at: number; dismissedAt: number | null }
+
+export function onboardingOf(raw: unknown): Onboarding | null {
+  if (!isRecord(raw) || typeof raw.at !== 'number') return null
+  return { at: raw.at, dismissedAt: typeof raw.dismissedAt === 'number' ? raw.dismissedAt : null }
+}
+
+/**
  * Allow ("answers prompts for you") was removed in 1.4.0. A saved Allow reads as Default, so Claude
  * Code's own rules decide again: that is a deliberate change, not a repair, and it is reported by
  * name, in the settings and in custom profiles alike.

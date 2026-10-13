@@ -54,6 +54,8 @@ export class CacheGuardian {
   lastError: string | null = null
 
   private timer: Timer | null = null
+  /** The plan's last line in the debug log, so the same plan is not written twice in a row. */
+  private lastPlanLine: string | null = null
   private steps = new Map<string, { at: number; effort: string | null }>()
   /** The policy text the system prompt last carried, while it is held stable. */
   private delivered: string | null = null
@@ -424,7 +426,10 @@ export class CacheGuardian {
     this.plan = this.refreshPlan(this.ctx.now())
     this.ctx.changed()
     const plan = this.plan
-    host.trace?.(plan.at === null ? `keep warm: no refresh planned (${plan.reason})` : `keep warm: next refresh at ${new Date(plan.at).toISOString()}${plan.isProbe ? ' (probe)' : ''}`)
+    // One line per plan: a turn's end and the step it moves Autopilot to both plan again, often to the same.
+    const line = plan.at === null ? `keep warm: no refresh planned (${plan.reason})` : `keep warm: next refresh at ${new Date(plan.at).toISOString()}${plan.isProbe ? ' (probe)' : ''}`
+    if (line !== this.lastPlanLine) host.trace?.(line)
+    this.lastPlanLine = line
     if (plan.at === null) return
     this.timer = host.after(Math.max(1000, plan.at - this.ctx.now()), () => {
       this.timer = null

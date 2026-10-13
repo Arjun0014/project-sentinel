@@ -125,7 +125,12 @@ export const DEFAULT_PERMISSIONS: Record<PermissionCategory, PermissionState> = 
   dangerous: 'deny',
 }
 
-export function defaultSystems(): SystemSettings {
+/**
+ * Classic: every system as Project Sentinel set it before 1.7.0 (Autopilot and Frontier Max off). The
+ * built-in Classic profile, what an existing install keeps, and the base stored settings are read
+ * against, so a group missing from an old store never turns something on by itself.
+ */
+export function classicSystems(): SystemSettings {
   return {
     autopilot: {
       enabled: false,
@@ -136,6 +141,7 @@ export function defaultSystems(): SystemSettings {
       fallbackToCompact: true,
       handoffFile: DEFAULT_HANDOFF_FILE,
       autoContinue: true,
+      waitMinutes: 20,
     },
     frontier: { enabled: false, effort: 'max', subagentEffort: false },
     qa: { enabled: false },
@@ -165,14 +171,39 @@ export function defaultSystems(): SystemSettings {
   }
 }
 
+/**
+ * The fresh-install defaults (1.7.0), Normal: opinionated out of the box. Context Autopilot on, handing off
+ * at 70% to a fresh context (falling back to compacting) that carries on by itself; Frontier Max on at
+ * Extra High effort; the Decision Inbox, Watchers and run milestones on. The lazy-exit guard and the
+ * permissions are as Classic has them (see DEFAULT_PERMISSIONS: nothing is loosened).
+ */
+export function defaultSystems(): SystemSettings {
+  const s = classicSystems()
+  s.autopilot = { ...s.autopilot, enabled: true, thresholdMode: 'percent', thresholdPercent: 70, continuation: 'clear', fallbackToCompact: true, autoContinue: true }
+  s.frontier = { enabled: true, effort: 'xhigh', subagentEffort: false }
+  s.ops = { ...s.ops, decisions: true, watchers: true }
+  s.progress = { milestones: true }
+  return s
+}
+
+/** The marker of settings written under 1.7.0's defaults (see ControlRoomSettings.defaults). */
+export const DEFAULTS_GENERATION = 2
+
+/** A fresh install's settings: Normal, the 1.7.0 defaults. */
 export function defaultSettings(): Settings {
   return {
     version: 1,
+    defaults: DEFAULTS_GENERATION,
     profile: 'normal',
     ...defaultSystems(),
     ui: { hud: 'band', toasts: true, openOnStart: false, liveLoad: true, companion: false, reducedMotion: false },
     customProfiles: [],
   }
+}
+
+/** An install that used Project Sentinel before 1.7.0 without saving a setting: Classic, so nothing changes for it. */
+export function classicSettings(): Settings {
+  return { ...defaultSettings(), ...classicSystems(), profile: 'classic' }
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +264,7 @@ function normalizeSystems(raw: unknown, base: SystemSettings): SystemSettings {
       fallbackToCompact: bool(ap.fallbackToCompact, base.autopilot.fallbackToCompact),
       handoffFile: safeRelativePath(ap.handoffFile, base.autopilot.handoffFile),
       autoContinue: bool(ap.autoContinue, base.autopilot.autoContinue),
+      waitMinutes: num(ap.waitMinutes, base.autopilot.waitMinutes, 0, 240),
     },
     frontier: {
       enabled: bool(fr.enabled, base.frontier.enabled),
@@ -315,7 +347,7 @@ function normalizeCustomProfiles(raw: unknown): CustomProfile[] {
       id,
       name,
       createdAt: num(item.createdAt, 0, 0, Number.MAX_SAFE_INTEGER),
-      systems: normalizeSystems(item.systems, defaultSystems()),
+      systems: normalizeSystems(item.systems, classicSystems()),
     })
     if (out.length >= 12) break
   }
@@ -339,8 +371,11 @@ export function normalizeSettings(raw: unknown): Settings {
   const ui = isRecord(raw.ui) ? raw.ui : {}
   return {
     version: 1,
+    // Stored settings without the marker were written before 1.7.0 (ensureLoaded relabels their Normal as Classic).
+    defaults: num(raw.defaults, 1, 1, DEFAULTS_GENERATION),
     profile: str(raw.profile, d.profile, 60),
-    ...normalizeSystems(raw, defaultSystems()),
+    // Stored settings are read against Classic: a group an older version did not save is never turned on by the new defaults.
+    ...normalizeSystems(raw, classicSystems()),
     ui: {
       hud: pick(ui.hud, ['band', 'status', 'both', 'off'] as const, d.ui.hud),
       toasts: bool(ui.toasts, d.ui.toasts),

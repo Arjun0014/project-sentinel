@@ -140,6 +140,8 @@ function hostOf($: EngineInterface): Host {
     memoryLevel: () => $.process.run(['sysctl', '-n', 'kern.memorystatus_level'], { timeoutMs: 5_000 }),
     repoRoot: () => $.session.repo().then(r => r?.root ?? null),
     gitStatus: () => $.process.run(['git', 'status', '--porcelain=v1', '--branch', '--untracked-files=normal'], { timeoutMs: 10_000 }),
+    hashFiles: paths => $.process.run(['git', 'hash-object', '--no-filters', '--', ...paths], { timeoutMs: 10_000 }),
+    gitHead: () => $.process.run(['git', 'rev-parse', '--verify', '-q', 'HEAD'], { timeoutMs: 5_000 }),
 
     publishHud: v => $.state.set(HUD, v).then(() => undefined),
     publishPane: v => $.state.set(PANE, v).then(() => undefined),
@@ -254,9 +256,11 @@ export const register: Register = on => {
     if (rt.isStandby) return next(e)
     if (rt.host === null) rt.bind(hostOf($))
     await rt.ensureLoaded()
-    // Cold Resume Guard: before a message re-reads a large context whose cache has surely lapsed, ask
-    // (nothing is sent yet). The Run Budget asks once at a limit set to Ask. Either may keep the message.
-    const held = (await rt.ops.coldGuard(e)) ?? (await rt.ops.budgetGuard(e))
+    // A handoff under way first: an instruction about it ("handoff now") is acted on and never sent, and
+    // other words are not let into a context about to be cleared unasked. Then the Cold Resume Guard:
+    // before a message re-reads a large context whose cache has surely lapsed, ask (nothing is sent
+    // yet). The Run Budget asks once at a limit set to Ask. Any of them may keep the message.
+    const held = (await rt.handoffGuard(e)) ?? (await rt.ops.coldGuard(e)) ?? (await rt.ops.budgetGuard(e))
     if (held !== null) return held
     // The origin tells a background task's notification (and the turn it starts) from the person's prompt;
     // its end is timed by the engine's clock, as the handoff's other steps are.
@@ -362,6 +366,12 @@ export const register: Register = on => {
     return block === null ? answer : { ...answer, block }
   }).catch(($, e, next) => next(e))
 
+  // A turn Claude Code ended on an API error: a rate limit is the plan's limit reached (the status bar's 5H reads it).
+  on('classic.StopFailure', ($, e, next) => {
+    if (!rt.isStandby) rt.onStopFailure(e.error)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   // -------------------------------------------------------------------------
   // Tools: permissions, resources, activity
 
@@ -421,21 +431,15 @@ export const register: Register = on => {
     if (rt.host === null) rt.bind(hostOf($))
     const decision = await rt.onAgentSpawn(e)
     if (decision.deny !== undefined) return { deny: decision.deny }
-    const answer = await next(decision.model === undefined ? e : { ...e, model: decision.model })
-    // The Agent Command Center keeps what the spawn says (its model, background, fork), by the agent's id.
-    if (answer.deny === undefined && answer.agentId !== undefined) {
-      rt.ops.noteSpawn({
-        agentId: answer.agentId,
-        model: answer.model ?? null,
-        isBackground: e.background,
-        isFork: e.fork,
-        description: e.description,
-        type: e.subagentType,
-        name: e.name ?? null,
-        parentId: e.parentAgentId ?? null,
-      })
+    // The agent shows from its spawn (its id, model, background, fork, parent, a workflow run's place);
+    // its slot is released whatever the start's outcome.
+    let answer: Awaited<ReturnType<typeof next>> | undefined
+    try {
+      answer = await next(decision.model === undefined ? e : { ...e, model: decision.model })
+      return answer
+    } finally {
+      rt.onAgentSpawned(e, answer, decision.isReserved === true)
     }
-    return answer
   }).catch(($, e, next) =>
     rt.settings.subagents.mode === 'block' && !next.called ? { deny: 'Control Room: subagents are disabled in this session.' } : next(e),
   )

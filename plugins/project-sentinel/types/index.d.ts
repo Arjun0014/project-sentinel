@@ -39,6 +39,12 @@ export type AnswerStyle = 'standard' | 'brief' | 'ste' | 'mission' | 'quest'
 
 export type ControlRoomSettings = {
   version: 1
+  /**
+   * Which defaults these settings were written under: 2 from 1.7.0, where Normal is the opinionated
+   * fresh-install set (Autopilot at 70%, Frontier Max at Extra High); 1 (or absent) before, where Normal
+   * meant what is now Classic. Read once at load to relabel an existing Normal as Classic, values untouched.
+   */
+  defaults: number
   profile: string
   autopilot: {
     enabled: boolean
@@ -49,6 +55,12 @@ export type ControlRoomSettings = {
     fallbackToCompact: boolean
     handoffFile: string
     autoContinue: boolean
+    /**
+     * How long a written handoff waits for finite background work (a test run, a build, a render)
+     * before it goes on and leaves that work running for the fresh context, which Claude Code hands
+     * its result to. 0: never waits. Servers and watchers are never waited for.
+     */
+    waitMinutes: number
   }
   frontier: { enabled: boolean; effort: FrontierEffort; subagentEffort: boolean }
   qa: { enabled: boolean }
@@ -161,7 +173,7 @@ export type HudHeadline = {
 export type TrackStop = 'done' | 'now' | 'verify' | 'held' | 'open'
 
 /** Something that needs a look, as a chip at the status bar's right ("Tests failing", "RAM 92%"); `opens` makes it a control that opens Activity → Operations. */
-export type HudChip = { key: string; text: string; tone: Tone; opens?: 'ops' }
+export type HudChip = { key: string; text: string; tone: Tone; opens?: 'ops' | 'agents' }
 
 export type HudModel = {
   isVisible: boolean
@@ -217,9 +229,43 @@ export type HudModel = {
   companion: CompanionView | null
   /** The project's Git state in a line ("main · 3 uncommitted"), read in the terminal only; null elsewhere or outside a repository. */
   git: string | null
+  /**
+   * The agent band above the status bar, only while subagents run: a line per agent (what it is doing,
+   * for how long, its own plan's count when it keeps one), or past three one line counting them by what
+   * they do. Null when none runs: the band is gone.
+   */
+  agentBand: { lines: { id: string; name: string; status: string; doing: string; elapsedMs: number | null; plan: string | null }[]; summary: string | null } | null
+  /**
+   * The plan's usage windows as Claude Code reports them (`$.session.usage().rateLimits`): the status
+   * bar's 5H reading, in place of the run's cost (which Overview, Context → Run and the Run Budget keep).
+   */
+  plan: PlanUsageModel
 }
 
-export type HudAlertKind = 'pending' | 'awaiting' | 'load' | 'watcher' | 'suggest' | 'budget' | 'held'
+/**
+ * The plan's five-hour window now (features/planUsage.ts). `pending`: no reading yet (before the first
+ * response); `absent`: responses came with no five-hour window (an API key); `reset`: the window's reset
+ * time passed and no response has read the new one; `limited`: a request was refused on the rate limit,
+ * or the window reads 100% (`window` says which was full, null when none read so).
+ */
+export type PlanFiveHour =
+  | { kind: 'pending' }
+  | { kind: 'absent' }
+  | { kind: 'reading'; percent: number; resetsAt: number | null; leftMs: number | null; isHigh: boolean }
+  | { kind: 'reset'; at: number }
+  | { kind: 'limited'; window: 'five_hour' | 'seven_day' | null; percent: number | null; resetsAt: number | null; leftMs: number | null }
+
+export type PlanUsageModel = {
+  five: PlanFiveHour
+  /** Every window read (5-hour, 7-day), for Context → Run and /cr status. */
+  windows: { key: 'five_hour' | 'seven_day'; name: string; percent: number | null; resetsAt: number | null; leftMs: number | null; isReset: boolean }[]
+}
+
+/**
+ * `waiting`: a written handoff waits for background work (the Handoff Supervisor's ways out). `stuck`:
+ * a handoff step that has not moved on (the supervisor found it stalled).
+ */
+export type HudAlertKind = 'pending' | 'awaiting' | 'waiting' | 'stuck' | 'load' | 'watcher' | 'suggest' | 'budget' | 'held'
 
 export type HudAlert = {
   kind: HudAlertKind
@@ -231,6 +277,11 @@ export type HudAlert = {
   canFresh?: boolean
   /** The suggestion carries a time of its own: Create watcher arms it there. */
   hasTime?: boolean
+  /** A waiting handoff: Stop & hand off is offered (work it waits for runs), Keep waiting too once it is stalled. */
+  canStop?: boolean
+  canKeep?: boolean
+  /** A stuck step: what the supervisor offers (features/supervisor.ts SupervisorAction). */
+  offers?: string[]
 }
 
 /** The orchestration layer as the status bar and Overview show it: counts, and the watcher that holds the run. */
@@ -446,8 +497,8 @@ export type QuestHud = { level: number; xp: number; intoLevel: number; levelSpan
 
 export type TabId = 'overview' | 'context' | 'behavior' | 'guardrails' | 'activity' | 'setup'
 
-/** Activity's three views: the summary (run, turn, attention, checks, changes), Operations (the run over time), every tool call. */
-export type ActivitySub = 'summary' | 'ops' | 'raw'
+/** Activity's views: the summary (run, turn, attention, checks, changes), Operations (the run over time), the agents (while any run or ran lately), every tool call. */
+export type ActivitySub = 'summary' | 'ops' | 'agents' | 'raw'
 
 export type AutopilotView = {
   state: string
@@ -464,8 +515,28 @@ export type AutopilotView = {
   /** Start fresh context is offered: a handoff waiting for the person, or one whose end went unseen (the press checks the notes first). */
   canFresh: boolean
   canSnooze: boolean
-  /** While a written handoff waits for background work: each task Claude Code reports still running. */
-  background: { id: string; description: string }[]
+  /**
+   * While a written handoff waits for background work: each task Claude Code reports still running,
+   * with its class (`persistent` never holds the handoff) in words, and why it was classed so.
+   */
+  background: { id: string; description: string; class: 'persistent' | 'finite' | 'agent' | 'unknown'; classWords: string; why: string | null; by: string | null; isBlocking: boolean }[]
+  /** While a handoff is under way: the Handoff Supervisor's latest look; null otherwise. */
+  supervisor: SupervisorView | null
+  /** While it waits: how much longer at most (then it goes on and leaves the work running), and whether the person said not to wait. */
+  waitLeftMs: number | null
+  skipWait: boolean
+  waitMinutes: number
+}
+
+/** The Handoff Supervisor's look at a handoff under way (features/supervisor.ts Diagnosis). */
+export type SupervisorView = {
+  status: 'idle' | 'moving' | 'waiting' | 'stalled' | 'needs-you'
+  phase: string
+  forMs: number
+  blocker: { kind: string; text: string } | null
+  /** While a handoff waits: how long until it goes on by itself (measured on the engine's clock when published). */
+  goesOnInMs: number | null
+  actions: string[]
 }
 
 export type SystemId = 'autopilot' | 'frontier' | 'qa' | 'guard' | 'router' | 'subagents' | 'load' | 'focus' | 'answers'
@@ -502,6 +573,11 @@ export type PaneModel = {
   /** The person's own Claude Code output style when one is chosen; it takes precedence over the answer style. */
   nativeOutputStyle: string | null
   cache: CacheView
+  /**
+   * A fresh install's first-run card (1.7.0), until the person dismisses it: what is on out of the box, in the
+   * words the live settings give (the handoff point, Frontier Max's effort); null otherwise.
+   */
+  firstRun: { autopilot: string | null; frontier: string | null; guardrails: string } | null
   /** The run's latest handoff: what it left (health) and what the fresh context picked up (continuity); null before any. */
   handoff: HandoffView | null
 }
@@ -539,6 +615,10 @@ export type HandoffView = {
   continuity: HandoffCheckView[] | null
   /** True while the fresh context's first turn is still under way. */
   isChecking: boolean
+  /** What the handoff left running (servers, work it stopped waiting for), and each one's end once reported. */
+  leftRunning: { id: string; description: string; isService: boolean; endedAt: number | null; status: string | null }[]
+  /** Completed milestones whose verification is stale or being changed now (the run's evidence, live). */
+  evidence: EvidenceRowView[]
 }
 
 export type ResourcesView = {
@@ -615,16 +695,28 @@ export type FileChangeView = {
 }
 
 /** The run at a glance: what it is for, how far it is, what is under way and next. */
+/**
+ * A completed milestone's evidence as it stands (features/evidence.ts): `stale` (files changed since it
+ * was verified, nothing re-verified them), `changing` (a later milestone under way is changing them),
+ * `rebaselined` (a later verification covers them). `line` says what changed and what to rerun.
+ */
+export type EvidenceRowView = { subject: string; status: 'stale' | 'changing' | 'rebaselined'; line: string }
+
 export type MissionView = {
   objective: string | null
   /** Claude's milestones (its task list), or null while it keeps none. */
   plan: {
     done: number
     total: number
-    /** A window around the work under way; `earlier` finished and `later` open ones are left out. `detail`: evidence, or what blocks it. */
-    tasks: { subject: string; status: string; isCurrent: boolean; detail: string | null }[]
+    /**
+     * A window around the work under way; `earlier` finished and `later` open ones are left out. `detail`:
+     * evidence, or what blocks it. `evidence`: a completed milestone's verification, when it is not plainly current.
+     */
+    tasks: { subject: string; status: string; isCurrent: boolean; detail: string | null; evidence: EvidenceRowView | null }[]
     earlier: number
     later: number
+    /** Completed milestones left out of the window whose verification is stale. */
+    staleEarlier: EvidenceRowView[]
   } | null
   now: string | null
   /** What the run is doing or waiting for, as the status bar's headline tells it apart. */
@@ -637,7 +729,8 @@ export type MissionView = {
 
 export type AttentionView = {
   id: string
-  kind: 'failed' | 'blocked' | 'held' | 'running' | 'slow'
+  /** `stale`: a completed milestone whose verification is stale (its files changed since). */
+  kind: 'failed' | 'blocked' | 'held' | 'running' | 'slow' | 'stale'
   title: string
   reason: string | null
   state: 'unresolved' | 'recovered' | null
@@ -745,11 +838,31 @@ export type AutopilotRecord = {
   at: number
   /** The handoff turn's id, once it began (1.6.3; absent in a record written before). */
   handoffTurnId?: string | null
-  /** The background work a written handoff waits for, as Claude Code last reported it (1.6.3). */
-  background?: { id: string; description: string }[]
+  /** The background work a written handoff waits for, as Claude Code last reported it (1.6.3), each with its class (1.7.0). */
+  background?: BackgroundTaskRecord[]
   /** How many background tasks the handoff waited for, and when the last of them ended (1.6.3). */
   waitedFor?: number
   backgroundEndedAt?: number | null
+  /** The wait's window, the person's word not to wait, the work left running for the fresh context, and when the state began (1.7.0). */
+  waitSince?: number | null
+  waitUntil?: number | null
+  skipWait?: boolean
+  leftRunning?: BackgroundTaskRecord[]
+  stateSince?: number | null
+}
+
+/**
+ * One background task as a handoff keeps it: what it is, and whether it holds the handoff back
+ * (`persistent`: a server or watcher, never waited for; `finite`, `agent`, `unknown`: waited for, within
+ * the wait's patience), and who decided that (these rules, the isolated classifier, the person).
+ */
+export type BackgroundTaskRecord = {
+  id: string
+  description: string
+  class?: 'persistent' | 'finite' | 'agent' | 'unknown'
+  why?: string
+  by?: 'rule' | 'classifier' | 'person'
+  command?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -835,6 +948,18 @@ export type AgentRowView = {
   isFailed: boolean
   canStop: boolean
   canMessage: boolean
+  /** A teammate of the session's team (it goes idle between turns). */
+  isTeammate: boolean
+  /** A workflow run's agent (Claude Code never lists these): the run's id and its place in it. */
+  workflow: { runId: string; index: number } | null
+  /** When its loop last made a call or a request. */
+  activeAt: number | null
+  /** The plan it keeps in its own loop (a task list, milestones), as a Work-style track; null while it keeps none. Never a made-up percent. */
+  plan: { done: number; total: number; current: string | null; track: TrackStop[] } | null
+  /** Whether Claude Code's list names it now. */
+  isListed: boolean
+  /** Why an alive agent is not in Claude Code's list right now (starting, omitted for a look or two). */
+  note: string | null
 }
 
 export type BudgetMetricView = { used: number | null; limit: number | null; tone: Tone; isPartial?: boolean }
@@ -870,6 +995,8 @@ export type ResumeView = {
   queued: number
   decisions: number
   next: string | null
+  /** Completed milestones whose verification is stale: the fresh context is told to rerun their checks. */
+  stale: EvidenceRowView[]
 }
 
 export type ColdResumeView = {
@@ -941,10 +1068,10 @@ export type OpsUiView = {
   messaging: string | null
 }
 
-/** What this session saw of an agent's start and end (its spawn, model, result), kept in `$.state` so a reload keeps it. */
+/** What this session saw of an agent (its spawn, loop, plan, end), kept in `$.state` so a reload keeps it. */
 export type AgentMemo = {
   id: string
-  spawnedAt: number
+  spawnedAt: number | null
   model: string | null
   isBackground: boolean | null
   isFork: boolean
@@ -955,6 +1082,17 @@ export type AgentMemo = {
   endedAt: number | null
   result: string | null
   isFailed: boolean
+  /** 1.7.0: its observed status, a workflow run's id and place, its loop's calls and plan. */
+  status?: string
+  workflow?: { runId: string; index: number } | null
+  toolUseId?: string | null
+  listedAt?: number | null
+  missed?: number
+  calls?: number
+  doing?: string | null
+  activeAt?: number | null
+  plan?: unknown
+  isTeammate?: boolean
 }
 
 /** The prompt cache's last request, kept in `$.state` so a reload of the plugin keeps knowing when it lapses. */

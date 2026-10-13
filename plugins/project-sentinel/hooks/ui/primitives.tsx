@@ -2,8 +2,20 @@
  * Control Room's design system: the few components every page is made of,
  * each drawn natively per surface.
  *
- * Layout: a page is a stack of cards. A card is a small-caps title in its
- * section's accent, a rounded box of rows, and at most a short footnote.
+ * Layout: a page is a stack of cards. A card is a quiet small-caps title, a
+ * rounded box of rows, and at most a short footnote. Color is meaning, never
+ * decoration: green verified, amber waiting for you or worth a look, red a
+ * failure or a blocker, blue (and the section's accent on its own tab) what is
+ * current or under way, gray the default, the inactive and the past. Card
+ * titles are structure, so they stay gray; the brand's orange is kept for its
+ * mark, the Control Room button and the handoff point.
+ *
+ * Navigation has two levels that never look alike: the section bar (six
+ * sections, an accent underline under the current one) and, inside a section
+ * with more than one view, `subNav` (a breadcrumb, `Activity › Summary`, over a
+ * captioned row of views, the current one bracketed: `View  [ Summary ]
+ * Operations  Agents (2)  Tool calls`; on Desktop a bordered group of buttons).
+ * A view switch is never drawn as a setting's choice.
  * A row reads like a settings list: the label (and a one-line description
  * under it) on the left, the control on the right edge, at every width.
  * Controls too wide for the right edge (a segmented choice) sit under the
@@ -76,11 +88,16 @@ export const clip = (kit: Kit): { minWidth?: number; overflow?: 'hidden' } => (k
 
 /**
  * A titled group of rows in a rounded box. `rows` receives the kit for the
- * box's inside (its width less the border and padding). The title takes the
- * section's accent; `link` puts a quiet "Open ›" at its right.
+ * box's inside (its width less the border and padding). The title is quiet
+ * structure (bold, gray), whatever the section: `accent` is accepted for the
+ * places that name one and is no longer drawn; `link` puts a quiet "Open ›"
+ * at its right.
  */
 /** The key a card is drawn under, the one `$.ui.scroll` finds it by: `card-ops-agents` for `ops-agents`. */
 export const cardKey = (key: string): string => `card-${key}`
+
+/** The lines `emptyState` drew: a card holding nothing else is a quiet line, not a box around it. */
+const EMPTY_LINES = new WeakSet<object>()
 
 export function card(
   kit: Kit,
@@ -102,7 +119,7 @@ export function card(
     <Box key={cardKey(input.key)} flexDirection="column" marginTop={1}>
       {hasHead ? (
         <Box key={`card-${input.key}-head`} flexDirection="row" justifyContent="space-between" alignItems="center">
-          <Text bold color={input.accent} dimColor={input.accent === undefined ? true : undefined}>
+          <Text bold dimColor>
             {(input.title ?? '').toUpperCase()}
           </Text>
           {input.link !== undefined && input.aside !== undefined && input.aside !== '' ? (
@@ -125,7 +142,12 @@ export function card(
           )}
         </Box>
       ) : null}
-      {rows.length === 0 ? null : (
+      {rows.length === 0 ? null : rows.every(r => EMPTY_LINES.has(r as object)) ? (
+        // Nothing in it yet ("Claude has not changed any files yet."): the line alone, aligned with a box's inside.
+        <Box key={`card-${input.key}-box`} flexDirection="column" paddingX={1}>
+          {rows}
+        </Box>
+      ) : (
         <Box key={`card-${input.key}-box`} flexDirection="column" borderStyle="round" borderColor="subtle" paddingX={1} rowGap={isNative(kit) ? 1 : 0}>
           {rows}
         </Box>
@@ -366,13 +388,15 @@ export function note(kit: Kit, text: string, key = 'note', tone: Tone = 'muted')
 
 export function emptyState(kit: Kit, text: string, key = 'empty'): RenderElement {
   const { Box, Text } = kit.ui
-  return (
+  const line = (
     <Box key={key}>
       <Text dimColor italic>
         {text}
       </Text>
     </Box>
   )
+  if (typeof line === 'object' && line !== null) EMPTY_LINES.add(line as object)
+  return line
 }
 
 /**
@@ -910,6 +934,66 @@ export function levelBadge(kit: Kit, input: { key: string; level: number; fracti
 
 // ---------------------------------------------------------------------------
 // Navigation
+
+/**
+ * The second level of navigation, inside a section with several views. Never drawn like a setting's
+ * choice (`● A  ○ B`), so it cannot be read as one:
+ *
+ *   Activity › Summary
+ *   View   [ Summary ]   Operations   Agents (2)   Tool calls
+ *
+ * The breadcrumb names where you are in words (the section in its accent, the view bold); the views sit
+ * under a dim "View" caption, the current one bracketed in the section's accent and bright, the others
+ * dim until focused. Desktop draws the breadcrumb over a bordered group of its own buttons (the current
+ * one primary), so the group reads apart from the section bar's free-standing buttons. Each view keeps
+ * the key `<key>:<value>`.
+ */
+export function subNav<T extends string>(
+  kit: Kit,
+  input: { key: string; section: string; accent: string; current: T; options: readonly { value: T; label: string }[]; onSelect: (value: T) => void },
+): RenderElement {
+  const { Box, Text, Button } = kit.ui
+  const here = input.options.find(o => o.value === input.current)?.label ?? ''
+  const crumb = (
+    <Text key={`${input.key}-crumb`} wrap="truncate-end">
+      <Text color={input.accent}>{input.section}</Text>
+      <Text dimColor>{` ${G.chevron} `}</Text>
+      <Text bold>{here.replace(/ \(\d+\)$/, '')}</Text>
+    </Text>
+  )
+  if (isNative(kit)) {
+    return (
+      <Box key={`${input.key}-nav`} flexDirection="column" marginTop={1} rowGap={1}>
+        {crumb}
+        <Box key={`${input.key}-group`} flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={1} rowGap={1} borderStyle="round" borderColor="subtle" paddingX={1}>
+          <Text dimColor>View</Text>
+          {input.options.map(o => (
+            <Button key={`${input.key}:${o.value}`} label={o.label} variant={o.value === input.current ? 'primary' : 'secondary'} onPress={() => input.onSelect(o.value)} />
+          ))}
+        </Box>
+      </Box>
+    )
+  }
+  return (
+    <Box key={`${input.key}-nav`} flexDirection="column" marginTop={1}>
+      {crumb}
+      <Box key={`${input.key}-views`} flexDirection="row" flexWrap="wrap" columnGap={3}>
+        <Text dimColor>View</Text>
+        {input.options.map(o =>
+          o.value === input.current ? (
+            <Box key={`${input.key}-at-${o.value}`} flexDirection="row" flexShrink={0}>
+              <Text color={input.accent}>[ </Text>
+              <Button key={`${input.key}:${o.value}`} label={o.label} plain onPress={() => input.onSelect(o.value)} />
+              <Text color={input.accent}> ]</Text>
+            </Box>
+          ) : (
+            <Button key={`${input.key}:${o.value}`} label={o.label} plain dimColor onPress={() => input.onSelect(o.value)} />
+          ),
+        )}
+      </Box>
+    </Box>
+  )
+}
 
 /** Native section buttons per row when they do not fit on one. */
 const NAV_PER_ROW = 3

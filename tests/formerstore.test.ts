@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { CARRIED_MARK, carriedWrites, configDirFromEnv, configDirOf, formerStorePaths, isFormerHud, newestFirst, sourceOf, storeFileName } from '../hooks/app/formerStore'
 import { Runtime } from '../hooks/app/runtime'
-import { defaultSettings } from '../hooks/core/settings'
+import { classicSettings, defaultSettings } from '../hooks/core/settings'
 import type { Settings } from '../hooks/core/settings'
 import { fakeHost } from './fixtures/fake-host'
 
@@ -78,7 +78,9 @@ describe('the store kept under the former name', () => {
   })
 
   test('a whole carry-over: settings, runs, the Quest log and the cache memory come along once, and the new run is numbered after them', async () => {
-    const old = defaultSettings()
+    // Control Room kept settings before 1.7.0: Normal meant what is now Classic, and no defaults marker.
+    const { defaults: _marker, ...old } = { ...classicSettings(), profile: 'normal' }
+    void _marker
     old.autopilot.enabled = true
     old.autopilot.thresholdPercent = 80
     old.permissions.network = 'deny'
@@ -96,12 +98,20 @@ describe('the store kept under the former name', () => {
     rt.bind(f.host)
     await rt.onSessionStart({ cwd: '/work', surface: 'terminal', isInteractive: true })
     await f.advance(200)
-    expect(rt.settings.autopilot.enabled).toBe(false)
+    // The first load found an empty store: a fresh install, as far as it could tell (the 1.7 defaults, the first-run card).
+    expect(rt.settings).toMatchObject({ profile: 'normal', autopilot: { enabled: true, thresholdPercent: 70 }, frontier: { enabled: true } })
+    expect(rt.onboarding).not.toBeNull()
     await rt.onClassicSessionStart({ source: 'startup', sessionId: 'session-1', transcriptPath: '/home/a/.claude/projects/-work/session-1.jsonl' })
     await f.advance(2000)
+    // The carry still wins over those defaults (they were not the person's), and the settings read as Classic, values untouched.
     expect(rt.settings.autopilot.enabled).toBe(true)
     expect(rt.settings.autopilot.thresholdPercent).toBe(80)
     expect(rt.settings.permissions.network).toBe('deny')
+    expect(rt.settings.frontier.enabled).toBe(false)
+    expect(rt.settings.profile).toBe('classic')
+    // Not a fresh install after all: no first-run card.
+    expect(rt.onboarding).toBeNull()
+    expect(f.kept.store['onboarding.v1']).toBeUndefined()
     expect(rt.cache.memory.ttl).toBe('1h')
     expect(rt.quest.xp).toBe(120)
     expect(rt.run?.number).toBe(33)
@@ -160,17 +170,20 @@ describe('the store kept under the former name', () => {
   })
 
   test('an environment that names a folder without plugin stores is not trusted at the load: the session start looks by its transcript', async () => {
-    const old = defaultSettings()
+    const { defaults: _marker, ...old } = { ...classicSettings(), profile: 'normal' }
+    void _marker
     old.autopilot.enabled = true
+    old.autopilot.thresholdPercent = 85
     const file = '/home/a/.claude/plugins/store/control-room_inline-7b750613ef16.json'
     const f = fakeHost({ files: { [file]: JSON.stringify({ 'settings.v1': old }) }, configEnv: { claudeConfigDir: undefined, userProfile: undefined, home: '/elsewhere' }, dirs: [] })
     const rt = new Runtime()
     rt.bind(f.host)
     await rt.onSessionStart({ cwd: '/work', surface: 'terminal', isInteractive: true })
     expect(f.kept.store[CARRIED_MARK]).toBeUndefined()
-    expect(rt.settings.autopilot.enabled).toBe(false)
+    expect(rt.settings.autopilot.thresholdPercent).toBe(70)
     await rt.onClassicSessionStart({ source: 'startup', sessionId: 'session-1', transcriptPath: '/home/a/.claude/projects/-work/session-1.jsonl' })
-    expect(rt.settings.autopilot.enabled).toBe(true)
+    expect(rt.settings.autopilot.thresholdPercent).toBe(85)
+    expect(rt.settings.profile).toBe('classic')
     expect(f.kept.store[CARRIED_MARK]).toMatchObject({ from: 'control-room_inline-7b750613ef16.json' })
   })
 

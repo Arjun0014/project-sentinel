@@ -1,21 +1,17 @@
 /**
- * Overview: how the run is doing, then a map of everything that is on.
+ * Overview: how the run is doing, then a map of everything that is on, in the order the eye needs it:
  *
- * It leads with the run (its number, the session, the whole run's cost),
- * then the three lifecycles, each a card with its own graphic and one line
- * on how it starts over:
- *
- *   WORK     the objective's milestones; carries across handoffs
- *   CONTEXT  the reasoning window; starts over at each handoff
- *   CACHE    the prompt cache; starts over with each fresh context, lapses when idle
- *
- * Then what is happening now and what needs a look, the run's operations
- * (only while something is in them: decisions to review, queued work, a
- * watcher, agents, the budget; Activity → Operations has them in full), the
- * profile, and one
- * card per remaining section in that section's accent, each system with its
- * switch and one line of state, and a quiet "Open ›" to the section itself,
- * so the page also teaches where everything lives.
+ *   1. what needs the person (a handoff to start, a watcher due, a message held: a callout on top);
+ *   2. what is happening now: the run (its number, the session, the whole run's cost), what Claude is
+ *      doing in the status bar's words, a failing check, and the run's operations while anything is
+ *      in them (decisions to review, queued work, a watcher, agents, the budget);
+ *   3. the three lifecycles, each a card with its own graphic and one line on how it starts over:
+ *        WORK     the objective's milestones; carries across handoffs
+ *        CONTEXT  the reasoning window; starts over at each handoff
+ *        CACHE    the prompt cache; starts over with each fresh context, lapses when idle
+ *   4. one card per remaining section (Behavior, Guardrails, Activity, Setup), each system with its
+ *      switch and one line of state, and a quiet "Open ›" to the section itself, so the page also
+ *      teaches where everything lives.
  */
 
 import type { RenderElement } from 'claude-code'
@@ -25,7 +21,7 @@ import * as fmt from '../../core/format'
 import { listProfiles } from '../../core/profiles'
 import { PERMISSION_CATEGORIES } from '../../core/settings'
 import type { Kit } from '../kit'
-import { apart, cacheClock, callout, card, clip, emptyState, link, listItem, meterBar, pair, picker, row, stateLine, switchControl, textRuns, workTrack } from '../primitives'
+import { apart, buttons, cacheClock, callout, card, clip, emptyState, link, listItem, meterBar, pair, picker, row, stateLine, switchControl, textRuns, workTrack } from '../primitives'
 import { ACCENT, G } from '../theme'
 import { alertActions } from '../hud'
 import { cacheState, cacheSummary, lifetimeWords } from './cache'
@@ -66,7 +62,7 @@ export function alertCallout(kit: Kit, data: PaneData): RenderElement | null {
   }
   if (alert.kind === 'load') return callout(kit, { key: 'alert', tone: 'bad', title: 'Machine under heavy load', text: alert.text })
   // The orchestration layer's: the status bar's line, with the same actions.
-  const title = { watcher: 'Watcher due', held: 'Your message was not sent', budget: 'Run budget reached', suggest: 'Watcher suggestion' }[alert.kind]
+  const title = { waiting: 'Handoff waiting for background work', stuck: 'Handoff needs a look', watcher: 'Watcher due', held: 'Your message was not sent', budget: 'Run budget reached', suggest: 'Watcher suggestion' }[alert.kind]
   return callout(kit, { key: 'alert', tone: alert.tone, title, text: alert.text, actions: alertActions(kit, alert).map(a => ({ ...a, key: `alert-${a.key}` })) })
 }
 
@@ -89,7 +85,7 @@ function operationsCard(kit: Kit, data: PaneData): RenderElement | null {
         : listItem(k, {
             key: 'ops-watcher',
             glyph: G.wait,
-            tone: w.needs !== null ? 'accent' : 'info',
+            tone: w.needs !== null ? 'warn' : 'info',
             text: w.needs !== null ? `Watcher due · ${w.label}` : w.status === 'armed' ? `Watcher · wakes in ${w.left}` : `Watcher · ${w.label}`,
             right: w.status === 'armed' ? w.at : undefined,
             detail: w.needs ?? (w.status === 'armed' ? spacedWords([w.label, w.isHeldWarm ? 'cache held warm' : w.mode === 'fresh' ? 'wakes fresh' : null, ops.watchers > 1 ? `${ops.watchers} watchers` : null]) : 'Goes when this turn ends'),
@@ -102,6 +98,39 @@ function operationsCard(kit: Kit, data: PaneData): RenderElement | null {
 }
 
 const spacedWords = (parts: readonly (string | null)[]): string => parts.filter((p): p is string => p !== null && p !== '').join(' · ')
+
+/**
+ * A fresh install's first look, once: what Sentinel does out of the box and where things live, in five
+ * lines and a "Got it". Not a tutorial: each line names a place to open.
+ */
+function firstRunCard(kit: Kit, data: PaneData): RenderElement | null {
+  const f = data.pane.firstRun
+  if (f === null) return null
+  const go = (tab: Parameters<Kit['actions']['setTab']>[0], label: string) => link(kit, { key: `first-${tab}`, label, onPress: () => kit.actions.setTab(tab) })
+  return card(kit, {
+    key: 'first-run',
+    title: 'Sentinel is on',
+    footer: 'Every default is a setting: change any of them, or pick another profile in Setup (Classic turns Autopilot and Frontier Max off).',
+    rows: k => [
+      row(k, {
+        key: 'first-autopilot',
+        label: f.autopilot === null ? 'Context Autopilot is off' : `Autopilot protects the context at ${f.autopilot}`,
+        subtitle: f.autopilot === null ? undefined : 'Claude writes handoff notes, then carries on in a fresh context',
+        control: go('context', 'Context'),
+      }),
+      row(k, {
+        key: 'first-frontier',
+        label: f.frontier === null ? 'Frontier Max is off' : `Frontier Max at ${f.frontier}`,
+        subtitle: f.frontier === null ? undefined : 'A finish-and-verify policy; never changes the model',
+        control: go('behavior', 'Behavior'),
+      }),
+      row(k, { key: 'first-guardrails', label: 'Guardrails: what Claude may do', subtitle: f.guardrails, control: go('guardrails', 'Guardrails') }),
+      row(k, { key: 'first-activity', label: 'Activity has views', subtitle: 'Summary · Operations · Agents · Tool calls', control: go('activity', 'Activity') }),
+      row(k, { key: 'first-work', label: 'Work carries on; Context starts over', subtitle: 'Milestones carry across handoffs; the context window starts fresh at each one' }),
+      buttons(k, [{ key: 'first-dismiss', label: 'Got it', onPress: kit.actions.dismissOnboarding, isPrimary: true }], 'first-actions'),
+    ],
+  })
+}
 
 function permissionSummary(p: Record<PermissionCategory, string>): string {
   const count = (state: string) => PERMISSION_CATEGORIES.filter(c => p[c] === state).length
@@ -134,6 +163,37 @@ function runHeader(kit: Kit, data: PaneData): RenderElement {
   )
 }
 
+/**
+ * What is happening now, right under the run and unboxed: the status bar's headline in full, with its
+ * mark, and a failing check or calls that need a look, in amber, with the way to Activity.
+ */
+function nowBlock(kit: Kit, data: PaneData): RenderElement {
+  const { Box } = kit.ui
+  const { hud } = data
+  const line = hud.headline
+  const needsLook = hud.attention + hud.failing.length
+  return (
+    <Box key="now" flexDirection="column" marginTop={1}>
+      {stateLine(kit, {
+        key: 'now-line',
+        state: line.state,
+        text: line.text,
+        detail: line.detail,
+        isBold: line.state === 'working' || line.state === 'validating' || line.state === 'handoff' || line.state === 'blocked' || line.state === 'waitingUser' || line.state === 'waitingExternal',
+        isDim: line.state === 'ready' || line.state === 'thinking',
+      })}
+      {needsLook === 0
+        ? null
+        : row(kit, {
+            key: 'now-attention',
+            label: hud.failing.length > 0 ? `${hud.failing.join(', ')} failing` : `${fmt.plural(hud.attention, 'call')} need${hud.attention === 1 ? 's' : ''} a look`,
+            control: link(kit, { key: 'now-attention', label: 'Activity', onPress: () => kit.actions.setTab('activity') }),
+            isDim: false,
+          })}
+    </Box>
+  )
+}
+
 export function overviewPage(kit: Kit, data: PaneData): RenderElement {
   const { Box } = kit.ui
   const { pane, hud } = data
@@ -159,15 +219,18 @@ export function overviewPage(kit: Kit, data: PaneData): RenderElement {
   const cache = pane.cache
   const cacheNow = cacheState(cache, kit.now)
   const lapses = cache.ttl === '5m' ? 'lapses after five idle minutes' : cache.ttl === '1h' ? 'lapses after an idle hour' : 'lapses when left idle'
-  const line = hud.headline
   const isLoadHigh = load !== null && (readingTone(load.cpuTone) !== 'normal' || readingTone(load.ramTone) !== 'normal')
-  const needsLook = hud.attention + hud.failing.length
 
   return (
     <Box flexDirection="column">
       {alertCallout(kit, data)}
 
+      {firstRunCard(kit, data)}
+
       {runHeader(kit, data)}
+      {nowBlock(kit, data)}
+
+      {operationsCard(kit, data)}
 
       {card(kit, {
         key: 'life-work',
@@ -246,53 +309,12 @@ export function overviewPage(kit: Kit, data: PaneData): RenderElement {
       })}
 
       {card(kit, {
-        key: 'now',
-        title: 'Now',
-        accent: ACCENT.overview,
-        rows: k => [
-          // What Claude is doing, or what the run waits for: the status bar's headline, in full, with its mark.
-          stateLine(k, {
-            key: 'now-line',
-            state: line.state,
-            text: line.text,
-            detail: line.detail,
-            isBold: line.state === 'working' || line.state === 'validating' || line.state === 'handoff' || line.state === 'blocked' || line.state === 'waitingUser' || line.state === 'waitingExternal',
-            isDim: line.state === 'ready' || line.state === 'thinking',
-          }),
-          needsLook === 0
-            ? null
-            : row(k, {
-                key: 'now-attention',
-                label: hud.failing.length > 0 ? `${hud.failing.join(', ')} failing` : `${fmt.plural(hud.attention, 'call')} need${hud.attention === 1 ? 's' : ''} a look`,
-                control: link(k, { key: 'now-attention', label: 'Activity', onPress: () => kit.actions.setTab('activity') }),
-              }),
-        ],
-      })}
-
-      {operationsCard(kit, data)}
-
-      {card(kit, {
-        key: 'profile',
-        rows: k => [
-          row(k, {
-            key: 'profile',
-            label: 'Profile',
-            subtitle: hud.profile.isModified ? 'Edited since you applied it' : activeProfile?.hint,
-            control: picker(k, { key: 'profile', value: s.profile, options: profiles, onSelect: v => kit.actions.applyProfile(v) }),
-          }),
-        ],
-      })}
-
-      {card(kit, {
         key: 'sys-behavior',
         title: 'Behavior',
         accent: ACCENT.behavior,
         link: go('behavior'),
         rows: k => [
-          toggle(k, 'sys-frontier', 'Frontier Max', s.frontier.enabled, () => u(d => {
-            d.frontier.enabled = !d.frontier.enabled
-            if (d.frontier.enabled) d.guard.enabled = true
-          }), st.frontier),
+          toggle(k, 'sys-frontier', 'Frontier Max', s.frontier.enabled, () => u(d => void (d.frontier.enabled = !d.frontier.enabled)), st.frontier),
           toggle(k, 'sys-guard', 'Lazy-exit guard', s.guard.enabled, () => u(d => void (d.guard.enabled = !d.guard.enabled)), st.guard),
           toggle(k, 'sys-qa', 'Release check', s.qa.enabled, () => u(d => void (d.qa.enabled = !d.qa.enabled)), st.qa),
           row(k, { key: 'sys-router', label: 'Model router', control: link(k, { key: 'sys-router', label: st.router.text, onPress: () => kit.actions.setTab('behavior') }) }),
@@ -335,6 +357,21 @@ export function overviewPage(kit: Kit, data: PaneData): RenderElement {
         accent: ACCENT.activity,
         link: go('activity'),
         rows: k => [toggle(k, 'sys-focus', 'Focus view', s.focus.enabled, kit.actions.toggleFocus, st.focus)],
+      })}
+
+      {card(kit, {
+        key: 'sys-setup',
+        title: 'Setup',
+        accent: ACCENT.setup,
+        link: go('setup'),
+        rows: k => [
+          row(k, {
+            key: 'profile',
+            label: 'Profile',
+            subtitle: hud.profile.isModified ? 'Edited since you applied it' : activeProfile?.hint,
+            control: picker(k, { key: 'profile', value: s.profile, options: profiles, onSelect: v => kit.actions.applyProfile(v) }),
+          }),
+        ],
       })}
     </Box>
   )

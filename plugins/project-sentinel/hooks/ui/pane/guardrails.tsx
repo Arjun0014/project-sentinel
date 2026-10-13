@@ -17,10 +17,10 @@ import type { Kit } from '../kit'
 import { buttons, card, footnote, gauge, listItem, note, picker, row, spaced, stepper, switchControl } from '../primitives'
 import { ACCENT, G, readingTone, toneOfLevel } from '../theme'
 
-const STATE: Record<PermissionState, { label: string; hint: string }> = {
-  default: { label: 'Default', hint: 'Claude Code decides' },
-  ask: { label: 'Ask', hint: 'always asks you first' },
-  deny: { label: 'Deny', hint: 'never runs' },
+const STATE: Record<PermissionState, { label: string; hint: string; sentence: string }> = {
+  default: { label: 'Default', hint: 'Claude Code decides', sentence: 'Claude Code decides' },
+  ask: { label: 'Ask', hint: 'always asks you first', sentence: 'Asks you first' },
+  deny: { label: 'Deny', hint: 'never runs', sentence: 'Never runs' },
 }
 
 /** What became of a call, as the log says it. */
@@ -81,7 +81,14 @@ export function guardrailsPage(kit: Kit, pane: PaneModel, permissions: Permissio
               row(k, {
                 key: `perm-${c}`,
                 label: PERMISSION_LABEL[c],
-                subtitle: kit.openPicker === `perm-${c}` ? `e.g. ${CATEGORY_INFO[c].examples}` : undefined,
+                // What the value means, and whether it is Sentinel's default (visible without knowing profiles).
+                subtitle:
+                  kit.openPicker === `perm-${c}`
+                    ? `e.g. ${CATEGORY_INFO[c].examples}`
+                    : p[c] === DEFAULT_PERMISSIONS[c]
+                      ? `${STATE[p[c]].sentence} · default`
+                      : `${STATE[p[c]].sentence} · changed (default: ${STATE[DEFAULT_PERMISSIONS[c]].sentence.toLowerCase()})`,
+                subtitleTone: kit.openPicker !== `perm-${c}` && p[c] !== DEFAULT_PERMISSIONS[c] ? 'warn' : undefined,
                 control: picker(k, {
                   key: `perm-${c}`,
                   value: p[c],
@@ -128,7 +135,7 @@ export function guardrailsPage(kit: Kit, pane: PaneModel, permissions: Permissio
         accent,
         aside: pane.agents.running.length > 0 ? `${pane.agents.running.length} running` : undefined,
         // What may be started lives here; what runs, with its controls, in Activity → Operations.
-        link: { label: 'See what is running', onPress: () => kit.actions.openOps('ops-agents') },
+        link: { label: 'See what is running', onPress: () => kit.actions.openAgents() },
         rows: k => [
           row(k, {
             key: 'sa-mode',

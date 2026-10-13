@@ -12,6 +12,7 @@ import type {
   AgentInfo,
   AgentOfferInput,
   AgentSpawnInput,
+  AgentSpawnResult,
   CommandRunResult,
   PromptOrigin,
   RenderSurface,
@@ -28,17 +29,22 @@ import type { PermissionLogEntry, QueueTarget, TabId, WatchStrategy } from '../.
 import { COMMAND, LIMITS, MIN_ENGINE, PANE_ID, PANE_TITLE, SHORT_COMMAND, STORE_ENTRIES } from '../constants'
 import { type Effective, POLICY_SECTION_ID, effective, policySections, policyText } from '../core/policy'
 import { applyProfile, findProfile, profileLabel } from '../core/profiles'
-import { PERMISSION_LABEL, type Settings, clone, defaultSettings, normalizeSettings } from '../core/settings'
+import { DEFAULTS_GENERATION, PERMISSION_LABEL, type Settings, classicSettings, clone, defaultSettings, normalizeSettings } from '../core/settings'
 import { fingerprint } from '../core/hash'
 import { clean } from '../core/text'
 import { versionAtLeast } from '../core/version'
 import { ActivityTracker } from '../features/activity'
 import * as Autopilot from '../features/autopilot'
+import * as Background from '../features/background'
+import { type HandoffIntent, INTENT_WORDS, handoffIntentOf } from '../features/intent'
+import * as Supervisor from '../features/supervisor'
 import * as Chain from '../features/chain'
+import * as Evidence from '../features/evidence'
 import { type GitState, parseStatus } from '../features/git'
 import * as Handoff from '../features/handoff'
 import * as Ops from '../features/ops'
 import * as Plan from '../features/plan'
+import * as PlanUsage from '../features/planUsage'
 import * as Quest from '../features/quest'
 import { VALIDATION_LABEL, summarize } from '../features/validation'
 import { groupOf } from '../features/digest'
@@ -51,10 +57,12 @@ import * as prompts from '../features/prompts'
 import { type Pressure, gateHeavy, isOver } from '../features/resources/pressure'
 import { heavyKinds, heavyLabel } from '../features/resources/heavy'
 import { type Family, classifyTask, familyOf, routeMain, routeSubagent } from '../features/router'
-import { activeAgents, decideSpawn, isOffered } from '../features/subagents'
+import { decideSpawn, isOffered } from '../features/subagents'
+import { aliveRows, limitCount } from '../features/agents'
+import { doingOf } from '../features/digest'
 import type { Host } from '../host'
 import { ResourceMonitor } from './monitor'
-import { Debounced, findRunBySession, loadHistory, loadIndex, loadSettings, nextRunNumber, saveRun } from './persist'
+import { Debounced, type Onboarding, findRunBySession, hasPriorUse, loadHistory, loadIndex, loadSettings, nextRunNumber, onboardingOf, saveRun } from './persist'
 import { CARRIED_MARK, type CarriedMarker, carriedWrites, configDirFromEnv, configDirOf, isFormerHud, readFormerStore } from './formerStore'
 import { CacheGuardian } from './cacheGuardian'
 import { handleCommand } from './commands'
@@ -86,6 +94,9 @@ const OWN_PLUGIN = 'project-sentinel'
 
 /** How long after the load an announcement waits, so the session's window is there to show it. */
 const ANNOUNCE_DELAY_MS = 1500
+/** The evidence of a run that keeps none yet. */
+const EMPTY_EVIDENCE: Evidence.EvidenceStore = Evidence.emptyEvidence()
+
 /** While a cost limit is set, the session's cost is read mid-turn at most this often (`$.session.usage()` costs nothing). */
 const BUDGET_COST_EVERY_MS = 5_000
 /** The notes count as written for a handoff when modified no earlier than this before it began (clocks, file systems). */
@@ -93,6 +104,24 @@ const NOTES_SLACK_MS = 5000
 /** Operations opened at a card or field: the first try this long after, each later one this much later again. */
 const OPS_DRAWN_MS = 300
 const OPS_SCROLL_TRIES = 3
+/** How often the Handoff Supervisor looks at a handoff under way (observation; it moves no step but a wait's end). */
+const SUPERVISE_MS = 30_000
+/** At most this many unrecognised background tasks go to the isolated classifier per look. */
+const CLASSIFY_PER_LOOK = 2
+/** While any agent is alive, Claude Code's agent list is looked at this often (a workflow's agents are never in it). */
+const AGENT_POLL_MS = 2_000
+
+/** The person's choices about a message typed while a handoff is under way, as Claude Code's question dialog offers them. */
+export const HANDOFF_CHOICE = {
+  carry: 'Hand off now, then give it to the fresh context',
+  freshCarry: 'Start fresh now, then give it to the fresh context',
+  queue: 'Give it to the fresh context',
+  here: 'Send it here (this context)',
+  box: 'Back to the prompt box',
+  stop: 'Stop it and hand off',
+  leave: 'Hand off, leave it running',
+  wait: 'Keep waiting',
+} as const
 
 const isOwnPrompt = (origin: PromptOrigin | undefined): boolean => origin?.kind === 'plugin' && origin.name === OWN_PLUGIN
 
@@ -116,6 +145,10 @@ export class Runtime {
   sessionModel = ''
   usage: UsageFigures = { tokens: undefined, window: undefined, pct: undefined, costUsd: undefined }
   autoCompactAt: number | undefined
+  /** The plan's rate-limit windows as Claude Code last reported them (features/planUsage.ts): the status bar's 5H reading. */
+  planUsage: PlanUsage.PlanUsage = PlanUsage.emptyPlanUsage()
+  /** While a five-hour window counts down to its reset: one look a minute (usage is read, never pushed, between responses). */
+  private usageTicker: { cancel: () => void } | null = null
 
   autopilot: Autopilot.Autopilot = Autopilot.initialAutopilot()
   run: Chain.Run | null = null
@@ -135,7 +168,16 @@ export class Runtime {
     /** True when the router sent the last turn to another model than the session's. */
     wasRouted: false,
   }
-  agents = { list: [] as AgentInfo[], spawned: 0, denied: 0, asked: 0, allowAll: false, poll: null as { cancel: () => void } | null }
+  agents = {
+    list: [] as AgentInfo[],
+    spawned: 0,
+    denied: 0,
+    asked: 0,
+    allowAll: false,
+    poll: null as { cancel: () => void } | null,
+    /** Spawns allowed whose start is not settled yet: they hold a slot, so spawns made at once never all pass a limit. */
+    reserved: 0,
+  }
   permissionLog: PermissionLogEntry[] = []
   permissionCounts = { denied: 0, asked: 0 }
   resourceStats = { refused: 0, noticesSent: 0, lastNoticeLevel: 'ok' as string }
@@ -153,7 +195,7 @@ export class Runtime {
 
   ui = {
     tab: 'overview' as TabId,
-    activitySub: 'summary' as 'summary' | 'ops' | 'raw',
+    activitySub: 'summary' as 'summary' | 'ops' | 'agents' | 'raw',
     showGenerated: false,
     selectedPath: null as string | null,
     expanded: new Set<string>(),
@@ -211,11 +253,41 @@ export class Runtime {
    * turns this tells "waiting for a result" from "waiting for you"; a new turn clears it.
    */
   lastStop: {
-    background: { id: string; description: string }[]
+    /** Each task with its class (features/background.ts): a server never counts as work that will bring the turn back. */
+    background: Autopilot.BackgroundTask[]
     wakeups: { schedule: string; recurring: boolean }[]
     isQuestion: boolean
     at: number
   } | null = null
+
+  /** What the isolated classifier said a background task is, by its id: it outranks the rules for that task. */
+  private taskVerdicts = new Map<string, Background.TaskVerdict>()
+  /** Tasks the isolated classifier was asked about, once each. */
+  private classifyAsked = new Set<string>()
+
+  /** The Handoff Supervisor's latest look at a handoff under way (features/supervisor.ts); null while none is. */
+  supervisor: Supervisor.Diagnosis | null = null
+  private supervisorTimer: { cancel: () => void } | null = null
+  /** The last diagnosis traced, so the debug log has a line only when it changes. */
+  private supervisorKey = ''
+  /** When the main conversation last showed any activity (a prompt, a turn's start or end, a step, a call). */
+  private quietSince: number | null = null
+
+  /** The background work in flight Claude Code last listed, with each task's class; null before any Stop. */
+  inFlight(): Autopilot.BackgroundTask[] | null {
+    return this.lastStop === null ? null : this.lastStop.background
+  }
+
+  /** The work in flight that will bring a turn back (a test run, a render, an agent): never a server or a watcher. */
+  blockingInFlight(): Autopilot.BackgroundTask[] {
+    return Autopilot.blockingOf(this.lastStop?.background ?? [])
+  }
+
+  /** One task as Claude Code lists it, with its class: what the classifier said of it, else the rules. */
+  private taskOf(b: { id: string; type: string; description: string; command?: string; agent_type?: string; name?: string }): Autopilot.BackgroundTask {
+    const v = this.taskVerdicts.get(b.id) ?? Background.classifyTask({ id: b.id, type: b.type, description: b.description, ...(b.command === undefined ? {} : { command: b.command }), ...(b.agent_type === undefined ? {} : { agentType: b.agent_type }), ...(b.name === undefined ? {} : { name: b.name }) })
+    return { id: b.id, description: clean(b.description || b.command || `a ${b.type} task`, 80), class: v.class, why: v.why, by: v.by, ...(b.command === undefined ? {} : { command: clean(b.command, 200) }) }
+  }
 
   /** When this context began (system clock): the companion wakes up with it. */
   contextStartedAt: number | null = null
@@ -279,26 +351,21 @@ export class Runtime {
   }
 
   /**
-   * Keep warm stands down while the context is about to be cleared: a
-   * handoff under way or due, whose /clear throws the cache away. A handoff
-   * that compacts keeps it (compaction re-reads the whole conversation), and
-   * so does the compact fallback while it runs. A handoff waiting for the
-   * person ends in a fresh context, so it stands down then too.
+   * Keep warm stands down only once the old context is about to be thrown away: the notes checked
+   * before a clear, the clear itself, the fresh context resuming. Every earlier step still reads the
+   * old context again: the turn that crosses the threshold, the handoff turn, each background
+   * notification's turn while a written handoff waits, the person's own message while it waits for
+   * them. A stuck or long handoff must never be what lets a large warm cache lapse (seen in a real
+   * run: a handoff held by a preview server stood Keep warm down for two hours and a 775k cache went
+   * cold). A handoff that compacts keeps the cache throughout (compaction re-reads it).
    */
   keepWarmStandDown(): string | null {
     const a = this.settings.autopilot
     if (!a.enabled) return null
-    const ap = this.autopilot
-    if (ap.state === 'compacting') return null
-    if (ap.state === 'awaiting' || ap.state === 'clearing' || ap.state === 'resuming') {
-      return 'A handoff is starting a fresh context, so this cache is about to be discarded'
-    }
-    const tokens = this.usage.tokens ?? 0
-    const point = Autopilot.handoffPoint(ap)
-    const isPastThreshold = ap.state === 'armed' && point !== null && tokens >= point && (ap.snoozeUntil === null || tokens >= ap.snoozeUntil)
-    const isComing = ap.state === 'pending' || ap.state === 'requested' || ap.state === 'handoff' || ap.state === 'waiting-background' || ap.state === 'verifying' || isPastThreshold
-    if (!isComing || a.continuation === 'compact') return null
-    return isPastThreshold ? 'Past the handoff point: the next turn hands off to a fresh context' : 'A handoff will start a fresh context, so this cache is about to be discarded'
+    const state = this.autopilot.state
+    if (state === 'clearing' || state === 'resuming') return 'A handoff is starting a fresh context, so this cache is about to be discarded'
+    if (state === 'verifying' && a.continuation === 'clear') return 'The handoff notes are being checked before the clear, so this cache is about to be discarded'
+    return null
   }
 
   /** The last request the cache memo holds (`$.state`), so a write goes only when it moved. */
@@ -375,6 +442,7 @@ export class Runtime {
         await this.carryAtLoad()
         const loaded = await loadSettings(host)
         this.settings = loaded.settings
+        await this.settleDefaults(loaded.isFresh)
         this.quest = Quest.questOf(await host.storeGet(STORE_ENTRIES.quest).catch(() => undefined))
         if (loaded.wasRepaired) this.note('Some saved Control Room settings were invalid and were reset to safe defaults.')
         if (loaded.allowRemoved.length > 0) {
@@ -390,6 +458,54 @@ export class Runtime {
       })
     }
     await this.loading
+  }
+
+  /** A fresh install's first-run card: shown until the person dismisses it; null for an existing install. */
+  onboarding: Onboarding | null = null
+
+  /**
+   * Fresh-install defaults (1.7.0) without touching an existing install. No saved settings and no sign of
+   * earlier use: the new defaults (Normal) are saved and the first-run card shows. No saved settings but
+   * earlier use (it never changed a setting): Classic is saved, so nothing changes for it. Saved settings
+   * from before 1.7.0: a Normal is relabelled Classic (the values are untouched, so it does not read
+   * "edited" against the new Normal).
+   */
+  private async settleDefaults(isFresh: boolean): Promise<void> {
+    const host = this.host
+    if (host === null) return
+    if (isFresh) {
+      const isUsed = await hasPriorUse(host)
+      this.settings = isUsed ? classicSettings() : defaultSettings()
+      await host.storeSet(STORE_ENTRIES.settings, this.settings).catch(() => undefined)
+      // Written by this load, not by the person: the former store's carry at the session's start may replace them.
+      this.isFreshDefaults = !isUsed
+      if (!isUsed) {
+        this.onboarding = { at: Date.now(), dismissedAt: null }
+        await host.storeSet(STORE_ENTRIES.onboarding, this.onboarding).catch(() => undefined)
+        // Once, for whoever never opens the panel: what is on, and where it lives.
+        this.announce('Project Sentinel is on: Autopilot protects the context at 70%, Frontier Max at Extra High. /cr opens Control Room.')
+      }
+      this.trace(`settings: ${isUsed ? 'none saved, earlier use found: Classic kept' : 'a fresh install: the 1.7 defaults (Autopilot at 70%, Frontier Max at Extra High)'}`)
+      return
+    }
+    this.onboarding = onboardingOf(await host.storeGet(STORE_ENTRIES.onboarding).catch(() => undefined))
+    if (this.settings.defaults >= DEFAULTS_GENERATION) return
+    const wasNormal = this.settings.profile === 'normal'
+    this.settings = { ...this.settings, defaults: DEFAULTS_GENERATION, profile: wasNormal ? 'classic' : this.settings.profile }
+    await host.storeSet(STORE_ENTRIES.settings, this.settings).catch(() => undefined)
+    this.trace(`settings: saved before 1.7${wasNormal ? ': Normal is now called Classic (values unchanged)' : ''}`)
+  }
+
+  /** The settings in the store are this load's fresh-install defaults, not yet the person's (see carryFormerStore). */
+  private isFreshDefaults = false
+
+  /** The person dismissed the first-run card ("Got it"). */
+  dismissOnboarding(): void {
+    const host = this.host
+    if (this.onboarding === null || this.onboarding.dismissedAt !== null) return
+    this.onboarding = { ...this.onboarding, dismissedAt: Date.now() }
+    void host?.storeSet(STORE_ENTRIES.onboarding, this.onboarding).catch(() => undefined)
+    this.publisher.mark('pane')
   }
 
   /** Something that needs a look (settings repaired, an old Claude Code): a line at the top of the panel. */
@@ -441,6 +557,8 @@ export class Runtime {
     this.root = root
     this.sessionId = id
     this.contextStartedAt = Date.now()
+    // The supervisor's quiet counts from the load: a turn that began before it shows itself by its calls.
+    this.noteActivity()
     this.engineVersion = version?.version ?? null
     this.surfaces = [...surfaces]
     this.sessionModel = model
@@ -470,6 +588,8 @@ export class Runtime {
     void this.refreshAgents()
     void this.refreshHistory()
     void this.refreshGit()
+    // A resumed or reloaded run: its verified milestones against the workspace as it is now (Ready to resume).
+    void this.checkEvidence('session start')
     this.publisher.markAll()
 
     if (this.settings.ui.openOnStart) void host.open({ id: PANE_ID, title: PANE_TITLE }).catch(() => undefined)
@@ -545,7 +665,9 @@ export class Runtime {
   /** The milestones tool's answer: the run plan updated from the whole list. A subagent's list is its own. */
   recordMilestones(input: Record<string, unknown>, agentId: string | undefined): string {
     if (!this.settings.progress.milestones) return 'Milestone tracking is off in Control Room; there is no need to call this tool.'
-    if (agentId !== undefined || this.run === null) return 'Recorded.'
+    // A subagent's milestones are its own plan (Activity → Agents), never the run's.
+    if (agentId !== undefined) return this.ops.noteAgentPlan(agentId, { milestones: input, now: this.clock() }) ? 'Recorded as your own plan.' : 'Recorded.'
+    if (this.run === null) return 'Recorded.'
     const session = Chain.currentSession(this.run)?.index ?? 1
     // Claude's own statement of the objective, when it gives one, says it better than the request's first sentence.
     const objective = typeof input.objective === 'string' ? clean(input.objective, 140) : ''
@@ -556,6 +678,18 @@ export class Runtime {
       this.run = { ...this.run, objective, objectiveBy: 'claude' }
       this.persistRun()
       this.publisher.mark('activity', 'hud')
+    }
+    // Outputs Claude names (generated files, renders) join a milestone's evidence before it may complete in this same list.
+    if (Array.isArray(input.milestones)) {
+      let store = this.evidence()
+      for (const m of input.milestones) {
+        if (typeof m !== 'object' || m === null) continue
+        const item = m as Record<string, unknown>
+        if (!Array.isArray(item.outputs) || typeof item.title !== 'string') continue
+        const outputs = item.outputs.filter((o): o is string => typeof o === 'string' && o.trim() !== '').map(o => this.absPath(o.trim()))
+        store = Evidence.noteOutputs(store, Plan.keyOf(clean(item.title, 120)), outputs, Date.now())
+      }
+      this.setEvidence(store)
     }
     this.setPlan(Plan.fromMilestones(base, input, session, Date.now()))
     this.noteWorkStarted()
@@ -570,6 +704,7 @@ export class Runtime {
     const before = Plan.progressOf(previous)
     const wasDone = new Set(previous.tasks.filter(t => t.status === 'completed').map(t => t.key))
     this.run = { ...this.run, plan }
+    this.planEvidence(previous, plan)
     // A milestone done mid-turn is a boundary for work queued after it.
     this.ops.onPlanChanged(previous, plan)
     const after = this.progress()
@@ -583,6 +718,22 @@ export class Runtime {
     }
     this.persistRun()
     this.publisher.mark('activity', 'hud', 'pane')
+  }
+
+  /**
+   * Milestone evidence follows the plan: a milestone under way starts its work's window, one no longer
+   * completed (reopened) loses its snapshot, one newly completed gets one.
+   */
+  private planEvidence(previous: Plan.Plan, plan: Plan.Plan): void {
+    const now = Date.now()
+    let store = this.evidence()
+    for (const t of plan.tasks) if (Plan.isActive(t.status)) store = Evidence.noteActive(store, t.key, now)
+    const done = new Set(plan.tasks.filter(t => t.status === 'completed').map(t => t.key))
+    const reopened = previous.tasks.filter(t => t.status === 'completed' && !done.has(t.key) && plan.tasks.some(n => n.key === t.key)).map(t => t.key)
+    store = Evidence.dropSnapshots(store, reopened, now)
+    this.setEvidence(store)
+    const wasDone = new Set(previous.tasks.filter(t => t.status === 'completed').map(t => t.key))
+    for (const t of plan.tasks) if (t.status === 'completed' && !wasDone.has(t.key)) void this.snapshotMilestone(t)
   }
 
   /**
@@ -630,7 +781,7 @@ export class Runtime {
       await host.registerCommand({
         name: COMMAND,
         description: 'Open Control Room: context, behavior, guardrails, activity and setup',
-        argumentHint: '[status|queue <text>|watch in 2h <what>|watchers|decisions|decide <id>|budget|resume|profile <name>|autopilot on|off|<70%|700k>|handoff|fresh|cache|agents [mode]|help]',
+        argumentHint: '[status|queue <text>|watch in 2h <what>|watchers|decisions|decide <id>|budget|resume|evidence|profile <name>|autopilot on|off|<70%|700k>|handoff [now|wait|stop|cancel]|fresh [now]|cache|agents [mode]|help]',
       })
       this.commandsRegistered.add(COMMAND)
     } catch (error) {
@@ -658,7 +809,7 @@ export class Runtime {
     const now = await host.now()
     const existing = await findRunBySession(host, this.sessionId)
     if (existing !== null) {
-      this.run = { ...existing, status: 'active', plan: Plan.planOf(existing.plan), lastHandoff: Handoff.handoffRecordOf(existing.lastHandoff), ops: Ops.opsOf(existing.ops) }
+      this.run = { ...existing, status: 'active', plan: Plan.planOf(existing.plan), lastHandoff: Handoff.handoffRecordOf(existing.lastHandoff), ops: Ops.opsOf(existing.ops), ...(existing.evidence === undefined ? {} : { evidence: Evidence.evidenceOf(existing.evidence) }) }
       // Milestones done before this runtime attached are no turn's doing.
       this.turnStartDone = this.progress().done
       return
@@ -666,7 +817,7 @@ export class Runtime {
     const resumedFrom = this.startSource?.source === 'resume' ? this.startSource.sessionId : null
     const previous = resumedFrom === null ? null : await findRunBySession(host, resumedFrom)
     if (previous !== null) {
-      this.run = Chain.rollOver({ ...previous, plan: Plan.planOf(previous.plan), ops: Ops.opsOf(previous.ops) }, { end: 'resume', endNote: 'resumed', nextId: this.sessionId, nextStart: 'resume', now })
+      this.run = Chain.rollOver({ ...previous, plan: Plan.planOf(previous.plan), ops: Ops.opsOf(previous.ops), ...(previous.evidence === undefined ? {} : { evidence: Evidence.evidenceOf(previous.evidence) }) }, { end: 'resume', endNote: 'resumed', nextId: this.sessionId, nextStart: 'resume', now })
     } else {
       this.run = Chain.newRun({
         id: Chain.runIdOf(now, Math.random()),
@@ -738,6 +889,211 @@ export class Runtime {
     this.saveRunLater.schedule(run)
   }
 
+  // -------------------------------------------------------------------------
+  // Milestone evidence (features/evidence.ts)
+
+  /** The run's milestone evidence: what each milestone's work changed, and what each completed one stood on. */
+  evidence(): Evidence.EvidenceStore {
+    return this.run?.evidence ?? EMPTY_EVIDENCE
+  }
+
+  private setEvidence(next: Evidence.EvidenceStore): void {
+    if (this.run === null || next === this.evidence()) return
+    this.run = { ...this.run, evidence: next }
+    this.persistRun()
+    this.publisher.mark('activity', 'pane')
+  }
+
+  /** A path as the project names it: absolute paths as they are, others under the project's root. */
+  private absPath(path: string): string {
+    if (/^([a-z]:[\\/]|[\\/])/i.test(path) || this.root === '') return path
+    const sep = this.root.includes('\\') && !this.root.includes('/') ? '\\' : '/'
+    return `${this.root.replace(/[\\/]+$/, '')}${sep}${path.replace(/^\.[\\/]/, '').replace(/[\\/]/g, sep)}`
+  }
+
+  /** Files Claude's tools changed: the milestone under way owns them, and a verified milestone's file changed is noted on it. */
+  private noteEvidenceEdits(paths: readonly string[], now: number): void {
+    if (this.run === null) return
+    const ctx = { root: this.root, handoffFile: this.settings.autopilot.handoffFile }
+    // Generated and temporary files (outside the project, temp and build folders, .claude, the handoff notes) are no milestone's evidence.
+    const kept = paths.filter(p => groupOf(p, ctx) !== 'generated')
+    if (kept.length === 0) return
+    const current = this.progress().current
+    this.setEvidence(Evidence.noteEdits(this.evidence(), current === null ? null : { key: current.key, subject: current.subject }, kept, now))
+  }
+
+  /** The checks Claude ran in this context, as Activity's Validation counts them (main conversation). */
+  private checkRuns(): Evidence.CheckRun[] {
+    return this.activity.validationRuns().map(r => ({ kind: r.kind, label: VALIDATION_LABEL[r.kind], command: r.command, status: r.status, endedAt: r.endedAt }))
+  }
+
+  /** Each file's `stat` (size, time; a directory or a missing file as such), with no blob id yet. */
+  private async statFiles(paths: readonly string[]): Promise<Map<string, Evidence.Fingerprint>> {
+    const host = this.host
+    const found = new Map<string, Evidence.Fingerprint>()
+    if (host === null) return found
+    await Promise.all(
+      paths.map(async path => {
+        const st = await host.stat(path, false).catch(() => null)
+        if (st === null) found.set(path, { exists: false, size: null, mtimeMs: null, blob: null })
+        else if (st.kind === 'dir') found.set(path, { exists: true, isDir: true, size: null, mtimeMs: null, blob: null })
+        else found.set(path, { exists: true, size: st.size, mtimeMs: st.mtimeMs, blob: null })
+      }),
+    )
+    return found
+  }
+
+  /** Git's blob ids for those of `paths` that exist as files under the size limit, one `git hash-object` per fifty. */
+  private async hashInto(found: Map<string, Evidence.Fingerprint>, paths: readonly string[]): Promise<void> {
+    const host = this.host
+    if (host === null) return
+    const eligible = paths.filter(p => {
+      const f = found.get(p)
+      return f !== undefined && f.exists && f.isDir !== true && (f.size === null || f.size <= Evidence.HASH_MAX_BYTES)
+    })
+    for (let i = 0; i < eligible.length; i += 50) {
+      const chunk = eligible.slice(i, i + 50)
+      const result = await host.hashFiles(chunk).catch(() => null)
+      if (result === null || result.exitCode !== 0) {
+        this.trace(`evidence: git hash-object ${result === null ? 'could not run' : `failed (exit ${result.exitCode})`}: size and time stand in`)
+        return
+      }
+      const ids = result.stdout.split(/\r?\n/).map(l => l.trim()).filter(l => l !== '')
+      if (ids.length !== chunk.length) return
+      chunk.forEach((p, j) => {
+        const f = found.get(p)
+        const id = ids[j] ?? ''
+        if (f !== undefined && /^[0-9a-f]{40,64}$/.test(id)) found.set(p, { ...f, blob: id })
+      })
+    }
+  }
+
+  /** The commit HEAD points at, in a Git repository; null elsewhere or when Git cannot say. */
+  private async gitHeadOf(): Promise<string | null> {
+    const host = this.host
+    if (host === null) return null
+    if (this.gitRoot === undefined) this.gitRoot = await host.repoRoot().catch(() => null)
+    if (this.gitRoot === null) return null
+    const result = await host.gitHead().catch(() => null)
+    const head = result === null || result.exitCode !== 0 ? '' : result.stdout.trim()
+    return /^[0-9a-f]{40,64}$/.test(head) ? head : null
+  }
+
+  /**
+   * A milestone verified (completed): a snapshot of what it stood on. Its green checks in its window
+   * (from when it was first seen under way), its files' fingerprints, HEAD. Then the earlier snapshots
+   * are compared again: one this milestone changed and re-verified is re-baselined.
+   */
+  private async snapshotMilestone(task: Plan.PlanTask): Promise<void> {
+    if (this.run === null) return
+    const now = Date.now()
+    const store = this.evidence()
+    const since = Evidence.windowStart(store, task.key, this.contextStartedAt ?? 0)
+    const checks = Evidence.greenChecks(this.checkRuns(), since, now)
+    const paths = Evidence.filesFor(store, task.key)
+    const found = await this.statFiles(paths)
+    await this.hashInto(found, paths)
+    const head = paths.length === 0 ? null : await this.gitHeadOf()
+    if (this.run === null) return
+    // Reopened meanwhile: no snapshot of a milestone that is no longer done.
+    if (this.plan().tasks.find(t => t.key === task.key)?.status !== 'completed') return
+    const ctx = { root: this.root, handoffFile: this.settings.autopilot.handoffFile }
+    const files = paths.map(path => ({ path, ...(found.get(path) ?? { exists: false, size: null, mtimeMs: null, blob: null }), ...(groupOf(path, ctx) === 'docs' ? { isDoc: true } : {}) }))
+    const session = Chain.currentSession(this.run)?.index ?? 1
+    this.setEvidence(Evidence.addSnapshot(this.evidence(), { key: task.key, subject: task.subject, verifiedAt: now, session, checks, files, head }))
+    this.trace(`evidence: "${task.subject}" verified with ${checks.length === 0 ? 'no check' : checks.map(c => c.label).join(', ')}; ${fmt.plural(files.length, 'file')}${files.some(f => f.blob !== null) ? ' (blob ids)' : ''}${head === null ? '' : ` at ${head.slice(0, 8)}`}`)
+    this.evidenceCheckedAt = 0
+    await this.checkEvidence('milestone verified')
+  }
+
+  private isEvidenceChecking = false
+  private evidenceCheckedAt = 0
+
+  /**
+   * Compares the snapshots with the workspace: each file's `stat`, and a blob id only for one whose size or
+   * time moved. Run at a handoff (the fresh context's block and Handoff Health read that comparison), a
+   * session's start or reload, a milestone's completion and (at most once a minute) a turn's end; never
+   * while nothing is kept.
+   */
+  async checkEvidence(reason: string): Promise<void> {
+    if (this.host === null || this.run === null || this.isEvidenceChecking || this.evidence().snapshots.length === 0) return
+    this.isEvidenceChecking = true
+    try {
+      const store = this.evidence()
+      const found = await this.statFiles(Evidence.pathsToObserve(store))
+      await this.hashInto(found, Evidence.pathsToHash(store, found))
+      if (this.run === null) return
+      const now = Date.now()
+      this.evidenceCheckedAt = now
+      const tasks = this.plan().tasks
+      const before = this.evidence()
+      const next = Evidence.compare(before, found, {
+        active: new Set(tasks.filter(t => Plan.isActive(t.status)).map(t => t.key)),
+        completed: new Set(tasks.filter(t => t.status === 'completed').map(t => t.key)),
+        green: Evidence.greenChecks(this.checkRuns(), 0, now),
+        now,
+      })
+      if (next === before) return
+      for (const snap of next.snapshots) {
+        const was = before.snapshots.find(b => b.key === snap.key)
+        if (was !== undefined && (was.status !== snap.status || was.rebaselined.length !== snap.rebaselined.length)) {
+          const line = Evidence.evidenceLine(snap)
+          this.trace(`evidence (${reason}): "${snap.subject}" ${snap.status}${line === null ? '' : `: ${line}`}`)
+        }
+      }
+      this.setEvidence(next)
+    } finally {
+      this.isEvidenceChecking = false
+    }
+  }
+
+  /** The completed milestones whose verification is stale now (the last comparison's word). */
+  staleEvidence(): Evidence.Snapshot[] {
+    return this.evidence().snapshots.filter(s => s.status === 'stale')
+  }
+
+  /**
+   * The person accepts stale milestones' files as they are now (one by key, or all): their evidence is
+   * re-baselined on the files as found, "accepted by you". The words say what was accepted.
+   */
+  async acceptEvidence(key: string | null): Promise<string> {
+    const stale = this.staleEvidence().filter(s => key === null || s.key === key)
+    if (stale.length === 0) return 'No milestone has stale verification.'
+    const paths = [...new Set(stale.flatMap(s => s.changes.map(c => c.path)))]
+    const found = await this.statFiles(paths)
+    await this.hashInto(found, paths)
+    this.setEvidence(Evidence.acceptChanges(this.evidence(), key, found, Date.now()))
+    const names = stale.map(s => `"${s.subject}"`).join(', ')
+    this.trace(`evidence: accepted by the person as they are now: ${names}`)
+    return `Accepted ${names} as ${stale.length === 1 ? 'it is' : 'they are'} now: ${stale.length === 1 ? 'its' : 'their'} files are the evidence from here.`
+  }
+
+  /** A stale milestone named by its number in /cr evidence's list or by words of its subject; null when none matches. */
+  staleEvidenceKey(words: string): string | null {
+    const stale = this.staleEvidence()
+    const n = Number(words)
+    if (Number.isInteger(n) && n >= 1 && n <= stale.length) return stale[n - 1]?.key ?? null
+    const w = words.trim().toLowerCase()
+    return w === '' ? null : (stale.find(s => s.subject.toLowerCase().includes(w))?.key ?? null)
+  }
+
+  /** /cr evidence: each verified milestone's evidence in words, the stale ones numbered for /cr evidence accept. */
+  evidenceText(): string {
+    const snaps = this.evidence().snapshots
+    if (snaps.length === 0) return 'No milestone evidence yet: it is kept when a milestone is completed (its green checks and the files its work changed).'
+    let n = 0
+    const lines = snaps.map(s => {
+      const line = Evidence.evidenceLine(s)
+      const files = s.files.length === 0 ? 'no files' : fmt.plural(s.files.length, 'file')
+      const checks = s.checks.length === 0 ? 'no check' : [...new Set(s.checks.map(c => c.label))].join(', ')
+      const head = s.head === null ? '' : ` at ${s.head.slice(0, 8)}`
+      if (s.status === 'stale') return `  ${++n}. ▲ ${s.subject}: verification stale · ${line ?? ''}`
+      return `     ${s.status === 'changing' ? '◷' : '✓'} ${s.subject}: ${s.status === 'changing' ? (line ?? 'being changed') : `current${line === null ? '' : ` (${line})`}`} · ${checks} · ${files}${head}`
+    })
+    const tail = n === 0 ? [] : ['', `Rerun the named checks, or accept the files as they are now: /cr evidence accept ${n === 1 ? '1' : '<number>|all'}.`]
+    return [`Milestone evidence: ${fmt.plural(snaps.length, 'verified milestone')}${n === 0 ? ', none stale' : `, ${n} stale`}`, ...lines, ...tail].join('\n')
+  }
+
   /**
    * What the fresh context after Control Room's own handoff is told with its first message (the
    * continuation, or whatever the person types first): the run, the notes, the milestones. It is
@@ -776,7 +1132,7 @@ export class Runtime {
       return
     }
     const host = this.host
-    const now = host === null ? Date.now() : await host.now()
+    const now = host === null ? Date.now() : await this.engineNow()
     const wasOurs = this.isOwnClear || this.autopilot.state === 'clearing'
     const purpose = wasOurs ? this.freshPurpose : null
     this.trace(`fresh session ${input.sessionId} after /clear (${purpose !== null ? `Project Sentinel's ${purpose.endNote}` : wasOurs ? "Control Room's handoff" : 'cleared by the person'})`)
@@ -825,6 +1181,8 @@ export class Runtime {
     }
     const policies = this.policies().map(s => s.name)
     const sessionNumber = this.run === null ? 1 : (Chain.currentSession(this.run)?.index ?? 1)
+    // What the old context left running keeps running here (Claude Code keeps background work across /clear).
+    const left = this.autopilot.leftRunning
     const base = prompts.continuationContext({
       runNumber: this.run?.number ?? null,
       sessionNumber,
@@ -833,7 +1191,13 @@ export class Runtime {
       milestones: this.plan().tasks.map(t => ({ subject: t.subject, status: t.status, detail: t.detail })).slice(-30),
       objective: this.run?.objectiveBy === 'claude' ? this.run.objective : null,
       cause: purpose?.cause,
+      leftRunning: left,
+      stale: Evidence.staleText(this.staleEvidence()),
     })
+    if (left.length > 0) {
+      this.trace(`autopilot: the fresh context is told what still runs (${left.map(t => `${t.id} ${t.class ?? 'unknown'}`).join(', ')})`)
+      this.stepAutopilot({ kind: 'leftRunningTold' })
+    }
     // What the run carries into it: the wake, work queued for a fresh context, answers and open decisions.
     const extras = this.ops.onFreshContext(purpose)
     this.freshContext = extras === null ? base : `${base} ${extras}`
@@ -864,7 +1228,8 @@ export class Runtime {
     const has = async (key: string) => (await host.storeGet(key).catch(() => undefined)) !== undefined
     const counter = await host.storeGet(STORE_ENTRIES.runCounter).catch(() => undefined)
     const writes = carriedWrites(former.store, {
-      settings: await has(STORE_ENTRIES.settings),
+      // Fresh-install defaults this very load wrote are not the person's: what Control Room kept wins.
+      settings: (await has(STORE_ENTRIES.settings)) && !this.isFreshDefaults,
       quest: await has(STORE_ENTRIES.quest),
       cache: await has(STORE_ENTRIES.cache),
       counter: typeof counter === 'number' && Number.isFinite(counter) ? Math.floor(counter) : 0,
@@ -875,6 +1240,13 @@ export class Runtime {
     const marker: CarriedMarker = { from: former.file, at: now, keys: keys.length }
     await host.storeSet(CARRIED_MARK, marker).catch(() => undefined)
     this.trace(`carried ${keys.length} keys over from ${former.file}`)
+    // Not a fresh install after all: no first-run card, and the defaults it had (Classic) unless its settings came along.
+    if (keys.length > 0 && this.isFreshDefaults) {
+      this.isFreshDefaults = false
+      if (!keys.includes(STORE_ENTRIES.settings)) await host.storeSet(STORE_ENTRIES.settings, classicSettings()).catch(() => undefined)
+      this.onboarding = null
+      await host.storeDelete(STORE_ENTRIES.onboarding).catch(() => undefined)
+    }
     if (keys.length > 0) this.announce('Project Sentinel is Control Room renamed: your settings, runs, Quest log and cache memory came along.')
     return keys
   }
@@ -938,18 +1310,33 @@ export class Runtime {
     return true
   }
 
+  /**
+   * Every timer and sampler this runtime keeps (the session ends; a test's reload). Claude Code cancels
+   * a reloaded plugin's waits itself, so an old runtime never acts after a new one took over.
+   */
+  stopTimers(): void {
+    this.monitor.stop()
+    this.agents.poll?.cancel()
+    this.agents.poll = null
+    this.supervisorTimer?.cancel()
+    this.supervisorTimer = null
+    this.cache.stop()
+    this.ops.stop()
+    this.companionTicker?.cancel()
+    this.companionTicker = null
+    this.usageTicker?.cancel()
+    this.usageTicker = null
+    this.ticker?.cancel()
+    this.ticker = null
+  }
+
   async onSessionEnd(e: SessionEndInput): Promise<void> {
     if (e.reason === 'clear') {
       this.publisher.forgetPublished()
       this.persistRun(true)
       return
     }
-    this.monitor.stop()
-    this.agents.poll?.cancel()
-    this.cache.stop()
-    this.ops.stop()
-    this.companionTicker?.cancel()
-    this.companionTicker = null
+    this.stopTimers()
     if (this.run !== null) {
       const now = Date.now()
       const end: Chain.SessionEnd = e.reason === 'resume' ? 'resume' : e.reason === 'logout' ? 'logout' : e.reason === 'prompt_input_exit' ? 'exit' : 'other'
@@ -970,14 +1357,14 @@ export class Runtime {
     return this.root === '' ? file : `${this.root.replace(/[\\/]+$/, '')}${sep}${file}`
   }
 
-  async refreshUsage(withSummary = false): Promise<void> {
+  /** `isAfterAnswer`: read right after a turn of the main conversation was answered (an API response has come back). */
+  async refreshUsage(withSummary = false, isAfterAnswer = false): Promise<void> {
     const host = this.host
     if (host === null) return
     const usage = await (withSummary ? host.usageSummary() : host.usage()).catch(() => null)
     if (usage === null) return
     this.applyUsage(usage)
-    // A claude.ai plan's rate-limit windows: the one-hour cache is Claude Code's default for its main conversation.
-    if (usage.rateLimits.some(r => r.kind === 'five_hour' || r.kind === 'seven_day')) this.cache.notePlan()
+    this.notePlanUsage(usage.rateLimits, isAfterAnswer)
     if (withSummary) {
       const at = usage.context.breakdown?.autoCompactThreshold
       this.autoCompactAt = usage.context.breakdown?.isAutoCompactEnabled === false ? undefined : at
@@ -1000,6 +1387,54 @@ export class Runtime {
     this.publisher.mark('hud', 'pane', 'chain')
   }
 
+  /**
+   * The plan's rate-limit windows, as a response reported them (a measurement, a read after a turn or
+   * on the minute). Redrawn when they say something new; the minute look runs only while a five-hour
+   * window counts down, so an API-key session (no windows) or a reset window costs nothing.
+   */
+  notePlanUsage(rateLimits: readonly PlanUsage.RateLimitReading[], isAfterAnswer = false): void {
+    // A claude.ai plan's rate-limit windows: the one-hour cache is Claude Code's default for its main conversation.
+    if (rateLimits.some(r => r.kind === 'five_hour' || r.kind === 'seven_day')) this.cache.notePlan()
+    const before = this.planUsage
+    this.planUsage = PlanUsage.readWindows(before, rateLimits, this.clock(), isAfterAnswer)
+    if (this.planUsage !== before) {
+      const five = this.planUsage.fiveHour
+      if (five !== before.fiveHour || this.planUsage.isAbsent !== before.isAbsent) {
+        this.trace(`plan usage: ${five === null ? (this.planUsage.isAbsent ? 'no five-hour window' : 'no reading') : `five-hour ${five.percent}%${five.resetsAt === null ? '' : `, resets ${new Date(five.resetsAt).toISOString()}`}`}`)
+      }
+      this.publisher.mark('hud', 'pane')
+    }
+    this.syncUsageTicker()
+  }
+
+  /** Claude Code ended a request on an API error: a rate limit is the plan's limit reached (or a throttle), shown until it lifts. */
+  onStopFailure(error: string): void {
+    if (error !== 'rate_limit') return
+    this.planUsage = PlanUsage.noteRateLimited(this.planUsage, this.clock())
+    this.trace(`plan usage: a request ended on the rate limit${this.planUsage.limited?.window === null ? '' : ` (${this.planUsage.limited?.window} full)`}`)
+    this.publisher.mark('hud', 'pane')
+    this.syncUsageTicker()
+  }
+
+  private syncUsageTicker(): void {
+    const host = this.host
+    if (host === null) return
+    const isWanted = PlanUsage.isTicking(this.planUsage, this.clock())
+    if (isWanted && this.usageTicker === null) {
+      this.usageTicker = host.every(60_000, () => {
+        // The countdown moves on, and a reading may have come from a request no measurement reported.
+        this.publisher.mark('hud', 'pane')
+        void host
+          .usage()
+          .then(u => this.notePlanUsage(u.rateLimits))
+          .catch(() => this.syncUsageTicker())
+      })
+    } else if (!isWanted && this.usageTicker !== null) {
+      this.usageTicker.cancel()
+      this.usageTicker = null
+    }
+  }
+
   configureAutopilot(): void {
     const a = this.settings.autopilot
     const { threshold, isClamped } = Autopilot.resolveThreshold({
@@ -1018,14 +1453,17 @@ export class Runtime {
     this.stepAutopilot({ kind: 'oriented', tokens: this.usage.tokens })
   }
 
-  stepAutopilot(event: Autopilot.AutopilotEvent): void {
+  /** Context Autopilot's configuration as the machine reads it (features/autopilot.ts AutopilotConfig). */
+  autopilotConfig(): Autopilot.AutopilotConfig {
     const a = this.settings.autopilot
+    return { continuation: a.continuation, fallbackToCompact: a.fallbackToCompact, autoContinue: a.autoContinue, waitMs: a.waitMinutes * 60_000 }
+  }
+
+  stepAutopilot(event: Autopilot.AutopilotEvent): void {
     const before = this.autopilot.state
-    const result = Autopilot.step(this.autopilot, event, {
-      continuation: a.continuation,
-      fallbackToCompact: a.fallbackToCompact,
-      autoContinue: a.autoContinue,
-    })
+    const result = Autopilot.step(this.autopilot, event, this.autopilotConfig())
+    // A new state is timed from the event's own clock (the engine's), else the engine's last reading.
+    if (result.model.state !== before) result.model = { ...result.model, stateSince: 'now' in event && typeof event.now === 'number' ? event.now : (this.lastEngineAt ?? this.clock()) }
     if (result.model.state !== before || result.effects.length > 0 || event.kind === 'oriented') {
       const effects = result.effects.filter(e => e.kind !== 'notify').map(e => e.kind)
       const at = event.kind === 'oriented' ? ` at ${Math.round(event.tokens / 1000)}k, hands off at ${Math.round((Autopilot.handoffPoint(result.model) ?? 0) / 1000)}k` : ''
@@ -1034,10 +1472,27 @@ export class Runtime {
     this.applyAutopilot(result)
   }
 
+  /** The engine's last reading of its clock, and the system clock's then: what a step with no time of its own is timed by. */
+  private lastEngineAt: number | null = null
+  private lastEngineSystemAt = 0
+
   /** The engine's clock (`$.clock.now()`), which times the handoff's steps; the system clock when it cannot be read. */
   engineNow(): Promise<number> {
     const host = this.host
-    return host === null ? Promise.resolve(this.clock()) : host.now().catch(() => this.clock())
+    const read = host === null ? Promise.resolve(this.clock()) : host.now().catch(() => this.clock())
+    return read.then(at => {
+      this.lastEngineAt = at
+      this.lastEngineSystemAt = this.clock()
+      return at
+    })
+  }
+
+  /**
+   * The engine's time now, without a call: its last reading moved on by the system clock since. What a
+   * handoff's wait is measured in (its end was set from the engine's clock), for the countdowns drawn.
+   */
+  engineTime(): number {
+    return this.lastEngineAt === null ? this.clock() : this.lastEngineAt + Math.max(0, this.clock() - this.lastEngineSystemAt)
   }
 
   /** One line in Claude Code's debug log (claude --debug), never on screen: how a handoff or a refresh went, step by step. */
@@ -1047,12 +1502,128 @@ export class Runtime {
 
   private applyAutopilot(result: Autopilot.Step): void {
     const before = this.autopilot.state
-    this.autopilot = result.model
+    // How long a step has stood is the supervisor's first fact (stamped by stepAutopilot; a reload keeps the record's).
+    this.autopilot = result.model.stateSince === null && result.model.state !== 'off' ? { ...result.model, stateSince: this.lastEngineAt ?? this.clock() } : result.model
     this.saveAutopilotRecord()
     this.publisher.mark('hud', 'pane')
     for (const effect of result.effects) void this.runEffect(effect)
     // A handoff coming or going changes whether the cache is worth keeping.
     if (before !== this.autopilot.state && !this.turn.isRunning) this.cache.schedule()
+    if (before !== this.autopilot.state) this.superviseLater(true)
+  }
+
+  // -------------------------------------------------------------------------
+  // The Handoff Supervisor
+
+  /**
+   * The supervisor looks every SUPERVISE_MS while a handoff is under way (any state but off and
+   * armed), and once at once when the state changes. It only observes, with no model call and nothing
+   * added to the transcript, except at a wait's end (features/supervisor.ts dueStep).
+   */
+  private superviseLater(isNow = false): void {
+    const host = this.host
+    if (host === null) return
+    const state = this.settings.autopilot.enabled ? this.autopilot.state : 'off'
+    const isActive = state !== 'off' && state !== 'armed'
+    if (!isActive) {
+      this.supervisorTimer?.cancel()
+      this.supervisorTimer = null
+      if (this.supervisor !== null) {
+        this.supervisor = null
+        this.supervisorKey = ''
+        this.publisher.mark('hud', 'pane')
+      }
+      return
+    }
+    if (this.supervisorTimer === null) this.supervisorTimer = host.every(SUPERVISE_MS, () => void this.supervise())
+    if (isNow) host.after(0, () => void this.supervise())
+  }
+
+  /** Questions open to the person now: Project Sentinel's own approvals, and a running AskUserQuestion. */
+  private questionsOpen(): number {
+    return this.pendingApprovals.length + this.activity.runningItems().filter(i => i.agentId === null && i.tool === 'AskUserQuestion').length
+  }
+
+  /** The supervisor's facts, as the Runtime knows them now. */
+  private supervisorInput(now: number): Supervisor.SupervisorInput {
+    const ap = this.autopilot
+    return {
+      now,
+      state: this.settings.autopilot.enabled ? ap.state : 'off',
+      stateSince: ap.stateSince,
+      isTurnRunning: this.turn.isRunning,
+      isHandoffTurn: this.turn.isRunning && (this.turn.kind === 'handoff' || this.turn.kind === 'retry'),
+      background: ap.background,
+      waitSince: ap.waitSince,
+      waitUntil: ap.waitUntil,
+      skipWait: ap.skipWait,
+      notesWritten: ap.notesWritten,
+      questionsOpen: this.questionsOpen(),
+      quietMs: this.quietSince === null ? null : this.clock() - this.quietSince,
+      lastError: ap.lastError,
+      continuation: this.settings.autopilot.continuation,
+    }
+  }
+
+  /** One look: the diagnosis (traced and shown when it changes), a wait's end, and the classifier for a task the rules do not know. */
+  async supervise(): Promise<void> {
+    const host = this.host
+    if (host === null) return
+    const now = await this.engineNow()
+    const input = this.supervisorInput(now)
+    if (input.state === 'off' || input.state === 'armed') {
+      this.superviseLater()
+      return
+    }
+    const d = Supervisor.diagnose(input)
+    const key = `${d.phase}|${d.status}|${d.blocker?.kind ?? ''}|${d.blocker?.text ?? ''}`
+    if (key !== this.supervisorKey) {
+      this.supervisorKey = key
+      this.trace(Supervisor.traceLine(d))
+    }
+    this.supervisor = d
+    this.publisher.mark('hud', 'pane')
+    const due = Supervisor.dueStep(input)
+    if (due === 'waitExpired') {
+      this.trace(`supervisor: the wait's patience is over (${this.settings.autopilot.waitMinutes} min): the handoff goes on${this.turn.isRunning ? ' when this turn ends' : ''}, leaving ${Autopilot.backgroundWords(Autopilot.blockingOf(this.autopilot.background))} running`)
+      this.stepAutopilot({ kind: 'waitExpired', now, isTurnRunning: this.turn.isRunning })
+    } else if (due === 'unblocked') {
+      this.trace('supervisor: nothing the handoff must wait for is left and the session is quiet: the handoff goes on')
+      this.stepAutopilot({ kind: 'unblocked', now })
+    }
+    this.classifyUnknown(now)
+  }
+
+  /**
+   * A task the rules do not recognise, waited for a minute already: a small isolated classification
+   * (`$.model.classify`, the engine's small fast model, never the conversation), once per task. Only
+   * its command and Claude Code's description of it are sent.
+   */
+  private classifyUnknown(now: number): void {
+    const host = this.host
+    const ap = this.autopilot
+    if (host === null || ap.state !== 'waiting-background') return
+    const ask = Supervisor.toClassify({ now, waitSince: ap.waitSince, background: ap.background, asked: this.classifyAsked }).slice(0, CLASSIFY_PER_LOOK)
+    for (const t of ask) {
+      this.classifyAsked.add(t.id)
+      const summary: Background.TaskSummary = { id: t.id, type: 'shell', description: t.description, ...(t.command === undefined ? {} : { command: t.command }) }
+      void host
+        .classify(Background.classifierText(summary), Background.CLASSIFIER_LABELS)
+        .then(label => {
+          const verdict = Background.verdictOfLabel(label)
+          this.trace(`supervisor: asked the isolated classifier about ${t.id} (${clean(t.description, 60)}): ${label ?? 'no label'}${verdict === null ? ', still waited for' : ` → ${verdict.class}`}`)
+          if (verdict === null) return
+          this.taskVerdicts.set(t.id, verdict)
+          if (this.lastStop !== null) this.lastStop = { ...this.lastStop, background: this.lastStop.background.map(b => (b.id === t.id ? { ...b, class: verdict.class, why: verdict.why, by: verdict.by } : b)) }
+          this.stepAutopilot({ kind: 'reclassified', id: t.id, class: verdict.class, why: verdict.why, by: verdict.by, isTurnRunning: this.turn.isRunning })
+        })
+        .catch(error => this.trace(`supervisor: the isolated classifier could not answer about ${t.id}: ${error instanceof Error ? clean(error.message, 100) : String(error)}`))
+    }
+  }
+
+  /** The main conversation showed activity: the supervisor's quiet counts from now. */
+  private noteActivity(): void {
+    this.quietSince = this.clock()
   }
 
   /** The last record written, so an unchanged machine writes nothing. */
@@ -1082,9 +1653,10 @@ export class Runtime {
     const record = await host.loadAutopilotRecord().catch(() => null)
     if (record === null) return
     this.savedRecord = JSON.stringify({ ...record, at: 0 })
-    const result = Autopilot.recover(this.autopilot, record, { sessionId: this.sessionId })
+    const result = Autopilot.recover(this.autopilot, record, { sessionId: this.sessionId, now: await this.engineNow(), waitMs: this.autopilotConfig().waitMs })
     if (result.model === this.autopilot) return
     this.applyAutopilot(result)
+    this.trace(`autopilot: recovered ${result.model.state} after a reload${result.model.state === 'waiting-background' ? ` (waiting for ${Autopilot.backgroundWords(Autopilot.blockingOf(result.model.background))}${result.model.waitUntil === null ? '' : `, at most until ${new Date(result.model.waitUntil).toISOString()}`})` : ''}`)
   }
 
   private async runEffect(effect: Autopilot.AutopilotEffect): Promise<void> {
@@ -1111,16 +1683,20 @@ export class Runtime {
                 runNumber: this.run?.number ?? null,
                 sessionNumber: this.run === null ? 1 : (Chain.currentSession(this.run)?.index ?? 1),
                 planTool: this.planSource === 'milestones' ? this.milestonesTool : this.planSource === 'tasks' ? 'your task list (TodoWrite or the Task tools)' : null,
+                waitMinutes: this.settings.autopilot.waitMinutes,
+                stale: Evidence.staleText(this.staleEvidence()),
               })
         // Deferred only to leave the dispatch that decided it; the turn's start (recognised by its text) moves the handoff on.
         host.after(250, () => void this.submitOwn(text, effect.kind === 'submitRetry' ? 'retry' : 'handoff'))
         return
       }
       case 'verifyHandoff': {
+        // What the handoff leaves: its milestones' evidence as it stands now (Handoff Health, the fresh context's block).
+        await this.checkEvidence('handoff')
         const notes = await this.verifyHandoff()
         if (notes.isOk) this.questEvent('handoff', 'Clean handoff: notes verified')
         this.recordHandoffHealth(notes.isOk, notes.mtimeMs)
-        this.stepAutopilot({ kind: 'handoffVerified', isOk: notes.isOk, now: await host.now() })
+        this.stepAutopilot({ kind: 'handoffVerified', isOk: notes.isOk, now: await this.engineNow() })
         return
       }
       case 'checkNotes': {
@@ -1176,10 +1752,11 @@ export class Runtime {
    * left in each of the four places (the milestones, the project's docs,
    * CLAUDE.md, the notes), and whether a check ran in this context.
    */
-  private recordHandoffHealth(isNotesWritten: boolean, notesAt: number | null = null): void {
+  private recordHandoffHealth(isNotesWritten: boolean, notesAt: number | null = null, left: readonly Autopilot.BackgroundTask[] = this.autopilot.leftRunning): void {
     if (this.run === null) return
     const p = this.progress()
     const ap = this.autopilot
+    const services = left.filter(t => t.class === 'persistent')
     const ctx = { root: this.root, handoffFile: this.settings.autopilot.handoffFile }
     const from = this.handoffTurn.fromTurn
     const changed = from < 0 ? [] : this.activity.changeList().filter(f => f.lastTurn >= from)
@@ -1204,20 +1781,32 @@ export class Runtime {
         checks,
         isClaudeMdEdited: changed.some(f => isClaudeMd(f.path)),
         // A handoff that waited for background work: whether the notes were written again after it ended.
+        // Of the tasks it waited for, the ones that ended before it went on (the rest are left running).
         background:
-          ap.waitedFor === 0
+          ap.waitedFor - (left.length - services.length) <= 0 || ap.backgroundEndedAt === null
             ? null
-            : { tasks: ap.waitedFor, isNotesAfter: notesAt !== null && ap.backgroundEndedAt !== null && notesAt >= ap.backgroundEndedAt - 1000 },
+            : { tasks: ap.waitedFor - (left.length - services.length), isNotesAfter: notesAt !== null && notesAt >= ap.backgroundEndedAt - 1000 },
+        left: left.length === 0 ? null : { services: services.length, work: left.length - services.length, names: left.map(t => t.description).join('; ') },
+        evidence: this.evidenceFacts(),
       }),
       currentKey: p.current?.key ?? null,
       currentSubject: p.current?.subject ?? null,
       done: p.done,
       total: p.total,
       continuity: null,
+      ...(left.length === 0 ? {} : { leftRunning: left.map(t => ({ id: t.id, description: t.description, class: t.class ?? 'unknown', endedAt: null, status: null })) }),
     }
     this.run = { ...this.run, lastHandoff: record }
     this.persistRun()
     this.publisher.mark('pane')
+  }
+
+  /** Handoff Health's evidence item: the verified milestones with files, and those whose verification is stale. */
+  private evidenceFacts(): Handoff.HealthFacts['evidence'] {
+    const kept = this.evidence().snapshots.filter(s => s.files.length > 0)
+    if (kept.length === 0) return null
+    const stale = kept.filter(s => s.status === 'stale')
+    return { verified: kept.length, stale: stale.map(s => s.subject), rerun: [...new Set(stale.flatMap(s => s.checks.map(c => c.label)))] }
   }
 
   /**
@@ -1311,7 +1900,7 @@ export class Runtime {
       this.stepAutopilot({ kind: 'clearFailed', error: cleared.error })
       return
     }
-    this.stepAutopilot({ kind: 'clearDone', now: await host.now() })
+    this.stepAutopilot({ kind: 'clearDone', now: await this.engineNow() })
   }
 
   /**
@@ -1414,7 +2003,7 @@ export class Runtime {
       }
       // Claude Code does not run this plugin's own session.compact hook for its own compaction.
       this.afterCompaction(result)
-      this.stepAutopilot({ kind: 'compactDone', now: await host.now() })
+      this.stepAutopilot({ kind: 'compactDone', now: await this.engineNow() })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       // A headless or SDK session (Desktop's host protocol among them) compacts only inside a turn:
@@ -1461,6 +2050,7 @@ export class Runtime {
   onPromptSubmit(text: string, origin: PromptOrigin | undefined, turnId?: string, at: number = this.clock()): string[] {
     const context: string[] = []
     const isOwn = isOwnPrompt(origin)
+    this.noteActivity()
     // Without a running turn the prompt starts the next one: a notification's is that turn's whatever its text.
     if (turnId === undefined) this.nextTurn = origin?.kind === 'task-notification' ? 'notification' : null
     if (origin?.kind === 'task-notification') {
@@ -1468,6 +2058,8 @@ export class Runtime {
       const task = Autopilot.notificationTask(text)
       this.trace(`background: a task notification ${turnId === undefined ? 'starts a turn' : `is delivered into turn ${turnId}`}${task === null ? '' : ` (${task.id}${task.status === null ? '' : `, ${task.status}`})`}`)
       if (task !== null) this.noteTaskEnded(task.id, task.status, 'its notification', at)
+      // A workflow run's task ended: its agents with no end of their own seen end with it.
+      if (task?.toolUseId !== undefined) this.ops.noteWorkflowEnd(task.toolUseId, task.status)
       const hold = this.backgroundHoldNote()
       if (hold !== null) context.push(hold)
     }
@@ -1483,6 +2075,13 @@ export class Runtime {
     if (load !== null) context.push(this.delivered('pressure', load, 'prompt'))
     // Answers from the Decision Inbox that did not block ride whichever prompt goes next.
     context.push(...this.ops.onPromptSubmit(origin, text))
+    // After a handoff that compacted instead of clearing: what still runs, with the first prompt after it.
+    const left = this.autopilot.leftRunning
+    if (left.length > 0 && (this.autopilot.state === 'resuming' || this.autopilot.state === 'armed') && origin?.kind !== 'task-notification') {
+      const note = prompts.leftRunningNote(left)
+      if (note !== null) context.push(note)
+      this.stepAutopilot({ kind: 'leftRunningTold' })
+    }
     if (isOwn) return context
     const isComposeMissing = !this.compose.isReached && (this.composeObserved || this.compose.isLikelyBypassed)
     if (isComposeMissing && !this.compose.deliveredFallback) {
@@ -1630,6 +2229,16 @@ export class Runtime {
       this.lastStop = { ...this.lastStop, background: this.lastStop.background.filter(b => b.id !== id) }
     }
     this.trace(`background: ${id} ended${status === null ? '' : ` (${status})`}, as ${via} says`)
+    // Work the last handoff left running: its end is the run's record now (its result reached this context).
+    const h = this.run?.lastHandoff
+    if (this.run !== null && h !== undefined && h !== null) {
+      const next = Handoff.noteLeftEnded(h, id, status, now)
+      if (next !== h) {
+        this.run = { ...this.run, lastHandoff: next }
+        this.persistRun()
+        this.trace(`background: ${id}, left running by the last handoff, ended here (${status ?? 'ended'})`)
+      }
+    }
     if (this.settings.autopilot.enabled) this.stepAutopilot({ kind: 'backgroundEnded', id, status, now })
     this.publisher.mark('hud', 'activity', 'pane', 'resources')
   }
@@ -1640,7 +2249,8 @@ export class Runtime {
     return prompts.backgroundResultNote({
       handoffFile: this.settings.autopilot.handoffFile,
       planTool: this.planSource === 'milestones' ? this.milestonesTool : this.planSource === 'tasks' ? 'your task list' : null,
-      left: this.autopilot.background.map(t => t.description),
+      // What the handoff still waits for: a server running beside it is not.
+      left: Autopilot.blockingOf(this.autopilot.background).map(t => t.description),
     })
   }
 
@@ -1652,6 +2262,7 @@ export class Runtime {
     const isNotification = begun === 'notification' || Autopilot.notificationTask(input.text) !== null
     const kind: TurnKind = prompts.ownPromptKind(input.text) ?? (isNotification ? 'notification' : input.text === '' ? 'other' : 'person')
     this.lastStop = null
+    this.noteActivity()
     this.turn = {
       id: input.turnId,
       isRunning: true,
@@ -1676,7 +2287,7 @@ export class Runtime {
     this.trace(`turn ${input.turnId} started (${kind})`)
     // The handoff and the continuation move on when their own turns begin, not when their prompts were sent.
     if (kind === 'handoff' || kind === 'continuation' || (kind === 'person' && this.autopilot.state === 'resuming')) {
-      const now = host === null ? Date.now() : await host.now()
+      const now = host === null ? Date.now() : await this.engineNow()
       this.stepAutopilot(kind === 'handoff' ? { kind: 'handoffStarted', now, turnId: input.turnId } : kind === 'continuation' ? { kind: 'continuationStarted', now } : { kind: 'personTookOver', now })
     }
   }
@@ -1684,6 +2295,8 @@ export class Runtime {
   /** turn.step, before the request: the model and effort to send. */
   stepRequest(e: TurnStepInput): { model?: string; effort?: TurnStepInput['effort'] } {
     this.composeObserved = true
+    if (e.agentId === undefined) this.noteActivity()
+    else this.ops.noteAgentStep(e.agentId)
     const out: { model?: string; effort?: TurnStepInput['effort'] } = {}
     const eff = this.effective()
     const isMain = e.agentId === undefined
@@ -1787,11 +2400,13 @@ export class Runtime {
       return
     }
     this.turn = { ...this.turn, isRunning: false }
+    this.noteActivity()
     this.activity.turnEnded()
     if (this.run !== null) this.run = Chain.countTurn(this.run, Date.now())
-    await this.refreshUsage()
+    if (input.reason === 'answer') this.planUsage = PlanUsage.noteAnswered(this.planUsage)
+    await this.refreshUsage(false, input.reason === 'answer')
     const host = this.host
-    const now = host === null ? Date.now() : await host.now()
+    const now = host === null ? Date.now() : await this.engineNow()
     // A turn whose start this runtime never saw began before a reload of the plugin.
     const turnKind: TurnKind = this.turn.id === null ? 'unknown' : this.turn.kind
     // What Claude Code listed in flight as this turn stopped (its Stop comes before turn.complete); none seen: an interrupt.
@@ -1812,6 +2427,7 @@ export class Runtime {
     }
     this.cache.turnEnded(this.clock())
     this.checkContinuity()
+    if (Date.now() - this.evidenceCheckedAt >= Evidence.EVIDENCE_CHECK_EVERY_MS) void this.checkEvidence('turn end')
     void this.refreshGit()
     this.persistRun()
     // The run's boundary: queued work, answers and a due watcher go out from here, one at a time.
@@ -1819,8 +2435,9 @@ export class Runtime {
     this.publisher.mark('hud', 'pane', 'activity', 'spinner', 'chain', 'ops')
   }
 
-  onMeasure(input: Pick<SessionUsage, 'context' | 'cost'> & { changed?: readonly string[] }): void {
+  onMeasure(input: Pick<SessionUsage, 'context' | 'cost'> & { rateLimits?: readonly PlanUsage.RateLimitReading[]; changed?: readonly string[] }): void {
     this.applyUsage(input)
+    if (input.rateLimits !== undefined) this.notePlanUsage(input.rateLimits)
     // The session's cost grew with no turn of the conversation running: Claude Code sent a request of its own.
     if (input.changed?.includes('cost') === true && !this.turn.isRunning) this.cache.noteSideRequest(this.clock())
   }
@@ -1908,18 +2525,23 @@ export class Runtime {
   async onStop(input: {
     stopHookActive: boolean
     lastMessage: string
-    background: readonly { id: string; type: string; description: string; command?: string }[]
+    background: readonly { id: string; type: string; description: string; command?: string; agent_type?: string; name?: string }[]
     wakeups: readonly { schedule: string; recurring: boolean }[]
     permissionMode: string | undefined
   }): Promise<string | null> {
     if (input.permissionMode !== undefined) this.permissionMode = input.permissionMode
+    this.noteActivity()
     // Claude Code's own list of the background work still running is the truth: a job that ended by
     // itself (or was stopped some other way) leaves the list kept from the tool results.
     const running = new Set(input.background.map(b => b.id))
     for (const id of [...this.activity.background.keys()]) if (!running.has(id)) this.activity.backgroundEnded(id)
     this.ops.noteStop(input.lastMessage)
+    // Each task classified (features/background.ts): a server or a watcher never holds a handoff, the queue or the guard.
+    const background = input.background.map(b => this.taskOf(b)).slice(0, 8)
+    const persistent = background.filter(t => t.class === 'persistent')
+    if (persistent.length > 0) this.trace(`background: not waited for (${persistent.map(t => `${t.id}: ${t.why ?? 'persistent'}`).join('; ')})`)
     this.lastStop = {
-      background: input.background.map(b => ({ id: b.id, description: clean(b.description || b.command || `a ${b.type} task`, 80) })).slice(0, 8),
+      background,
       wakeups: input.wakeups.map(w => ({ schedule: w.schedule, recurring: w.recurring })).slice(0, 8),
       isQuestion: endsWithQuestion(input.lastMessage),
       at: Date.now(),
@@ -1951,7 +2573,8 @@ export class Runtime {
       toolCount: this.activity.turn.tools,
       editCount: this.activity.turn.files.size,
       strictness: g.strictness,
-      hasBackgroundWork: input.background.length > 0,
+      // Work whose notification brings the turn back; a dev server never does, so it excuses no early stop.
+      hasBackgroundWork: Autopilot.blockingOf(background).length > 0,
       permissionMode: this.permissionMode,
     })
     if (assessment.verdict === 'uncertain' && g.modelCheck) assessment = await this.classifyExit(assessment, input.lastMessage)
@@ -2051,7 +2674,10 @@ export class Runtime {
     }
     this.turn.toolCount += 1
     if (isEdit) this.turn.editCount += 1
-    this.activity.started({ id, tool, input, agentId, now: Date.now() })
+    if (agentId === undefined) this.noteActivity()
+    const item = this.activity.started({ id, tool, input, agentId, now: Date.now() })
+    // A call in an agent's loop: what that agent is doing now.
+    if (agentId !== undefined) this.ops.noteAgentCall(agentId, doingOf(item))
     this.publisher.mark('activity', 'spinner', 'hud')
     this.tickWhileRunning()
     return null
@@ -2090,8 +2716,13 @@ export class Runtime {
   afterTool(tool: string, input: Record<string, unknown>, id: string, result: ToolCallResult | undefined, agentId?: string): void {
     const status = result === undefined ? 'error' : result.deny !== undefined ? 'denied' : result.isError === true ? 'error' : 'ok'
     const now = Date.now()
-    this.activity.finished({ id, status, result: result?.result, text: result?.deny ?? result?.text, now })
-    // Claude's own task list is the run's plan; a subagent's list is its own business.
+    if (agentId === undefined) this.noteActivity()
+    const changed = this.activity.finished({ id, status, result: result?.result, text: result?.deny ?? result?.text, now })
+    // Milestone evidence: the files this call changed belong to the milestone under way (an agent's work serves it too).
+    if (status === 'ok' && changed.length > 0) this.noteEvidenceEdits(changed.map(c => c.path), now)
+    // A subagent's own task list is its plan (Activity → Agents shows it as its track).
+    if (status === 'ok' && agentId !== undefined && Plan.isPlanTool(tool)) this.ops.noteAgentPlan(agentId, { tool, input, result: result?.result, now })
+    // Claude's own task list is the run's plan.
     if (status === 'ok' && agentId === undefined && Plan.isPlanTool(tool) && this.run !== null) {
       const session = Chain.currentSession(this.run)?.index ?? 1
       this.setPlan(Plan.applyTool(this.plan(), { tool, input, result: result?.result, session, now }))
@@ -2173,14 +2804,21 @@ export class Runtime {
     return isOffered(this.settings.subagents.mode)
   }
 
-  async onAgentSpawn(e: AgentSpawnInput): Promise<{ deny?: string; model?: string }> {
+  /**
+   * `agent.spawn`, before the agent starts: Subagent Control decides (a limit counts the agents alive now,
+   * as the rows reconcile them, plus spawns allowed and not settled yet, so spawns made at once never all
+   * pass it), and the router may pick its model. A workflow's agents are not counted against a limit.
+   */
+  async onAgentSpawn(e: AgentSpawnInput): Promise<{ deny?: string; model?: string; isReserved?: boolean }> {
     await this.ensureLoaded()
     const s = this.settings.subagents
+    const isWorkflowAgent = (e as { workflow?: unknown }).workflow !== undefined
     await this.refreshAgents()
+    // From here to the reservation nothing awaits: two spawns at once see each other's slot.
     const decision = decideSpawn({
       mode: s.mode,
       limit: s.limit,
-      active: activeAgents(this.agents.list, s.countTeammates).length,
+      active: isWorkflowAgent ? 0 : limitCount(this.ops.agentRowsNow(), s.countTeammates) + this.agents.reserved,
       isTeammate: e.isTeammate === true,
       countTeammates: s.countTeammates,
       type: clean(e.subagentType, 40),
@@ -2189,15 +2827,19 @@ export class Runtime {
     })
     if (decision.action === 'deny') {
       this.agents.denied += 1
+      this.trace(`agents: refused a spawn (${clean(e.subagentType, 40)}: ${clean(e.description, 60)}): ${decision.reason}`)
       this.publisher.mark('pane', 'hud')
       return { deny: decision.reason }
     }
+    const isReserved = !isWorkflowAgent
+    if (isReserved) this.agents.reserved += 1
     if (decision.action === 'ask') {
       this.agents.asked += 1
       const host = this.host
       const answer = host === null ? 'Deny' : await host.ask(decision.question, ['Allow', 'Deny', 'Allow all this session'], 'Subagent').catch(() => 'Deny')
       if (answer === 'Allow all this session') this.agents.allowAll = true
       if (answer !== 'Allow' && answer !== 'Allow all this session') {
+        if (isReserved) this.agents.reserved = Math.max(0, this.agents.reserved - 1)
         this.agents.denied += 1
         this.publisher.mark('pane', 'hud')
         return { deny: 'Control Room: the user did not approve this subagent. Do the work directly or ask the user.' }
@@ -2205,7 +2847,6 @@ export class Runtime {
     }
     this.agents.spawned += 1
     const eff = this.effective()
-    const isWorkflowAgent = (e as { workflow?: unknown }).workflow !== undefined
     if (eff.router.isSubagents && !isWorkflowAgent) {
       const route = routeSubagent({
         router: this.settings.router,
@@ -2219,24 +2860,63 @@ export class Runtime {
         known: this.router.known,
       })
       this.router.lastDecision = `subagent: ${route.why}`
-      if (route.model !== null) return { model: route.model }
+      if (route.model !== null) return { model: route.model, isReserved }
     }
     this.publisher.mark('pane', 'hud')
-    return {}
+    return { isReserved }
   }
 
+  /**
+   * `agent.spawn` settled: the agent shows from now (starting until Claude Code lists it; a workflow's
+   * agents never are), its slot passes to the ledger, and the list is looked at every couple of seconds
+   * while any agent is alive, whether or not the list has caught up yet.
+   */
+  onAgentSpawned(e: AgentSpawnInput, answer: AgentSpawnResult | undefined, isReserved: boolean): void {
+    if (isReserved) this.agents.reserved = Math.max(0, this.agents.reserved - 1)
+    if (answer === undefined || answer.deny !== undefined || answer.agentId === undefined) {
+      this.publisher.mark('pane', 'hud')
+      return
+    }
+    const workflow = (e as { workflow?: { runId: string; agentIndex: number } }).workflow
+    this.ops.noteSpawn({
+      agentId: answer.agentId,
+      model: answer.model ?? null,
+      isBackground: e.background,
+      isFork: e.fork,
+      description: e.description,
+      type: e.subagentType,
+      name: e.name ?? null,
+      parentId: e.parentAgentId ?? null,
+      workflow: workflow === undefined ? null : { runId: workflow.runId, index: workflow.agentIndex },
+      toolUseId: e.tool_use_id || null,
+      isTeammate: e.isTeammate === true,
+    })
+    this.trace(`agents: ${answer.agentId} started (${clean(e.subagentType, 40)}: ${clean(e.description, 60)}${workflow === undefined ? '' : `, workflow ${workflow.runId} #${workflow.agentIndex}`}${e.parentAgentId === undefined ? '' : `, inside ${e.parentAgentId}`})`)
+    this.pollAgents()
+    void this.refreshAgents()
+  }
+
+  /** Claude Code's agent list, looked at and reconciled with what this session saw (features/agents.ts). */
   async refreshAgents(): Promise<void> {
     const host = this.host
     if (host === null) return
     this.agents.list = await host.listAgents().catch(() => this.agents.list)
-    const running = activeAgents(this.agents.list, true).length
-    if (running > 0 && this.agents.poll === null) {
-      this.agents.poll = host.every(5000, () => void this.refreshAgents())
-    } else if (running === 0 && this.agents.poll !== null) {
+    this.ops.reconcileAgents(this.agents.list)
+    this.pollAgents()
+    this.publisher.mark('pane', 'hud', 'spinner', 'ops')
+  }
+
+  /** The list is looked at every AGENT_POLL_MS while any agent is alive (the ledger's or the list's), and not otherwise. */
+  private pollAgents(): void {
+    const host = this.host
+    if (host === null) return
+    const alive = this.runningSubagents()
+    if (alive > 0 && this.agents.poll === null) {
+      this.agents.poll = host.every(AGENT_POLL_MS, () => void this.refreshAgents())
+    } else if (alive === 0 && this.agents.poll !== null) {
       this.agents.poll.cancel()
       this.agents.poll = null
     }
-    this.publisher.mark('pane', 'hud', 'spinner', 'ops')
   }
 
   // -------------------------------------------------------------------------
@@ -2403,9 +3083,14 @@ export class Runtime {
    * shown (a headless run): the caller answers in words instead.
    */
   async openOps(focusKey?: string, section?: string): Promise<boolean> {
-    const isChange = this.ui.tab !== 'activity' || this.ui.activitySub !== 'ops'
+    return this.openActivity('ops', focusKey, section)
+  }
+
+  /** Activity, at one of its views (Operations, Agents), opened as `openOps` opens Operations. */
+  async openActivity(sub: 'summary' | 'ops' | 'agents' | 'raw', focusKey?: string, section?: string): Promise<boolean> {
+    const isChange = this.ui.tab !== 'activity' || this.ui.activitySub !== sub
     this.ui.tab = 'activity'
-    this.ui.activitySub = 'ops'
+    this.ui.activitySub = sub
     this.ui.openPicker = null
     this.publisher.mark('pane', 'ops')
     const host = this.host
@@ -2486,7 +3171,7 @@ export class Runtime {
    * `/cr handoff` and Hand off now: hands off when no handoff is under way, finishes one whose end
    * went unseen, and otherwise says what the one under way is doing. The words say what happened.
    */
-  async requestHandoff(): Promise<string> {
+  async requestHandoff(options: { skipWait?: boolean } = {}): Promise<string> {
     const host = this.host
     if (host === null) return 'Project Sentinel is not ready yet.'
     const wasOff = !this.settings.autopilot.enabled
@@ -2496,44 +3181,255 @@ export class Runtime {
       })
     }
     const facts = await this.handoffFacts()
-    const now = await host.now()
+    const now = await this.engineNow()
     // Decided on the state as it is now, after the awaits: a second request meanwhile sees the first one's step.
     const state = this.autopilot.state
     const verdict = Autopilot.handoffVerdict(this.autopilot, facts)
     this.trace(`autopilot: /cr handoff in ${state} (notes ${facts.notes}, ${facts.isTurnRunning ? 'a turn running' : 'idle'}): ${verdict.action}`)
-    if (verdict.action === 'hand-off') this.stepAutopilot({ kind: 'manualHandoff', now, isRestart: state === 'handoff' || state === 'waiting-background' })
+    if (verdict.action === 'hand-off') this.stepAutopilot({ kind: 'manualHandoff', now, isRestart: state === 'handoff' || state === 'waiting-background', ...(options.skipWait === true ? { skipWait: true } : {}) })
     if (verdict.action === 'start-fresh') this.startFreshNow(now, facts.notesAt)
     return wasOff ? `Context Autopilot is on. ${verdict.text}` : verdict.text
   }
 
   /**
    * `/cr fresh` and Start fresh context: the fresh context, only when it is safe (no turn running,
-   * no background work in flight, the notes written for this handoff), through the verified clear
-   * path. A handoff whose end went unseen is recovered here instead of being refused.
+   * nothing it must wait for in flight, the notes written for this handoff), through the verified clear
+   * path. A handoff whose end went unseen is recovered here instead of being refused. `isForced` (`/cr
+   * fresh now`, Hand off now): background work no longer holds it back (it keeps running, and the fresh
+   * context is told); the notes still must be current, and a running turn still ends first.
    */
-  async startFreshContext(): Promise<string> {
+  async startFreshContext(options: { isForced?: boolean } = {}): Promise<string> {
     const host = this.host
     if (host === null) return 'Project Sentinel is not ready yet.'
-    const facts = await this.handoffFacts()
-    const now = await host.now()
+    const facts = { ...(await this.handoffFacts()), isForced: options.isForced === true }
+    const now = await this.engineNow()
     const verdict = Autopilot.freshVerdict(this.autopilot, facts)
-    this.trace(`autopilot: /cr fresh in ${this.autopilot.state} (notes ${facts.notes}, ${facts.isTurnRunning ? 'a turn running' : 'idle'}, in flight ${facts.inFlight === null ? 'unknown' : facts.inFlight.length}): ${verdict.action}`)
+    this.trace(`autopilot: /cr fresh${facts.isForced ? ' now' : ''} in ${this.autopilot.state} (notes ${facts.notes}, ${facts.isTurnRunning ? 'a turn running' : 'idle'}, in flight ${facts.inFlight === null ? 'unknown' : facts.inFlight.length}): ${verdict.action}`)
     if (verdict.action === 'start-fresh') this.startFreshNow(now, facts.notesAt)
     return verdict.text
   }
 
   /**
    * Starts the fresh context of a handoff the person finished. A handoff whose notes the normal path
-   * never checked (its end went unseen, or it waited for background work) records its health now.
+   * never checked (its end went unseen, or it waited for background work) records its health now. What
+   * Claude Code last listed running keeps running, and the fresh context is told.
    */
   private startFreshNow(now: number, notesAt: number | null): void {
     const state = this.autopilot.state
     if (state !== 'awaiting' && state !== 'handoff' && state !== 'waiting-background') return
+    const left = state === 'waiting-background' ? this.autopilot.background : (this.inFlight() ?? [])
     if (state !== 'awaiting') {
       this.questEvent('handoff', 'Clean handoff: notes verified')
-      this.recordHandoffHealth(true, notesAt)
+      this.recordHandoffHealth(true, notesAt, left)
     }
-    this.stepAutopilot({ kind: 'manualFresh', now })
+    this.stepAutopilot({ kind: 'manualFresh', now, left })
+  }
+
+  /**
+   * The person's way out of a wait (`/cr handoff now`, Hand off now, "handoff now", "don't wait for the
+   * background process"): the handoff goes on without waiting for background work, which keeps running
+   * for the fresh context. Before the handoff it starts one that will not wait; once its turn ended it
+   * starts the fresh context (the notes checked first). The words say what happened.
+   */
+  async handoffNow(): Promise<string> {
+    const host = this.host
+    if (host === null) return 'Project Sentinel is not ready yet.'
+    if (!this.settings.autopilot.enabled) return this.requestHandoff({ skipWait: true })
+    const now = await this.engineNow()
+    const ap = this.autopilot
+    const isTurnRunning = this.turn.isRunning
+    this.trace(`autopilot: hand off now in ${ap.state}${isTurnRunning ? ' (a turn running)' : ''}`)
+    switch (ap.state) {
+      case 'waiting-background': {
+        const left = Autopilot.blockingOf(ap.background)
+        this.stepAutopilot({ kind: 'skipWait', now, isTurnRunning })
+        const keeps = left.length === 0 ? '' : ` ${Autopilot.backgroundWords(left)} keeps running for the fresh context, which is told.`
+        return isTurnRunning ? `Not waiting for the background work: the handoff goes on when this turn ends.${keeps}` : `Not waiting for the background work: checking the notes, then starting the fresh context.${keeps}`
+      }
+      case 'pending':
+      case 'requested':
+        this.stepAutopilot({ kind: 'skipWait', now, isTurnRunning })
+        return ap.state === 'pending' ? 'The handoff starts when this turn ends, and will not wait for background work.' : 'A handoff is starting; it will not wait for background work.'
+      case 'handoff':
+        if (isTurnRunning) {
+          this.stepAutopilot({ kind: 'skipWait', now, isTurnRunning })
+          return 'Claude is writing the notes; the fresh context starts as soon as they are checked, without waiting for background work.'
+        }
+        return this.startFreshContext({ isForced: true })
+      case 'awaiting': {
+        const text = await this.startFreshContext({ isForced: true })
+        // No current notes to start from: write them first, without waiting afterwards.
+        return this.autopilot.state === 'awaiting' && !this.turn.isRunning && /handoff to have Claude write/.test(text) ? this.requestHandoff({ skipWait: true }) : text
+      }
+      case 'off':
+      case 'armed':
+        return this.requestHandoff({ skipWait: true })
+      default:
+        return Autopilot.handoffVerdict(ap, await this.handoffFacts()).text
+    }
+  }
+
+  /**
+   * Before the Cold Resume Guard: the person's message while a handoff is under way. A handoff-control
+   * instruction ("handoff now", "don't wait for the background process", "start the fresh session now")
+   * is acted on and never sent. Any other message is not let into a context about to be cleared unasked:
+   * while a written handoff waits, or while Claude writes the notes, the person chooses (hand off and
+   * carry it to the fresh context, send it here, or keep it in the prompt box); while the fresh context
+   * is already starting, it is carried there. Returns a drop reason, or null to let the message go.
+   */
+  async handoffGuard(e: { text: string; origin?: PromptOrigin; turnId?: string; attachments?: readonly unknown[] }): Promise<{ drop: string } | null> {
+    if (this.host === null || !this.settings.autopilot.enabled || !isPersonOrigin(e.origin) || prompts.ownPromptKind(e.text) !== null) return null
+    const state = this.autopilot.state
+    if (state === 'off' || state === 'armed' || state === 'resuming') return null
+    const intent = handoffIntentOf(e.text)
+    if (intent !== null) {
+      this.trace(`handoff guard: "${clean(e.text, 60)}" read as "${INTENT_WORDS[intent]}" (${state}${e.turnId === undefined ? '' : ', typed mid-turn'})`)
+      const text = await this.actOnIntent(intent)
+      this.ops.clearRestored(e.text, 'was acted on as a handoff instruction')
+      return { drop: text }
+    }
+    // Handoff due: the step under way goes on; the prompt carries the reminder (onPromptSubmit).
+    if (state === 'pending') return null
+    if (state === 'verifying' || state === 'clearing' || state === 'compacting') return this.carryMessage(e, 'The fresh context is starting')
+    // Nobody to ask (a headless run): the message goes as it would have.
+    if (this.surfaces.length === 0) return null
+    return this.askAboutMessage(e)
+  }
+
+  /** A handoff-control instruction, carried out; the words say what happened. */
+  private async actOnIntent(intent: HandoffIntent): Promise<string> {
+    switch (intent) {
+      case 'handoff-now':
+      case 'skip-wait':
+        return this.handoffNow()
+      case 'fresh-now':
+        // The notes come first: before them, or under a running turn, it is a handoff that will not wait.
+        return this.turn.isRunning || this.autopilot.state === 'pending' || this.autopilot.state === 'requested' ? this.handoffNow() : this.startFreshContext({ isForced: true })
+      case 'keep-waiting':
+        return this.autopilot.state === 'waiting-background' ? this.keepWaiting() : `Nothing was sent. ${Autopilot.handoffVerdict(this.autopilot, await this.handoffFacts()).text}`
+      case 'cancel':
+        return this.cancelHandoff()
+      case 'stop-and-handoff': {
+        const ap = this.autopilot
+        const waiting = Autopilot.blockingOf(ap.state === 'waiting-background' ? ap.background : (this.inFlight() ?? []))
+        if (waiting.length === 0) return this.handoffNow()
+        const host = this.host
+        let answer: string | null = null
+        try {
+          answer = host === null || this.surfaces.length === 0 ? null : await host.ask(`Stop ${Autopilot.backgroundWords(waiting)} with Claude Code's TaskStop, then hand off?`, [HANDOFF_CHOICE.stop, HANDOFF_CHOICE.leave, HANDOFF_CHOICE.wait], 'Handoff')
+        } catch {
+          answer = null
+        }
+        if (answer === HANDOFF_CHOICE.stop) return this.stopAndHandOff('all')
+        if (answer === HANDOFF_CHOICE.leave) return this.handoffNow()
+        return `Nothing was stopped. ${ap.state === 'waiting-background' ? 'The handoff keeps waiting for the background work.' : 'The handoff goes on as it was.'}`
+      }
+    }
+  }
+
+  /** Where a message for the fresh context waits: its first message after a clear, or the first boundary after a compaction. */
+  private carryTarget(): QueueTarget {
+    return this.settings.autopilot.continuation === 'compact' ? 'boundary' : 'fresh'
+  }
+
+  /**
+   * The message goes to the fresh context, in the Mission Queue (Activity → Operations shows it, and it
+   * can be changed there), queued before `then` moves the handoff on. The drop reason says where it went.
+   */
+  private async carryMessage(e: { text: string; attachments?: readonly unknown[] }, why: string, then: (() => Promise<string>) | null = null): Promise<{ drop: string }> {
+    const queued = this.ops.queueAdd(e.text, this.carryTarget())
+    if (!queued.ok) {
+      this.ops.putBack(e.text, (e.attachments?.length ?? 0) > 0)
+      return { drop: `Not sent: ${queued.error} Your message is back in the prompt box.` }
+    }
+    this.trace(`handoff guard: the message is queued as ${queued.id} for the fresh context`)
+    this.ops.clearRestored(e.text, `waits as ${queued.id} for the fresh context`)
+    const lost = (e.attachments?.length ?? 0) > 0 ? ' (its attachments could not be kept)' : ''
+    const after = then === null ? '' : ` ${await then()}`
+    return { drop: `${why}: your message waits as ${queued.id}${lost} and goes to the fresh context first thing.${after}` }
+  }
+
+  /** The person's choice for a message typed while a written handoff waits or Claude writes the notes. */
+  private async askAboutMessage(e: { text: string; turnId?: string; attachments?: readonly unknown[] }): Promise<{ drop: string } | null> {
+    const host = this.host
+    if (host === null) return null
+    const state = this.autopilot.state
+    const isWriting = state === 'requested' || (state === 'handoff' && this.turn.isRunning)
+    const hasAttachments = (e.attachments?.length ?? 0) > 0
+    const waiting = Autopilot.blockingOf(this.autopilot.background)
+    const carry = isWriting ? HANDOFF_CHOICE.queue : state === 'waiting-background' ? HANDOFF_CHOICE.carry : HANDOFF_CHOICE.freshCarry
+    const question = isWriting
+      ? 'Claude is writing the handoff notes, and this context is cleared next. Give your message to the fresh context first thing, or send it into the handoff turn now?'
+      : state === 'waiting-background'
+        ? `The handoff is ${this.autopilot.notesWritten === false ? 'under way' : 'written'} and waits for ${waiting.length === 0 ? 'background work' : Autopilot.backgroundWords(waiting)}. Hand off now and give your message to the fresh context first thing, or send it into this context, which is about to be cleared?`
+        : 'The handoff waits for you to start the fresh context. Start it now and give your message to it first thing, or send the message into this context?'
+    const options = hasAttachments ? [HANDOFF_CHOICE.here, HANDOFF_CHOICE.box] : [carry, HANDOFF_CHOICE.here, HANDOFF_CHOICE.box]
+    this.trace(`handoff guard: asking about a message typed in ${state}`)
+    let answer: string
+    try {
+      answer = await host.ask(hasAttachments ? `${question} (A message with attachments cannot be carried over.)` : question, options, 'Handoff')
+    } catch {
+      answer = HANDOFF_CHOICE.box
+    }
+    if (answer === HANDOFF_CHOICE.here) {
+      this.trace('handoff guard: the person sent the message into this context')
+      return null
+    }
+    if (answer === carry && !hasAttachments) {
+      if (isWriting) return this.carryMessage(e, 'Claude finishes the handoff notes first')
+      return this.carryMessage(e, 'Handing off', () => (state === 'waiting-background' ? this.handoffNow() : this.startFreshContext({ isForced: true })))
+    }
+    this.ops.putBack(e.text, hasAttachments)
+    return { drop: `Not sent: your message is back in the prompt box. ${state === 'waiting-background' ? 'The handoff keeps waiting for the background work.' : isWriting ? 'Claude is writing the handoff notes.' : 'The handoff waits for you.'}` }
+  }
+
+  /** Keep waiting (the person chose to): the wait's patience grows by `ms` from now or its end, whichever is later. */
+  async keepWaiting(ms: number = this.autopilotConfig().waitMs ?? Autopilot.DEFAULT_WAIT_MS): Promise<string> {
+    const ap = this.autopilot
+    if (ap.state !== 'waiting-background') return 'No handoff is waiting for background work.'
+    const now = await this.engineNow()
+    const span = ms > 0 ? ms : Autopilot.DEFAULT_WAIT_MS
+    this.stepAutopilot({ kind: 'keepWaiting', now, ms: span })
+    const until = this.autopilot.waitUntil
+    return `The handoff keeps waiting for ${Autopilot.backgroundWords(Autopilot.blockingOf(this.autopilot.background))}${until === null ? '' : `, until ${fmt.clock(until)} at most`}; it goes on as soon as that work ends.`
+  }
+
+  /** Call the handoff off: this context carries on, the notes stay on disk, and the context's growth decides the next one. */
+  cancelHandoff(): string {
+    const before = this.autopilot.state
+    this.stepAutopilot({ kind: 'cancelHandoff', tokens: this.usage.tokens ?? 0, window: this.usage.window })
+    if (this.autopilot.state === before) return before === 'off' || before === 'armed' ? 'No handoff is under way.' : 'The handoff is past the point of calling off: the fresh context is starting.'
+    return `Handoff called off: Claude carries on in this context; the notes stay on disk. Autopilot hands off again once the context grows ${fmt.tokens(Math.max(0, (this.autopilot.snoozeUntil ?? 0) - (this.usage.tokens ?? 0)))} further.`
+  }
+
+  /**
+   * Stop & hand off: Claude Code's TaskStop on the background work the handoff waits for (one task, or
+   * all of it), then the handoff goes on. A server beside it keeps running.
+   */
+  async stopAndHandOff(taskId?: string): Promise<string> {
+    const host = this.host
+    if (host === null) return 'Project Sentinel is not ready yet.'
+    const ap = this.autopilot
+    const waiting = Autopilot.blockingOf(ap.state === 'waiting-background' ? ap.background : (this.inFlight() ?? []))
+    const targets = taskId === undefined || taskId === 'all' ? waiting : waiting.filter(t => t.id === taskId)
+    if (targets.length === 0) return taskId === undefined || taskId === 'all' ? 'Nothing the handoff waits for is running.' : `No background task ${taskId} holds the handoff.`
+    const stopped: string[] = []
+    const refused: string[] = []
+    for (const t of targets) {
+      const result = await host.stopTask(t.id).catch(error => ({ deny: error instanceof Error ? error.message : String(error) }) as { deny: string })
+      if ('deny' in result && result.deny !== undefined) refused.push(`${t.description} (${clean(String(result.deny), 80)})`)
+      else {
+        stopped.push(t.description)
+        this.noteTaskEnded(t.id, 'killed', 'your Stop', await this.engineNow())
+      }
+    }
+    const done = stopped.length === 0 ? '' : `Stopped ${stopped.join('; ')}. `
+    if (refused.length > 0) return `${done}Claude Code did not stop ${refused.join('; ')}: the handoff keeps waiting for it (Hand off now leaves it running).`
+    if (this.autopilot.state === 'waiting-background' && Autopilot.blockingOf(this.autopilot.background).length === 0 && !this.turn.isRunning) {
+      this.stepAutopilot({ kind: 'unblocked', now: await this.engineNow() })
+      return `${done}The handoff goes on: checking the notes, then starting the fresh context.`
+    }
+    return `${done}${await this.handoffNow()}`
   }
 
   /** A button's answer (Hand off now, Start fresh context): what happened, as a toast. */
@@ -2558,8 +3454,9 @@ export class Runtime {
     this.publisher.mark('activity')
   }
 
+  /** Agents alive now, as the rows reconcile them: a spawn not listed yet and a workflow's agents included. */
   runningSubagents(): number {
-    return activeAgents(this.agents.list, true).length
+    return aliveRows(this.ops.agentRowsNow()).length
   }
 
   /** The /control-room command. */

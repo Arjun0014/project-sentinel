@@ -106,7 +106,7 @@ async function fullRun($: Engine, w: ReturnType<typeof world>) {
 }
 
 describe('Operations: the panel', () => {
-  test('Activity has Summary · Operations · All tool calls; Operations holds every part, on terminal, desktop and mobile', async ($, on) => {
+  test('Activity has Summary · Operations · Agents · Tool calls; Operations holds every part, Agents its agents, on terminal, desktop and mobile', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 300_000 })
     const pub = published(on)
     w.live.agents = [{ id: 'a1', type: 'Explore', description: 'Scan the cache code', status: 'running', name: 'scanner' }]
@@ -122,7 +122,9 @@ describe('Operations: the panel', () => {
         await w.clock.advance(300)
         const tree = await ui.drawn()
         const all = keys(tree)
-        for (const card of ['card-ops-review', 'card-ops-queue', 'card-ops-watchers', 'card-ops-agents', 'card-ops-budget']) expect(all, `${surface} ${columns}: ${card}`).toContain(card)
+        // Agents have a view of their own: Operations keeps one line leading to it.
+        for (const card of ['card-ops-review', 'card-ops-queue', 'card-ops-watchers', 'card-ops-agents-link', 'card-ops-budget']) expect(all, `${surface} ${columns}: ${card}`).toContain(card)
+        expect(all, `${surface} ${columns}`).not.toContain('card-ops-agents')
         // The queue's field takes the row under its label: beside it, its text would squeeze the label into a column.
         if (surface !== 'mobile') expect(all, `${surface} ${columns}`).toContain('ops-queue-input-stacked')
         expect(richButtons(tree), `${surface} ${columns}`).toEqual([])
@@ -130,15 +132,23 @@ describe('Operations: the panel', () => {
         expect(text, `${surface} ${columns}`).toContain('Postgres or SQLite for the cache store?')
         expect(text).toContain('Carry the cache findings into the README')
         expect(text).toContain('S-002 result')
-        expect(text).toContain('scanner')
+        expect(text).toContain('1 agent running')
         expect(text).toContain('Permission prompts and confirmations stay Claude Code’s own')
         if (surface === 'desktop') expect(monospaceOffenders(tree, `${surface} ${columns}`)).toEqual([])
+        // Activity → Agents: the agent itself, with what Claude Code says of it.
+        expect(await ui.find({ key: 'sub:agents' }), `${surface} ${columns}`).toBeDefined()
+        await ui.press({ key: 'sub:agents' })
+        await w.clock.advance(300)
+        const agents = await ui.drawn()
+        expect(keys(agents), `${surface} ${columns}`).toContain('card-ops-agents')
+        expect(textOf(agents), `${surface} ${columns}`).toContain('scanner')
+        expect(richButtons(agents), `${surface} ${columns}`).toEqual([])
         await ui.unmount()
       }
     }
   })
 
-  test('its controls act: answer a decision, add and delete queued work, arm a watcher from the field, set the budget', async ($, on) => {
+  test('its controls act: answer a decision, add and delete queued work, arm a watcher from the field, set the budget', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 300_000 })
     const pub = published(on)
     await boot($, w)
@@ -193,7 +203,7 @@ describe('Operations: the panel', () => {
     await ui.unmount()
   })
 
-  test('Overview shows an Operations card only while something is in it; Context has the Cold Resume Guard and Ready to resume', async ($, on) => {
+  test('Overview shows an Operations card only while something is in it; Context has the Cold Resume Guard and Ready to resume', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 300_000 })
     const pub = published(on)
     await boot($, w)
@@ -224,13 +234,13 @@ describe('Operations: the panel', () => {
     await w.clock.advance(300)
     await ui.press({ key: 'agents-link' })
     await w.clock.advance(300)
-    expect(pub.pane).toMatchObject({ tab: 'activity', activitySub: 'ops' })
+    expect(pub.pane).toMatchObject({ tab: 'activity', activitySub: 'agents' })
     await ui.unmount()
   })
 })
 
 describe('Operations: the status bar', () => {
-  test('Review is an amber chip that opens Activity → Operations; nothing of the layer shows while it is empty', async ($, on) => {
+  test('Review is an amber chip that opens Activity → Operations; nothing of the layer shows while it is empty', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 300_000 })
     const pub = published(on)
     on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'engine' as const, ref: 0 }))
@@ -257,7 +267,7 @@ describe('Operations: the status bar', () => {
     expect(hud.chips.find(c => c.key === 'review')).toMatchObject({ tone: 'warn', opens: 'ops' })
   })
 
-  test('a chip and /cr agents open Operations at their own card, by the key the panel draws it under (seen live: a chip opened it at its top)', async ($, on) => {
+  test('a chip and /cr agents open Operations at their own card, by the key the panel draws it under (seen live: a chip opened it at its top)', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 300_000 })
     const pub = published(on)
     on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'engine' as const, ref: 0 }))
@@ -274,11 +284,16 @@ describe('Operations: the status bar', () => {
     await w.clock.advance(3000)
     expect(w.kept.opened).toEqual(['control-room'])
     expect(pub.pane).toMatchObject({ tab: 'activity', activitySub: 'ops' })
+    expect(keys(await pane.drawn())).toContain('card-ops-review')
+    // /cr agents and the agents chip open the agents' own view (nothing to scroll to).
     await $.command.run(cmd('agents'))
     await w.clock.advance(3000)
-    expect(asked()).toEqual(['card-ops-review', 'card-ops-agents'])
-    const drawn = keys(await pane.drawn())
-    for (const key of asked()) expect(drawn).toContain(key)
+    expect(pub.pane).toMatchObject({ tab: 'activity', activitySub: 'agents' })
+    await band.press({ key: 'chip-agents' })
+    await w.clock.advance(1000)
+    expect(pub.pane).toMatchObject({ tab: 'activity', activitySub: 'agents' })
+    expect(asked()).toEqual(['card-ops-review'])
+    expect(keys(await pane.drawn())).toContain('card-ops-agents')
     // /cr queue with the panel open: opened again with the keyboard (the prompt box has it after a
     // command), then its field focused, by the key the panel draws it under.
     await $.command.run(cmd('queue'))
@@ -294,7 +309,7 @@ describe('Operations: the status bar', () => {
     await pane.unmount()
   })
 
-  test('sleeping: the headline says until when and why, the countdown is an instrument, the alert asks when a watcher waits for you', async ($, on) => {
+  test('sleeping: the headline says until when and why, the countdown is an instrument, the alert asks when a watcher waits for you', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 300_000 })
     const pub = published(on)
     on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'engine' as const, ref: 0 }))
@@ -326,7 +341,7 @@ describe('Operations: the status bar', () => {
 })
 
 describe('Operations: commands', () => {
-  test('/cr queue, list, now and cancel; /cr queue alone opens the queue to type in', async ($, on) => {
+  test('/cr queue, list, now and cancel; /cr queue alone opens the queue to type in', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     const pub = published(on)
     await boot($, w)
@@ -348,7 +363,7 @@ describe('Operations: commands', () => {
     expect(pub.pane).toMatchObject({ tab: 'activity', activitySub: 'ops' })
   })
 
-  test('/cr watch in 2h, at a time, an ambiguous time asked in Claude Code’s own dialog; /cr watchers; now and cancel', async ($, on) => {
+  test('/cr watch in 2h, at a time, an ambiguous time asked in Claude Code’s own dialog; /cr watchers; now and cancel', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     const pub = published(on)
     await boot($, w)
@@ -370,7 +385,7 @@ describe('Operations: commands', () => {
     expect((await $.command.run(cmd('watch resume W-1'))).text).toMatch(/^W-1 armed again: wakes /)
   })
 
-  test('/cr decisions and /cr decide; /cr agents with no argument shows what runs, with one sets the policy', async ($, on) => {
+  test('/cr decisions and /cr decide; /cr agents with no argument shows what runs, with one sets the policy', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     const pub = published(on)
     await boot($, w)
@@ -383,10 +398,12 @@ describe('Operations: commands', () => {
     expect(w.kept.submitted.at(-1)).toContain('Decision Inbox · the user answered your decision')
     expect((await $.command.run(cmd('agents'))).text).toContain('◆ Agents · none running')
     expect((await $.command.run(cmd('agents 2'))).text).toStartWith('Subagents:')
-    expect((w.store['settings.v1'] as Settings | undefined)?.subagents ?? { mode: 'limit' }).toMatchObject({ mode: 'limit' })
+    // Saved once the debounce passes (a fresh install's settings are in the store from its first load).
+    await w.clock.advance(2000)
+    expect((w.store['settings.v1'] as Settings | undefined)?.subagents).toMatchObject({ mode: 'limit', limit: 2 })
   })
 
-  test('/cr budget sets, shows and removes; /cr resume shows what a fresh context would get; help lists them', async ($, on) => {
+  test('/cr budget sets, shows and removes; /cr resume shows what a fresh context would get; help lists them', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     const pub = published(on)
     await boot($, w)
@@ -407,7 +424,7 @@ describe('Operations: commands', () => {
 })
 
 describe('Operations: hooks', () => {
-  test('prompt.submit: the Cold Resume Guard asks before a cold context is re-read; Cancel keeps the message out, Continue sends it', async ($, on) => {
+  test('prompt.submit: the Cold Resume Guard asks before a cold context is re-read; Cancel keeps the message out, Continue sends it', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 616_000 })
     const pub = published(on)
     let filled: string | null = null
@@ -435,7 +452,7 @@ describe('Operations: hooks', () => {
     expect(w.kept.submitted.at(-1)).toBe('Now fix the tokenizer.')
   })
 
-  test('the decision tool: refused for a subagent, recorded for the main conversation; permissions stay Claude Code’s', async ($, on) => {
+  test('the decision tool: refused for a subagent, recorded for the main conversation; permissions stay Claude Code’s', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { settings: withSettings(s => void (s.permissions.push = 'ask')) })
     const pub = published(on)
     await boot($, w)

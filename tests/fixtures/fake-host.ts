@@ -90,6 +90,8 @@ export function fakeHost(
     stopped: [] as string[],
     /** The debug trace's lines (`ops: …`, `cold resume: …`). */
     traces: [] as string[],
+    /** Each `git hash-object` call, by the paths it was given. */
+    hashed: [] as string[][],
   }
   const live = {
     usage: { startedAt: 0, context: { tokens: 10_000, window: 1_000_000, percent: 1 }, rateLimits: [], cost: { usd: 0.5 } } as SessionUsage,
@@ -109,6 +111,15 @@ export function fakeHost(
     /** The repository the session is in (none by default), and what `git status` says there. */
     repo: null as string | null,
     gitStatus: '## main...origin/main\n',
+    /**
+     * The project's files as milestone evidence sees them (`stat`, `git hash-object`): content and
+     * modification time; null: deleted. Paths not here answer `stat` as before.
+     */
+    workspace: {} as Record<string, { content: string; mtimeMs: number } | null>,
+    /** What `git rev-parse HEAD` answers; null: not a repository. */
+    head: 'c0ffee'.padEnd(40, '0') as string | null,
+    /** `git hash-object` fails, as where Git is missing. */
+    isHashBroken: false,
     /** `$.session.compact` refuses, as in a headless or SDK session (Desktop's host protocol). */
     isCompactTurnOnly: false,
     /** Refusals `$.session.compact` answers first, one per call (a turn under way, as while a prompt is still being dropped). */
@@ -233,6 +244,11 @@ export function fakeHost(
     copy: async () => true,
     readText: async path => options.files?.[path] ?? '',
     stat: async path => {
+      if (path in live.workspace) {
+        const f = live.workspace[path]
+        if (f === null || f === undefined) throw new Error('ENOENT')
+        return { kind: 'file', size: f.content.length, mtimeMs: f.mtimeMs, isLink: false }
+      }
       if (path.endsWith('NEXT_SESSION_PROMPT.md')) {
         const m = options.handoffMtime?.() ?? time + 1
         if (m === null) throw new Error('ENOENT')
@@ -272,6 +288,15 @@ export function fakeHost(
       return { exitCode: 0, stdout: `${options.memoryLevel ?? '63'}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
     },
     repoRoot: async () => live.repo,
+    hashFiles: async paths => {
+      kept.hashed.push([...paths])
+      const done = (exitCode: number, stdout: string, stderr = '') => ({ exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false })
+      if (live.isHashBroken) return done(127, '', 'git: not found')
+      const missing = paths.find(p => live.workspace[p] === undefined || live.workspace[p] === null)
+      if (missing !== undefined) return done(128, '', `fatal: could not open '${missing}' for reading`)
+      return done(0, `${paths.map(p => blobOf(live.workspace[p]!.content)).join('\n')}\n`)
+    },
+    gitHead: async () => ({ exitCode: live.head === null ? 128 : 0, stdout: live.head === null ? '' : `${live.head}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }),
     gitStatus: async () => {
       kept.gitRuns += 1
       return { exitCode: 0, stdout: live.gitStatus, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
@@ -295,6 +320,13 @@ export function fakeHost(
     loadAgentLedger: async () => kept.agentLedger,
     invalidateDescribes: () => undefined,
     invalidatePromptContext: () => undefined,
+  }
+
+  /** A stand-in for Git's blob id: 40 hex digits that change with the content. */
+  function blobOf(content: string): string {
+    let h = 0x811c9dc5
+    for (let i = 0; i < content.length; i++) h = Math.imul(h ^ content.charCodeAt(i), 0x01000193) >>> 0
+    return h.toString(16).padStart(8, '0').repeat(5)
   }
 
   /** Moves the clock, firing due timers in order and letting their work settle. */

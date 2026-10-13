@@ -1,14 +1,22 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { applyProfile, deleteCustomProfile, diffSystems, findProfile, isModified, listProfiles, profileLabel, saveCustomProfile } from '../hooks/core/profiles'
-import { DEFAULT_PERMISSIONS, defaultSettings, normalizeSettings, safeRelativePath, systemsOf } from '../hooks/core/settings'
+import { DEFAULT_PERMISSIONS, classicSettings, classicSystems, defaultSettings, normalizeSettings, safeRelativePath, systemsOf } from '../hooks/core/settings'
 
 describe('settings', () => {
-  test('defaults are safe: risky systems off, dangerous commands denied', () => {
+  test('fresh-install defaults are opinionated: Autopilot at 70% into a fresh context, Frontier Max at Extra High; nothing loosened', () => {
     const s = defaultSettings()
     expect(s.profile).toBe('normal')
-    expect(s.autopilot.enabled).toBe(false)
-    expect(s.frontier.enabled).toBe(false)
+    expect(s.defaults).toBe(2)
+    expect(s.autopilot).toMatchObject({ enabled: true, thresholdMode: 'percent', thresholdPercent: 70, continuation: 'clear', fallbackToCompact: true, autoContinue: true })
+    expect(s.frontier).toEqual({ enabled: true, effort: 'xhigh', subagentEffort: false })
+    expect(s.ops).toMatchObject({ decisions: true, watchers: true })
+    expect(s.progress.milestones).toBe(true)
+    // Not asked for: the lazy-exit guard stays off, and every permission is exactly Classic's (2 Deny, 6 Ask).
+    expect(s.guard.enabled).toBe(false)
+    expect(s.permissions).toEqual(classicSystems().permissions)
+    expect(Object.values(s.permissions).filter(v => v === 'deny')).toHaveLength(2)
+    expect(Object.values(s.permissions).filter(v => v === 'ask')).toHaveLength(6)
     expect(s.router.strategy).toBe('off')
     expect(s.subagents.mode).toBe('unrestricted')
     expect(s.resources.level).toBe('off')
@@ -21,10 +29,21 @@ describe('settings', () => {
     expect(s.permissions.install).toBe('ask')
   })
 
-  test('garbage normalizes to defaults', () => {
-    for (const raw of [undefined, null, 42, 'x', [], { autopilot: 'nope' }]) {
-      expect(normalizeSettings(raw)).toEqual(defaultSettings())
-    }
+  test('Classic is every optional system off, as before 1.7; what an install that used Sentinel before keeps', () => {
+    const c = classicSettings()
+    expect(c.profile).toBe('classic')
+    expect(c.autopilot.enabled).toBe(false)
+    expect(c.frontier).toEqual({ enabled: false, effort: 'max', subagentEffort: false })
+    expect(c.guard.enabled).toBe(false)
+    expect(c.permissions.dangerous).toBe('deny')
+    expect(c.permissions.gitDestructive).toBe('deny')
+  })
+
+  test('garbage normalizes: nothing stored is a fresh install; a stored record is read against Classic, never the new defaults', () => {
+    for (const raw of [undefined, null, 42, 'x', []]) expect(normalizeSettings(raw)).toEqual(defaultSettings())
+    // A record (an older store, whatever it holds) never has a missing group turned on by 1.7's defaults.
+    expect(normalizeSettings({ autopilot: 'nope' })).toEqual({ ...classicSettings(), profile: 'normal', defaults: 1 })
+    expect(normalizeSettings({ profile: 'normal' }).frontier.enabled).toBe(false)
   })
 
   test('values are clamped and unknown enum values fall back', () => {
@@ -65,7 +84,21 @@ describe('settings', () => {
 
 describe('profiles', () => {
   test('built-in profiles are listed in order', () => {
-    expect(listProfiles(defaultSettings()).map(p => p.id)).toEqual(['normal', 'frontier', 'low-resource', 'release-qa'])
+    expect(listProfiles(defaultSettings()).map(p => p.id)).toEqual(['normal', 'frontier', 'low-resource', 'release-qa', 'classic'])
+  })
+
+  test('Normal is the fresh-install defaults; Classic is Normal before 1.7; the other built-ins are what they always were', () => {
+    const fresh = defaultSettings()
+    expect(isModified(fresh)).toBe(false)
+    expect(profileLabel(fresh)).toBe('Normal')
+    const classic = applyProfile(fresh, findProfile(fresh, 'classic')!)
+    expect(systemsOf(classic)).toEqual(classicSystems())
+    expect(profileLabel(classic)).toBe('Classic')
+    // Low Resource and Release/QA built on Classic, as before 1.7: a person on one before the update is not "edited" after it.
+    const low = findProfile(fresh, 'low-resource')!.systems
+    expect(low.autopilot.enabled).toBe(false)
+    expect(low.frontier.enabled).toBe(false)
+    expect(findProfile(fresh, 'release-qa')!.systems.frontier.enabled).toBe(false)
   })
 
   test('Frontier Max turns on max effort, the guard, the autopilot and medium resources', () => {
@@ -95,7 +128,7 @@ describe('profiles', () => {
   })
 
   test('the diff names exactly what a profile changes', () => {
-    const base = defaultSettings()
+    const base = classicSettings()
     const changes = diffSystems(systemsOf(base), findProfile(base, 'frontier')!.systems)
     const paths = changes.map(c => c.path)
     expect(paths).toContain('frontier.enabled')

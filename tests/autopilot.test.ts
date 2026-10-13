@@ -6,6 +6,7 @@ import {
   type AutopilotConfig,
   type AutopilotEvent,
   type BackgroundTask,
+  DEFAULT_WAIT_MS,
   type HandoffFacts,
   type TurnKind,
   freshVerdict,
@@ -266,6 +267,9 @@ describe('state machine', () => {
 const RENDER: BackgroundTask = { id: 'bgimotmfr', description: 'Render the full-resolution 16:9 picture' }
 const WAITER: BackgroundTask = { id: 'b22sjex6u', description: 'Wait until the 16:9 master render finishes' }
 
+/** A task as the machine keeps it: one given without a class is `unknown`, which is waited for (as every task was before 1.7.0). */
+const kept = (t: BackgroundTask): BackgroundTask => ({ ...t, class: t.class ?? 'unknown' })
+
 /** A turn's end as Claude Code reports it: the work its Stop listed in flight (null: no Stop seen, as for an interrupt). */
 const stopped = (now: number, turn: TurnKind, background: BackgroundTask[] | null, reason: 'answer' | 'aborted' | 'error' = 'answer'): AutopilotEvent => ({
   kind: 'turnComplete',
@@ -284,8 +288,11 @@ describe('a handoff that waits for background work', () => {
   test('the handoff turn stopping with work in flight waits for it: no notes checked, nothing cleared', () => {
     const out = step(handing(), stopped(3, 'handoff', [RENDER]), CFG)
     expect(out.model.state).toBe('waiting-background')
-    expect(out.model.background).toEqual([RENDER])
+    expect(out.model.background).toEqual([kept(RENDER)])
     expect(out.model.waitedFor).toBe(1)
+    // The wait is bounded: from the turn's end, for the patience (20 minutes by default).
+    expect(out.model.waitSince).toBe(3)
+    expect(out.model.waitUntil).toBe(3 + DEFAULT_WAIT_MS)
     expect(out.model.handoffTurnId).toBe('h1')
     expect(out.effects.map(e => e.kind)).toEqual(['checkNotes', 'notify'])
     expect(JSON.stringify(out.effects)).toContain('Render the full-resolution 16:9 picture')
@@ -347,7 +354,7 @@ describe('a handoff that waits for background work', () => {
     const waiting = step(handing(), stopped(3, 'handoff', [RENDER, WAITER]), CFG).model
     expect(waiting.note).toBe('Waiting for background work: 2 background tasks')
     const one = step(waiting, { kind: 'backgroundEnded', id: WAITER.id, status: 'completed', now: 4 }, CFG).model
-    expect(one.background).toEqual([RENDER])
+    expect(one.background).toEqual([kept(RENDER)])
     expect(one.backgroundEndedAt).toBeNull()
     // Its turn ends with the render still in flight: still waiting.
     const still = step(one, stopped(5, 'notification', [RENDER]), CFG)
@@ -380,7 +387,7 @@ describe('a handoff that waits for background work', () => {
     expect(asked.effects.map(e => e.kind)).toEqual(['checkNotes'])
     // Their turn started more work: that is waited for too.
     const more = step(waiting, stopped(4, 'person', [RENDER, WAITER]), CFG)
-    expect(more.model.background).toEqual([RENDER, WAITER])
+    expect(more.model.background).toEqual([kept(RENDER), kept(WAITER)])
     expect(more.model.waitedFor).toBe(2)
     // Interrupted with work still in flight: still waiting. Interrupted after it ended: the person decides.
     expect(step(waiting, stopped(5, 'person', null, 'aborted'), CFG).model.state).toBe('waiting-background')
@@ -409,26 +416,29 @@ describe('a handoff that waits for background work', () => {
   test('a reload while waiting keeps waiting for the same work; the next turn to end with none in flight finishes it', () => {
     const waiting = step(handing(), stopped(3, 'handoff', [RENDER, WAITER]), CFG).model
     const record = recordOf(waiting, 'S1', 9)!
-    expect(record).toMatchObject({ state: 'waiting-background', background: [RENDER, WAITER], waitedFor: 2, handoffTurnId: 'h1' })
+    expect(record).toMatchObject({ state: 'waiting-background', background: [kept(RENDER), kept(WAITER)], waitedFor: 2, handoffTurnId: 'h1', waitSince: 3, waitUntil: 3 + DEFAULT_WAIT_MS })
     const back = recover(run([ARM]).model, JSON.parse(JSON.stringify(record)), { sessionId: 'S1' })
-    expect(back.model).toMatchObject({ state: 'waiting-background', background: [RENDER, WAITER], waitedFor: 2, handoffSince: 2, handoffTurnId: 'h1' })
+    expect(back.model).toMatchObject({ state: 'waiting-background', background: [kept(RENDER), kept(WAITER)], waitedFor: 2, handoffSince: 2, handoffTurnId: 'h1', waitUntil: 3 + DEFAULT_WAIT_MS })
     expect(back.effects.map(e => e.kind)).toEqual(['checkNotes'])
     // The turn under way across the reload (its start unseen) ends with nothing in flight: no second handoff, just the check.
     expect(step(back.model, stopped(10, 'unknown', []), CFG).effects.map(e => e.kind)).toEqual(['verifyHandoff'])
     // A record from before 1.6.3 lists nothing: the next Stop says what is in flight.
     const old = recover(run([ARM]).model, { ...record, background: undefined, waitedFor: undefined, backgroundEndedAt: undefined, handoffTurnId: undefined }, { sessionId: 'S1' })
     expect(old.model.background).toEqual([])
-    expect(step(old.model, stopped(10, 'unknown', [RENDER]), CFG).model.background).toEqual([RENDER])
-    // A list changed by hand never throws.
-    expect(recover(run([ARM]).model, { ...record, background: [{ id: 3 }, 'x', RENDER] as unknown as BackgroundTask[] }, { sessionId: 'S1' }).model.background).toEqual([RENDER])
+    expect(step(old.model, stopped(10, 'unknown', [RENDER]), CFG).model.background).toEqual([kept(RENDER)])
+    // A list changed by hand never throws; a task kept without a class is classified again by its words.
+    expect(recover(run([ARM]).model, { ...record, background: [{ id: 3 }, 'x', RENDER] as unknown as BackgroundTask[] }, { sessionId: 'S1' }).model.background).toEqual([
+      { ...RENDER, class: 'unknown', why: 'a command these rules do not recognise', by: 'rule' },
+    ])
   })
 
   test("Claude Code's notification is read for its task and status; any other text is not one", () => {
     // As delivered on 2.1.295 (seen live).
     const text =
       '<task-notification>\n<task-id>bgimotmfr</task-id>\n<tool-use-id>toolu_015tbqomnDNoS59qyGVUsJc8</tool-use-id>\n<output-file>C:\\Users\\x\\tasks\\bgimotmfr.output</output-file>\n<status>completed</status>\n<summary>Background command "Render the full-resolution 16:9 picture" completed (exit code 0)</summary>\n</task-notification>'
-    expect(notificationTask(text)).toEqual({ id: 'bgimotmfr', status: 'completed' })
-    expect(notificationTask(text.replace('completed</status>', 'failed</status>'))).toEqual({ id: 'bgimotmfr', status: 'failed' })
+    // With the tool call that started the task: a workflow run's task ends its agents.
+    expect(notificationTask(text)).toEqual({ id: 'bgimotmfr', status: 'completed', toolUseId: 'toolu_015tbqomnDNoS59qyGVUsJc8' })
+    expect(notificationTask(text.replace('completed</status>', 'failed</status>'))).toMatchObject({ id: 'bgimotmfr', status: 'failed' })
     expect(notificationTask('<task-notification>\n<task-id>a1</task-id>\n</task-notification>')).toEqual({ id: 'a1', status: null })
     expect(notificationTask('Please look at <task-notification><task-id>x</task-id>')).toBeNull()
     expect(notificationTask('is the handoff not done?')).toBeNull()
@@ -445,7 +455,167 @@ describe('a handoff that waits for background work', () => {
     expect(more).toContain('Other background work is still running (Render the full-resolution 16:9 picture)')
     expect(more).not.toContain('milestones')
     // The handoff prompt says what happens to work left running.
-    expect(handoffPrompt({ tokens: 801_000, window: 1_000_000, handoffFile: 'NEXT_SESSION_PROMPT.md', runNumber: 43, sessionNumber: 1 })).toContain('the fresh context starts only after it finishes')
+    const prompt = handoffPrompt({ tokens: 801_000, window: 1_000_000, handoffFile: 'NEXT_SESSION_PROMPT.md', runNumber: 43, sessionNumber: 1 })
+    expect(prompt).toContain('The fresh context starts after it finishes and you have recorded its result, or after 20 minutes at most')
+    // A server is never waited for: the notes name it, so the fresh session reuses it.
+    expect(prompt).toContain('A server or watcher you started (a dev or preview server, a --watch) is never waited for')
+    expect(handoffPrompt({ tokens: undefined, window: undefined, handoffFile: 'N.md', runNumber: null, sessionNumber: 1, waitMinutes: 0 })).toContain('the fresh context starts at once and its result reaches the fresh session instead')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A background process is not automatically a handoff blocker (1.7.0). Seen in a real run: a written
+// handoff waited for a Vite preview server Claude Code listed in flight, forever; Keep warm stood down
+// and a 775k-token cache went cold two hours later. Live on Claude Code 2.1.296: background work keeps
+// running across /clear and its notification reaches the fresh context.
+
+const VITE: BackgroundTask = { id: 'bvite01', description: 'Start the Vite preview server', class: 'persistent', why: 'a Vite dev or preview server', by: 'rule', command: 'npx vite preview --port 4173' }
+const SUITE: BackgroundTask = { id: 'btest01', description: 'Run the full test suite', class: 'finite', why: 'a test run', by: 'rule', command: 'npm test' }
+const ODD: BackgroundTask = { id: 'bodd01', description: './scripts/go.sh', class: 'unknown', why: 'a command these rules do not recognise', by: 'rule', command: './scripts/go.sh' }
+
+describe('a background process is not automatically a handoff blocker', () => {
+  test('a server in flight never holds the written handoff: the notes are checked at once, and it is left running for the fresh context', () => {
+    const out = step(handing(), stopped(3, 'handoff', [VITE]), CFG)
+    expect(out.model.state).toBe('verifying')
+    expect(out.effects.map(e => e.kind)).toEqual(['verifyHandoff'])
+    expect(out.model.background).toEqual([])
+    expect(out.model.leftRunning).toEqual([VITE])
+    expect(out.model.waitedFor).toBe(0)
+    // The fresh context is told; until then it is kept through the check and the clear.
+    const clearing = step(out.model, { kind: 'handoffVerified', isOk: true, now: 4 }, CFG).model
+    const resuming = step(clearing, { kind: 'clearDone', now: 5 }, CFG).model
+    expect(resuming.leftRunning).toEqual([VITE])
+    expect(step(resuming, { kind: 'leftRunningTold' }, CFG).model.leftRunning).toEqual([])
+    expect(step(resuming, { kind: 'continuationStarted', now: 6 }, CFG).model.leftRunning).toEqual([])
+  })
+
+  test('finite and persistent work together: it waits for the finite work only, then leaves the server running', () => {
+    const waiting = step(handing(), stopped(3, 'handoff', [VITE, SUITE]), CFG).model
+    expect(waiting.state).toBe('waiting-background')
+    expect(waiting.waitedFor).toBe(1)
+    expect(waiting.note).toBe('Waiting for background work: Run the full test suite')
+    const ended = step(waiting, { kind: 'backgroundEnded', id: SUITE.id, status: 'completed', now: 7 }, CFG).model
+    expect(ended.background).toEqual([VITE])
+    expect(ended.backgroundEndedAt).toBe(7)
+    expect(ended.note).toBe('Background work finished. Claude records its result')
+    const done = step(ended, stopped(8, 'notification', [VITE]), CFG)
+    expect(done.model.state).toBe('verifying')
+    expect(done.model.leftRunning).toEqual([VITE])
+    expect(done.model.backgroundEndedAt).toBe(7)
+    // The server's later Stops never hold anything either.
+    expect(step(waiting, stopped(8, 'person', [VITE, SUITE]), CFG).model.state).toBe('waiting-background')
+  })
+
+  test('a wait is bounded: past its patience the handoff goes on and leaves the work running; under a running turn, when that turn ends', () => {
+    const waiting = step(handing(), stopped(3, 'handoff', [SUITE]), CFG).model
+    expect(step(waiting, { kind: 'waitExpired', now: 3 + DEFAULT_WAIT_MS - 1 }, CFG).model).toBe(waiting)
+    const over = step(waiting, { kind: 'waitExpired', now: 3 + DEFAULT_WAIT_MS }, CFG)
+    expect(over.model.state).toBe('verifying')
+    expect(over.model.leftRunning).toEqual([SUITE])
+    expect(over.model.note).toBe('Waited long enough: checking the handoff notes, leaving the work running')
+    expect(over.effects.map(e => e.kind)).toEqual(['verifyHandoff'])
+    // A turn running (Claude recording a result): never moved under it; its end moves it on.
+    const held = step(waiting, { kind: 'waitExpired', now: 3 + DEFAULT_WAIT_MS, isTurnRunning: true }, CFG).model
+    expect(held).toMatchObject({ state: 'waiting-background', skipWait: true })
+    const after = step(held, stopped(4 + DEFAULT_WAIT_MS, 'notification', [SUITE]), CFG).model
+    expect(after).toMatchObject({ state: 'verifying', leftRunning: [SUITE] })
+    // The patience is the person's setting: none at all, or another length.
+    expect(step(handing(), stopped(3, 'handoff', [SUITE]), { ...CFG, waitMs: 0 }).model).toMatchObject({ state: 'verifying', leftRunning: [SUITE] })
+    expect(step(handing(), stopped(3, 'handoff', [SUITE]), { ...CFG, waitMs: 5 * 60_000 }).model.waitUntil).toBe(3 + 5 * 60_000)
+  })
+
+  test("the person's ways out: hand off now, keep waiting, call it off", () => {
+    const waiting = step(handing(), stopped(3, 'handoff', [SUITE]), CFG).model
+    // Hand off now, the session idle: the notes are checked at once, the work left running.
+    const now = step(waiting, { kind: 'skipWait', now: 4, isTurnRunning: false }, CFG)
+    expect(now.model).toMatchObject({ state: 'verifying', leftRunning: [SUITE] })
+    // Typed mid-turn: when that turn ends, whatever still runs.
+    const later = step(waiting, { kind: 'skipWait', now: 4, isTurnRunning: true }, CFG).model
+    expect(later).toMatchObject({ state: 'waiting-background', skipWait: true })
+    expect(step(later, stopped(5, 'person', [SUITE]), CFG).model).toMatchObject({ state: 'verifying', leftRunning: [SUITE] })
+    // Asked before the handoff turn ended: that turn's end does not wait.
+    const early = step(handing(), { kind: 'skipWait', now: 2, isTurnRunning: true }, CFG).model
+    expect(step(early, stopped(3, 'handoff', [SUITE]), CFG).model).toMatchObject({ state: 'verifying', leftRunning: [SUITE] })
+    const asked = run([ARM, { kind: 'manualHandoff', now: 1, skipWait: true }, { kind: 'handoffStarted', now: 2, turnId: 'h1' }]).model
+    expect(asked.skipWait).toBe(true)
+    expect(step(asked, stopped(3, 'handoff', [SUITE]), CFG).model.state).toBe('verifying')
+    // Keep waiting: longer, from the wait's end (or now, past it); a word not to wait is taken back.
+    const longer = step(waiting, { kind: 'keepWaiting', now: 10, ms: 30 * 60_000 }, CFG).model
+    expect(longer.waitUntil).toBe(3 + DEFAULT_WAIT_MS + 30 * 60_000)
+    expect(step(later, { kind: 'keepWaiting', now: 3 + 2 * DEFAULT_WAIT_MS, ms: 60_000 }, CFG).model).toMatchObject({ skipWait: false, waitUntil: 3 + 2 * DEFAULT_WAIT_MS + 60_000 })
+    // Call it off: this context carries on, and the context's growth decides the next handoff.
+    const off = step(waiting, { kind: 'cancelHandoff', tokens: 800_000, window: 1_000_000 }, CFG)
+    expect(off.model).toMatchObject({ state: 'armed', snoozeUntil: 900_000, background: [], leftRunning: [], waitUntil: null, skipWait: false, note: 'Handoff called off. Watching the context' })
+    expect(off.effects.map(e => e.kind)).toEqual(['notify'])
+    // Past the point of calling off (the fresh context starting): nothing changes.
+    const clearing = step(now.model, { kind: 'handoffVerified', isOk: true, now: 5 }, CFG).model
+    expect(step(clearing, { kind: 'cancelHandoff', tokens: 1, window: undefined }, CFG).model).toBe(clearing)
+  })
+
+  test('a task the isolated classifier calls a service ends a wait it alone held; a finite verdict keeps it', () => {
+    const waiting = step(handing(), stopped(3, 'handoff', [ODD]), CFG).model
+    const service = { kind: 'reclassified', id: ODD.id, class: 'persistent', why: 'a long-running service, by a small isolated classification', by: 'classifier' } as const
+    const idle = step(waiting, { ...service, isTurnRunning: false }, CFG)
+    expect(idle.model.state).toBe('verifying')
+    expect(idle.model.leftRunning).toEqual([{ ...ODD, class: 'persistent', why: service.why, by: 'classifier' }])
+    // A turn running: it ends the wait at its end.
+    const busy = step(waiting, { ...service, isTurnRunning: true }, CFG).model
+    expect(busy.state).toBe('waiting-background')
+    expect(busy.background[0]?.class).toBe('persistent')
+    expect(step(busy, stopped(4, 'notification', busy.background), CFG).model.state).toBe('verifying')
+    expect(step(waiting, { ...service, class: 'finite', by: 'classifier', isTurnRunning: false }, CFG).model.state).toBe('waiting-background')
+  })
+
+  test('the supervisor’s unblocked: a wait left holding only services moves on; one still holding work does not', () => {
+    const waiting = step(handing(), stopped(3, 'handoff', [SUITE, VITE]), CFG).model
+    expect(step(waiting, { kind: 'unblocked', now: 4 }, CFG).model).toBe(waiting)
+    const ended = step(waiting, { kind: 'backgroundEnded', id: SUITE.id, status: 'killed', now: 5 }, CFG).model
+    const moved = step(ended, { kind: 'unblocked', now: 40_000 }, CFG)
+    expect(moved.model).toMatchObject({ state: 'verifying', leftRunning: [VITE], backgroundEndedAt: 5, note: 'Only long-running services left: checking the handoff notes' })
+  })
+
+  test('a 1.6.3 record stuck on a dev server: after the update the server no longer holds it, and its wait is bounded', () => {
+    const record = {
+      sessionId: 'S1',
+      state: 'waiting-background',
+      triggeredTokens: 775_000,
+      triggeredAt: 1000,
+      handoffSince: 1000,
+      retries: 0,
+      snoozeUntil: null,
+      lastError: null,
+      note: 'Handoff written. Waiting for background work: npx vite preview --port 4173',
+      at: 2000,
+      handoffTurnId: 'h1',
+      background: [{ id: 'bvite01', description: 'npx vite preview --port 4173' }],
+      waitedFor: 1,
+      backgroundEndedAt: null,
+    }
+    const back = recover(run([ARM]).model, record, { sessionId: 'S1', now: 9_000_000, waitMs: DEFAULT_WAIT_MS })
+    expect(back.model.state).toBe('waiting-background')
+    expect(back.model.background).toEqual([{ id: 'bvite01', description: 'npx vite preview --port 4173', class: 'persistent', why: 'a Vite dev or preview server', by: 'rule' }])
+    expect(back.model.waitUntil).toBe(2000 + DEFAULT_WAIT_MS)
+    // Nothing it must wait for: the supervisor's unblocked (or any turn's end) moves it on.
+    expect(step(back.model, { kind: 'unblocked', now: 9_000_000 }, CFG).model).toMatchObject({ state: 'verifying', leftRunning: [{ id: 'bvite01' }] })
+    expect(step(back.model, stopped(9_000_001, 'unknown', [{ id: 'bvite01', description: 'npx vite preview --port 4173', class: 'persistent' }]), CFG).model.state).toBe('verifying')
+  })
+
+  test('/cr fresh with only a server running starts the fresh context and says it keeps running; /cr fresh now leaves finite work running too', () => {
+    expect(freshVerdict(handing(), facts({ inFlight: [VITE] }))).toEqual({
+      action: 'start-fresh',
+      text: 'Handoff notes are valid and only long-running services are running. Starting the fresh context. Left running for the fresh context, which is told: Start the Vite preview server.',
+    })
+    expect(freshVerdict(handing(), facts({ inFlight: [SUITE] })).action).toBe('none')
+    expect(freshVerdict(handing(), facts({ inFlight: [SUITE], isForced: true })).text).toBe(
+      'Handoff notes are valid and you chose not to wait for the background work. Starting the fresh context. Left running for the fresh context, which is told: Run the full test suite.',
+    )
+    // Forced never skips the notes: stale notes still keep the context.
+    expect(freshVerdict(handing(), facts({ inFlight: [SUITE], isForced: true, notes: 'stale' })).action).toBe('none')
+    const waiting = step(handing(), stopped(3, 'handoff', [SUITE]), CFG).model
+    expect(handoffVerdict(waiting, facts({ isForced: true }))).toEqual({ action: 'start-fresh', text: 'The handoff turn has ended and its notes are current. Starting the fresh context. Left running for the fresh context, which is told: Run the full test suite.' })
+    // What the person leaves running goes with the clear: the fresh context is told.
+    expect(step(handing(), { kind: 'manualFresh', now: 9, left: [VITE] }, CFG).model).toMatchObject({ state: 'clearing', leftRunning: [VITE] })
+    expect(step(waiting, { kind: 'manualFresh', now: 9 }, CFG).model).toMatchObject({ state: 'clearing', leftRunning: [SUITE] })
   })
 })
 
@@ -458,9 +628,15 @@ describe('/cr handoff and /cr fresh say what really happens', () => {
     expect(handoffVerdict(run([ARM]).model, facts({ isTurnRunning: true })).text).toBe('Handing off: Claude writes the handoff notes when the current turn ends.')
     expect(handoffVerdict(run([ARM, { kind: 'manualHandoff', now: 1 }]).model, facts())).toEqual({ action: 'none', text: 'A handoff is already starting: Claude writes the notes next.' })
     expect(handoffVerdict(handing(), facts({ isTurnRunning: true }))).toEqual({ action: 'none', text: 'A handoff is already in progress. Claude is writing the notes.' })
-    expect(handoffVerdict(waiting(), facts())).toEqual({ action: 'none', text: 'Handoff notes are written; waiting for 1 background task to finish before starting fresh (Render the full-resolution 16:9 picture).' })
+    // What it waits for, and the way out of the wait.
+    expect(handoffVerdict(waiting(), facts())).toEqual({
+      action: 'none',
+      text: 'Handoff notes are written; waiting for 1 background task to finish before starting fresh (Render the full-resolution 16:9 picture). /cr handoff now hands off without waiting (it keeps running for the fresh context).',
+    })
     const unwritten = step(waiting(), { kind: 'notesSeen', isWritten: false }, CFG).model
-    expect(handoffVerdict(unwritten, facts()).text).toBe('The handoff is waiting for 1 background task to finish before starting fresh (Render the full-resolution 16:9 picture); the notes are not written yet.')
+    expect(handoffVerdict(unwritten, facts()).text).toBe(
+      'The handoff is waiting for 1 background task to finish before starting fresh (Render the full-resolution 16:9 picture); the notes are not written yet. /cr handoff now hands off without waiting (it keeps running for the fresh context).',
+    )
     expect(handoffVerdict(finished(), facts({ isTurnRunning: true })).text).toBe('The background work has finished and Claude is recording its result. The fresh context starts when this turn ends.')
     const verifying = step(finished(), stopped(5, 'notification', []), CFG).model
     expect(handoffVerdict(verifying, facts())).toEqual({ action: 'none', text: 'Handoff is complete; Sentinel is checking the notes.' })
@@ -495,7 +671,7 @@ describe('/cr handoff and /cr fresh say what really happens', () => {
     // Work genuinely still running: kept, with what runs.
     expect(freshVerdict(waiting(), facts())).toEqual({
       action: 'none',
-      text: '1 background task is still running (Render the full-resolution 16:9 picture). Fresh context was not started: the handoff finishes by itself when it ends (stop it with /tasks to end the wait sooner).',
+      text: '1 background task is still running (Render the full-resolution 16:9 picture). Fresh context was not started: the handoff finishes by itself when it ends, or when its wait runs out (then it keeps running for the fresh context). /cr fresh now starts it at once and leaves it running; /cr handoff stop stops it first.',
     })
     expect(freshVerdict(handing(), facts({ inFlight: [RENDER, WAITER] })).text).toMatch(/^2 background tasks are still running \(Render the full-resolution 16:9 picture; Wait until/)
     // Notes stale, empty or missing: kept, and said why.

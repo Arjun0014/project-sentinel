@@ -15,6 +15,7 @@ import {
   PERMISSION_LABEL,
   type Settings,
   type SystemSettings,
+  classicSystems,
   clone,
   deepEqual,
   defaultSystems,
@@ -30,10 +31,16 @@ export type ProfileInfo = {
   systems: SystemSettings
 }
 
+/** Normal: the fresh-install defaults (1.7.0). */
 const normal = (): SystemSettings => defaultSystems()
 
+/** Classic: Normal as it was before 1.7.0, Autopilot and Frontier Max off. */
+const classic = (): SystemSettings => classicSystems()
+
+// The other built-ins are what they always were (built on Classic), so a person who applied one before 1.7.0
+// does not find it "edited" after the update.
 const frontier = (): SystemSettings => {
-  const s = defaultSystems()
+  const s = classicSystems()
   s.frontier = { enabled: true, effort: 'max', subagentEffort: false }
   s.guard = { ...s.guard, enabled: true, strictness: 'standard' }
   s.autopilot = { ...s.autopilot, enabled: true, thresholdMode: 'percent', thresholdPercent: 70 }
@@ -42,14 +49,14 @@ const frontier = (): SystemSettings => {
 }
 
 const lowResource = (): SystemSettings => {
-  const s = defaultSystems()
+  const s = classicSystems()
   s.resources = { ...s.resources, level: 'low', cpu: 50, ram: 75, enforcement: 'strict' }
   s.subagents = { ...s.subagents, mode: 'limit', limit: 1 }
   return s
 }
 
 const releaseQa = (): SystemSettings => {
-  const s = defaultSystems()
+  const s = classicSystems()
   s.qa = { enabled: true }
   s.guard = { ...s.guard, enabled: true, strictness: 'strict', maxPerTurn: 3 }
   s.autopilot = { ...s.autopilot, enabled: true, thresholdMode: 'percent', thresholdPercent: 70 }
@@ -71,7 +78,7 @@ const releaseQa = (): SystemSettings => {
 }
 
 export const BUILTIN_PROFILES: readonly Omit<ProfileInfo, 'systems'>[] = [
-  { id: 'normal', name: 'Normal', tagline: 'Claude Code as usual, quieter', isBuiltin: true },
+  { id: 'normal', name: 'Normal', tagline: 'Autopilot at 70%, Frontier Max at Extra High', isBuiltin: true },
   {
     id: 'frontier',
     name: 'Frontier Max',
@@ -90,6 +97,7 @@ export const BUILTIN_PROFILES: readonly Omit<ProfileInfo, 'systems'>[] = [
     tagline: 'Verifies before calling it done',
     isBuiltin: true,
   },
+  { id: 'classic', name: 'Classic', tagline: 'As before 1.7: Autopilot and Frontier Max off', isBuiltin: true },
 ]
 
 const BUILDERS: Record<string, () => SystemSettings> = {
@@ -97,6 +105,7 @@ const BUILDERS: Record<string, () => SystemSettings> = {
   frontier,
   'low-resource': lowResource,
   'release-qa': releaseQa,
+  classic,
 }
 
 /** Every profile the person can pick: the built-ins, then their own. */
@@ -148,6 +157,7 @@ const LABELS: Record<string, string> = {
   'autopilot.fallbackToCompact': 'If clearing fails, compact',
   'autopilot.handoffFile': 'Notes file',
   'autopilot.autoContinue': 'Carry on by itself',
+  'autopilot.waitMinutes': 'Wait for background work',
   'frontier.enabled': 'Frontier Max',
   'frontier.effort': 'Effort',
   'frontier.subagentEffort': 'Effort for subagents',
@@ -205,6 +215,7 @@ const VALUE_LABELS: Record<string, Record<string, string>> = {
 const UNITS: Record<string, (n: number) => string> = {
   'autopilot.thresholdPercent': n => `${n}%`,
   'autopilot.thresholdTokens': n => fmtTokens(n),
+  'autopilot.waitMinutes': n => (n === 0 ? 'Never' : n % 60 === 0 ? `${n / 60} h` : `${n} min`),
   'resources.cpu': n => `${n}%`,
   'resources.ram': n => `${n}%`,
   'resources.intervalSec': n => `${n} s`,

@@ -43,7 +43,8 @@ export const PLAN_MAX = 60
 
 export const emptyPlan = (): Plan => ({ tasks: [], session: 0, updatedAt: null })
 
-const keyOf = (subject: string): string => subject.toLowerCase().replace(/\s+/g, ' ').trim()
+/** How a milestone is matched across rewritten lists (and the evidence kept for it): its subject, normalised. */
+export const keyOf = (subject: string): string => subject.toLowerCase().replace(/\s+/g, ' ').trim()
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 

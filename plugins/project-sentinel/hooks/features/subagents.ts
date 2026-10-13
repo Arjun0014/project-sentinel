@@ -1,19 +1,11 @@
 /**
  * Subagent Control: decides each spawn against the session's policy and the
- * live count of running agents (from `$.agent.list()`). Enforced through
- * `agent.offer` / `agent.spawn`, never through prompting alone.
+ * live count of agents (the reconciled rows of features/agents.ts `limitCount`,
+ * plus spawns allowed and not settled yet). Enforced through `agent.offer` /
+ * `agent.spawn`, never through prompting alone.
  */
 
-import type { AgentInfo } from 'claude-code'
-
 import type { SubagentMode } from '../core/settings'
-
-const ENDED = new Set(['completed', 'failed', 'killed'])
-
-/** Agents that count against the limit: not ended; teammates only when asked. */
-export function activeAgents(list: readonly AgentInfo[], countTeammates: boolean): AgentInfo[] {
-  return list.filter(a => !ENDED.has(a.status) && (countTeammates || a.teammateId === undefined))
-}
 
 export type SpawnInput = {
   mode: SubagentMode

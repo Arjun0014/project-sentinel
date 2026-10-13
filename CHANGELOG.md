@@ -6,6 +6,201 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and ver
 `plugins/project-sentinel/.claude-plugin/plugin.json` and in `.claude-plugin/marketplace.json` must
 match. `claude plugin tag plugins/project-sentinel` checks this when tagging a release.
 
+## [1.7.0] - 2026-10-13
+
+A hardening and UX pass driven by real long-run failures: a written handoff held for hours by a Vite preview
+server while its 775k-token cache went cold, and agents Claude Code showed running that Sentinel said did not
+exist. Background work is now classified and only finite work is waited for, within a bound; a Handoff
+Supervisor watches every handoff; Keep warm stays on until the old context is really discarded; the person always
+has a way out. Agents are tracked from their spawn, workflows included, with an Activity view and a band above
+the status bar. The status bar shows the plan's five-hour usage instead of the run's cost; completed milestones
+keep evidence and say when it goes stale; navigation has two distinct levels; and new installs start with
+Autopilot and Frontier Max on, while existing installs keep what they had. 574 tests pass on Claude Code 2.1.296
+and 2.1.289.
+
+### Changed
+
+- **A background process is no longer automatically a handoff blocker.** A written handoff waited for every task
+  Claude Code listed in flight, so a persistent Vite preview server kept it in `waiting-background` for good while
+  Keep warm stood down and a 775k-token cache went cold. Each task Claude Code's Stop lists is now classified
+  (`features/background.ts`): dev, preview and API servers, watchers, tunnels, log followers and monitors are
+  never waited for; tests, builds, renders, installs, transfers and agents are; anything unrecognised is waited for
+  and, after a minute, asked about once by a small isolated classifier (`$.model.classify`, the command and
+  Claude Code's description only, never the conversation). A wait is bounded by **Context → Autopilot → Wait for
+  background work** (`autopilot.waitMinutes`, default 20 minutes, 0 never waits): past it the handoff goes on and
+  leaves the work running. Claude Code keeps background work across `/clear` and hands its result to the fresh
+  context (verified live), which is told what still runs: servers to reuse, results that will arrive there.
+- **The Handoff Supervisor** (`features/supervisor.ts`) looks at a handoff under way every 30 seconds, without a
+  model call or anything added to the transcript: how long the step has stood, what holds it (finite work, long
+  finite work, unrecognised work, a server beside it, a question open to the person, a step whose event never
+  came), and the ways out. It shows in Context and on a line above the status bar, traces each change to the debug
+  log, and acts by itself only at a wait's end (never under a running turn) or when a wait holds nothing any more
+  in a quiet session (a reload that found only servers left, the last task stopped).
+- **Keep warm stands down only when the old context is about to be discarded**: the notes check before a clear,
+  the clear, the fresh context resuming. Every earlier step reads the old context again (the handoff turn, each
+  notification's turn, the person's message), so a due, written, waiting or stuck handoff keeps the cache warm.
+- **The person always has a way out of a waiting handoff.** Typed while a handoff is under way, "handoff now",
+  "don't wait for the background process", "start the fresh session now", "keep waiting", "stop the server and hand
+  off" or "cancel the handoff" is acted on before the Cold Resume Guard and never sent into the old context. Any
+  other message while a written handoff waits (or Claude writes the notes) is not let in unasked: hand off and give
+  it to the fresh context (it waits in the Mission Queue), send it here, or keep it in the prompt box. The same ways
+  out are commands (`/cr handoff now|wait [30m]|stop [id|all]|cancel`, `/cr fresh now`) and buttons (Context and
+  the status bar: Hand off now, Stop & hand off, Keep waiting, Call off). `/cr fresh` with only a server running
+  starts the fresh context and says the server keeps running.
+- A server in the session no longer parks the Mission Queue and watcher wakes, silences the Watcher Scout, excuses
+  an early stop to the lazy-exit guard, or makes the headline say "Waiting for …": only work whose notification
+  brings a turn back does.
+- Handoff Health records what a handoff left running (neither good nor missing), and the run's record notes each
+  task's end when its notification reaches the fresh context (Context → Last handoff).
+- A 1.6.3 handoff record stuck on a server is classified again after the update, and its wait is bounded.
+- **Agents are first-class.** An agent shows from its `agent.spawn` (starting until Claude Code lists it), and the
+  agent list is looked at every two seconds while any agent is alive, whether or not the list has caught up: before,
+  Sentinel listed agents only before a spawn and polled only once the list showed a running one, so a foreground
+  agent stayed invisible until its call returned, and a workflow's agents (which Claude Code never lists) never
+  showed at all. The list now reconciles a ledger fed by each agent's spawn, its own loop's calls and requests, its
+  `turn.complete` and, for a workflow run, the run's end: an agent the list leaves out for a moment keeps its status
+  (no longer listed only after several looks over six seconds), an end Sentinel saw outranks a list a moment behind,
+  a message that resumes an agent brings it back, and a teammate's turns leave it idle. Two spawns at once no longer
+  both pass a limit of one (a slot is held from the decision until the spawn settles); a workflow's agents are not
+  counted against the limit.
+- **Activity → Agents**, a view of its own (Activity is now Summary · Operations · Agents · Tool calls; Agents shows
+  while agents run or ran in the last ten minutes): each agent under its parent, a workflow's agents under their
+  run, with its type, model, status, time, what it is doing (its latest call) and when it last acted, its calls, its
+  own plan as a track when it keeps a task list or milestones (never a made-up percent), its result or failure, and
+  Stop and Message where Claude Code takes them. Operations keeps one line leading there; the agents chip, `/cr
+  agents` and Guardrails' link open it.
+- **The agent band**: while subagents run, a line per agent above the status bar (up to three; more are counted by
+  what they do, "5 agents · 2 reading · 2 editing · 1 checking"), each opening Activity → Agents; gone when none run.
+- `/cr watchers` opens Operations at the watchers.
+- **The status bar shows the plan's five-hour usage instead of the run's cost.** `5H ▂▂▂▂▂▂ 63% · 2h14m` in the
+  terminal (a thin bar, the percentage, the time to the window's reset), a `5-hour usage` cell on Desktop, and the
+  same words on Claude Code's status line (`/cr hud status`). It is Claude Code's own reading
+  (`$.session.usage().rateLimits` and `session.measure`), never an estimate: `5H —` before the first response,
+  `5H reset · new window` once the window's reset time passes (or the window leaves the list) until a response
+  reads the new one, amber from 80%, `5H limit` in red at 100% or when Claude Code ends a request on the rate limit
+  (`classic.StopFailure` `rate_limit`; "Rate limited" when no window reads full), until a turn is answered again or
+  the window resets. An account with no five-hour window (an API key) shows nothing there in the terminal and
+  `Plan usage —` on Desktop. The countdown is redrawn once a minute only while a window counts down. The run's
+  cost stays in Overview, Context → Run (which now also spells out each window: 5-hour and 7-day, with their
+  resets), `/cr status` and the Run Budget.
+
+- **Two levels of navigation that never look alike.** Activity's views were drawn with the same `● Summary
+  ○ Operations` marks as a setting's choice, so they read as random buttons. They are now a second level of their
+  own (`subNav`): a breadcrumb, `Activity › Summary`, over a captioned row, `View  [ Summary ]  Operations  Agents
+  (2)  Tool calls`, the current view bracketed in the section's accent and the others dim; on Desktop the
+  breadcrumb over a bordered group of buttons, apart from the section bar's free-standing ones. Keyboard focus
+  walks it like any other control.
+- **Color is meaning, not decoration.** Card titles were each drawn in the accent of the section they belong to
+  (Overview became a rainbow); they are now quiet structure, bold and gray. Green is verified, amber waiting for
+  you or worth a look (a question, a decision, a watcher due, a held message, the fresh context waiting for you:
+  these were the brand's orange), red a failure or a blocker (a failing check, a blocked milestone, a blocking
+  decision), blue what is current or under way (a handoff in progress: it was orange), gray the default and the
+  past. The brand's orange is kept for its mark, the Control Room button, the handoff point on the context meter
+  and the Quest log.
+- **Each page leads with what needs you, then what is happening, then its controls, then history.** Overview's
+  *Now* moved from a box halfway down to a line right under the run; its untitled profile box became a *Setup* card
+  like the other sections'. Context no longer repeats its handoff steps above the Autopilot settings while
+  Autopilot simply watches (one sentence and *Hand off now*; the numbered steps stay where they teach, with
+  Autopilot off). *Ready to resume* speaks up in red and amber only while a fresh start is in play (a handoff under
+  way, the Cold Resume Guard armed, a watcher that may wake fresh); otherwise "Not needed yet", in gray. A card with
+  nothing in it yet is a quiet line, not a box around one.
+
+- **Opinionated out of the box, for new installs only.** A fresh install now starts with Context Autopilot on
+  (handing off at 70% into a fresh context that carries on by itself, compacting if the clear fails), Frontier
+  Max on at Extra High effort, the Decision Inbox, Watchers and run milestones on. That set is the new **Normal**,
+  so a fresh install reads "Normal", not "Normal · edited". The lazy-exit guard stays off and no permission
+  changes: 2 categories Deny (force push and resets, dangerous commands) and 6 Ask (installs, downloads, edits
+  outside the project, deleting files, push, deploy) are kept as they were, because "Default" there would hand
+  those decisions back to Claude Code. An existing install keeps exactly what it had: settings saved before 1.7.0
+  on Normal are relabelled **Classic** (a new built-in profile: Normal as it was, Autopilot and Frontier Max off),
+  every value untouched; one that used Sentinel without ever saving a setting (its runs, cache memory or Quest log
+  are in the store) is saved as Classic; Frontier Max, Low Resource and Release / QA are what they always were.
+  Settings carried over from Control Room's store still win over a fresh install's defaults written moments
+  before at the same session's start. Stored settings are read against Classic, so a group an older version
+  never saved is never switched on by the new defaults.
+- **A fresh install says what it does, once.** A short "Sentinel is on" card at the top of Overview (Autopilot at
+  70%, Frontier Max at Extra High, where Guardrails live, Activity's views, Work carries on while Context starts
+  over; each with a way there) until *Got it*, and one toast at the first load.
+- **Frontier Max no longer turns the lazy-exit guard on by itself** (the switch in Behavior and Overview, and
+  `/cr frontier on`; the Frontier Max profile still bundles both). Behavior now says plainly what it does: it adds
+  Sentinel's strongest engineering policy to Claude's instructions and asks for the chosen effort where the model
+  has an effort setting; it never changes the model; *This context* shows whether and how it reached Claude.
+- **Guardrails shows every value's meaning and whether it is the default** ("Asks you first · default"; a changed
+  one in amber with its default), so a new user needs no knowledge of profiles.
+
+### Added
+
+- **Milestone evidence snapshots.** When a milestone is completed, Sentinel keeps what it stood on
+  (`features/evidence.ts`, in the run record): when it was verified, the checks that were green during its work
+  (their kind and command), the files its work changed (edits Sentinel saw while it was under way, and `outputs`
+  Claude may now name in the milestones tool) with Git's blob id of each (`git hash-object --no-filters`, only the
+  id is kept), their size and time, and HEAD. Never the whole repository. At a handoff (the fresh context is told
+  what that comparison found), a session's start or reload, a milestone's completion and (at most once a minute) a
+  turn's end, the files are compared with the workspace: an
+  unchanged size and time costs no hashing, and a file only touched stays current. A change is never called
+  wrong: the milestone's *verification is stale*, with which files changed, since when and which checks to rerun.
+  Later milestones changing the same files do not raise noise: quiet while they are under way ("being changed by
+  M3"), and re-baselined once the latest run of every kind of check the earlier milestone had passes after the
+  change (or, for documentation and check-less milestones, once the later milestone is completed). A change made
+  outside Claude's tools clears the same way once the checks pass after Sentinel found it, or when the person
+  accepts the files as they are (`/cr evidence accept`, or *Accept files as they are* in Activity). Shown in
+  Activity's Run progress (the milestone's row) and Attention, Context's Last handoff (a *Verification current*
+  item in Handoff Health, and the stale milestones) and Ready to resume; the handoff prompt asks Claude to rerun
+  the checks or say so in the notes, and the fresh context's block names them. `/cr evidence [check|accept]`.
+
+### Verified live (Claude Code 2.1.296, read-only probe plugin, headless)
+
+- Background shell tasks survive `/clear`: the fresh context's Stop still lists them, and a task's
+  `<task-notification>` arrives in the fresh context and starts a turn there. A background agent was resumed there.
+- A background server started without a timeout (`python -m http.server`) was still running about 25 minutes later,
+  across `/clear`, with no notification: nothing bounds such a task by itself. One started with an explicit 45-second timeout was
+  killed at 45 seconds and reported `killed`.
+- `$.session.usage().rateLimits` is empty before the first response, then reports `five_hour` and `seven_day`
+  windows (`percentUsed`, `resetsAt`); `session.measure` fires with `rateLimits` in `changed`.
+- Workflow agents (`workflow-subagent`) are never in `$.agent.list()`; a foreground agent is, but Sentinel
+  listed agents only before a spawn and polled only once a running agent was listed, so it could miss both.
+
+### Fixed
+
+- **A server health check was refused as a download.** `curl -s -o /dev/null -w "%{http_code}" http://localhost:8781/`
+  (Claude checking the preview server it had started) was classified *Downloading files*, set to Ask, so a headless
+  run refused it and an interactive one would have asked. Output sent to the null device (`/dev/null`, `NUL`,
+  `$null`) or to stdout (`-o -`, `wget -qO-`), and a redirect into the null device, keep no file: such a fetch is
+  *Network* only. A file named in any spelling (`-o f`, `-Lo f`, `-of`, `--output=f`, `> page.html`, `-O`) is still
+  a download, and a fetch piped into a shell is still refused as dangerous. Found in a live run.
+- Keep warm wrote the same refresh plan to the debug log twice at a turn's end; it writes each plan once.
+
+### Verified live (Claude Code 2.1.296, Sonnet 5.5, this build under a renamed copy, 2026-10-13)
+
+- **Server + render + Keep warm past the TTL** (headless, `FORCE_PROMPT_CACHING_5M=1`, Keep warm on): Claude started
+  `python -m http.server` and a 10-minute render in the background, then `/cr handoff`. The server was not waited for
+  (`background: not waited for (…: a Python HTTP server)`); the written handoff waited for the render with Keep warm
+  still refreshing (two fork HITs reading 37.5k, the expiry moved 06:17:45 → 06:21:45 → 06:25:45); the render's
+  notification turn, almost 10 minutes after the last request, read the whole cache (`VERIFIED · read 37726`). Keep
+  warm stood down only at the notes check before the clear; the fresh context was told the server runs, and its own
+  Stop still listed it.
+- **Patience** (`waitMinutes` 2): the supervisor called a 5-minute docs build `long-finite … past its wait` at 2 minutes,
+  the handoff went on and left it running, and its notification reached the fresh context three minutes later, where
+  Claude recorded it (`left running by the last handoff, ended here (completed)`).
+- **The isolated classifier**: `python ingest_daemon.py` (a listener that never exits) matched no rule and was waited for;
+  after its minute the supervisor asked once, with the command and description only (`persistent_service → persistent`),
+  and the handoff went on at once, leaving it running for the fresh context.
+- **"handoff now"** typed while a handoff waited for a 7-minute benchmark beside a server: acted on before anything
+  else (`handoff guard: "handoff now" read as "hand off now"`), never entered either conversation, the fresh context
+  reused the running server and recorded the benchmark's result when its notification arrived there.
+- **Milestone evidence**: a milestone verified with `npm test` (3 files, blob ids, HEAD); `calc.js` edited by hand →
+  `/cr evidence check`: *stale: calc.js changed since 11:42 · rerun Tests*; the handoff prompt carried *Verification
+  gone stale*; Claude reran the tests in the handoff turn, and the verify step read *current: re-verified by Tests*.
+- **Agents in a real terminal** (150 columns, a fresh install): two background agents and a two-agent workflow showed
+  in the band above the status bar and in Activity › Agents at once (the workflow's agents grouped under their run,
+  `0 of 2 agents ended` → `2 of 2`), each with its activity and calls; the band opened the view; ends while the panel
+  was open moved them to *Earlier* with their results; the band left when none ran; a `/reload-plugins` mid-agent
+  kept it shown.
+- **Fresh install**: *Normal* (not edited), the *Sentinel is on* card, Frontier Max delivered from the first request at
+  Extra High, Guardrails' values with *· default*, the lazy-exit guard off.
+- **Five-hour usage**: readings 46% → 59% across the runs, all resetting 14:50 local; an interactive session had a
+  reading before its first response, headless ones after it; the status bar drew `5H ▂▂▂▂▂▂ 49% · 3h6m`.
+
 ## [1.6.3] - 2026-10-09
 
 A continuity fix found in a real 801k-token run: a Context Autopilot handoff whose turn ended while

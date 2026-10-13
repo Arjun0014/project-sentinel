@@ -20,9 +20,11 @@ import type { PromptOrigin, Timer } from 'claude-code'
 import type { ColdResumeView, ForeignOpsView, HudOps, OpsView, QueueTarget, Tone, WatchStrategy } from '../../types'
 import * as fmt from '../core/format'
 import { clean } from '../core/text'
-import { type AgentLedger, agentRows, isAlive, noteEnd, noteModel, noteSpawn, restoreLedger } from '../features/agents'
+import type { AgentRowView } from '../../types'
+import { type AgentLedger, agentRows, aliveRows, noteCall, noteEnd, noteModel, notePlan, noteSpawn, noteStep, noteWorkflowEnd, reconcile, restoreLedger } from '../features/agents'
 import * as Cache from '../features/cache'
 import * as Chain from '../features/chain'
+import * as Evidence from '../features/evidence'
 import { doingOf } from '../features/digest'
 import * as Ops from '../features/ops'
 import * as Plan from '../features/plan'
@@ -268,9 +270,11 @@ export class Operations {
     this.timer?.cancel()
     this.ticker?.cancel()
     this.deliverTimer?.cancel()
+    this.saveTimer?.cancel()
     this.timer = null
     this.ticker = null
     this.deliverTimer = null
+    this.saveTimer = null
   }
 
   /** A watcher's time may have come (or a sleeping machine missed it): due ones are marked, and acted on when free. */
@@ -307,7 +311,8 @@ export class Operations {
       (ap === 'off' || ap === 'armed') &&
       this.inFlight === null &&
       rt.pendingApprovals.length === 0 &&
-      (rt.lastStop?.background.length ?? 0) === 0 &&
+      // Work whose notification brings a turn back; a dev server or a watcher never does.
+      rt.blockingInFlight().length === 0 &&
       !rt.isFreshStarting &&
       this.afterCompact === null
     )
@@ -932,7 +937,7 @@ export class Operations {
     // A handoff under way (or waiting for background work) ends this context: no watcher is suggested into it.
     if (kind === 'park' || kind === 'handoff' || kind === 'retry' || rt.effective().autopilot.isHandoff) return
     // Claude Code's own wake-up already brings the run back: no watcher on top of it.
-    if ((rt.lastStop?.wakeups.length ?? 0) > 0 || (rt.lastStop?.background.length ?? 0) > 0) return
+    if ((rt.lastStop?.wakeups.length ?? 0) > 0 || rt.blockingInFlight().length > 0) return
     const p = rt.progress()
     const found = scoutOf({ now: this.now(), message, waiting: p.waiting.map(t => ({ subject: t.subject, detail: t.detail })) })
     if (found === null) return
@@ -1002,6 +1007,7 @@ export class Operations {
       docs: docs === null ? [] : docs.split(/, | \+\d+$/).filter(Boolean),
       queued: ops.queue.filter(q => q.status === 'queued' || q.status === 'due').length,
       decisions: ops.decisions.filter(d => Ops.isDecisionOpen(d) || Ops.isAnswerWaiting(d)).length,
+      stale: rt.staleEvidence().map(s => ({ subject: s.subject, status: 'stale' as const, line: Evidence.evidenceLine(s) ?? 'verification stale' })),
     }
   }
 
@@ -1145,7 +1151,7 @@ export class Operations {
    * puts a dropped prompt's text back in the prompt box, where one Enter would send it a second time
    * (seen live). The box is cleared while it still holds just that text, never what the person typed.
    */
-  private clearRestored(text: string, how: string): void {
+  clearRestored(text: string, how: string): void {
     const host = this.rt.host
     if (host === null || text.trim() === '') return
     host.after(400, () => {
@@ -1389,28 +1395,105 @@ export class Operations {
   // -------------------------------------------------------------------------
   // Agents
 
-  noteSpawn(input: { agentId: string; model: string | null; isBackground: boolean; isFork: boolean; description: string; type: string; name: string | null; parentId: string | null }): void {
-    noteSpawn(this.agentLedger, { ...input, at: Date.now() })
-    this.saveAgents()
-    this.rt.publisher.mark('ops')
+  /** An agent started (its spawn resolved with its id): it shows from now, before Claude Code lists it (a workflow's never are). */
+  noteSpawn(input: {
+    agentId: string
+    model: string | null
+    isBackground: boolean
+    isFork: boolean
+    description: string
+    type: string
+    name: string | null
+    parentId: string | null
+    workflow?: { runId: string; index: number } | null
+    toolUseId?: string | null
+    isTeammate?: boolean
+  }): void {
+    noteSpawn(this.agentLedger, { ...input, at: this.now() })
+    this.saveAgents(true)
+    this.rt.publisher.mark('ops', 'hud', 'activity', 'pane')
   }
 
   noteAgentModel(agentId: string, model: string): void {
     if (noteModel(this.agentLedger, agentId, model)) this.saveAgents()
   }
 
-  noteAgentEnd(agentId: string, reason: 'answer' | 'aborted' | 'refusal' | 'error', answer: string): void {
-    noteEnd(this.agentLedger, agentId, { at: Date.now(), reason, answer })
+  /** A request in an agent's loop: it is active now. */
+  noteAgentStep(agentId: string): void {
+    if (noteStep(this.agentLedger, agentId, this.now())) this.rt.publisher.mark('ops', 'hud')
+  }
+
+  /** A call in an agent's loop: what it is doing now. An id the ledger does not know (an engine fork) is left out. */
+  noteAgentCall(agentId: string, doing: string): void {
+    if (!noteCall(this.agentLedger, agentId, doing, this.now())) return
     this.saveAgents()
     this.rt.publisher.mark('ops', 'hud')
   }
 
+  /** A plan an agent keeps in its own loop (a task list call, the milestones tool). */
+  noteAgentPlan(agentId: string, change: Parameters<typeof notePlan>[2]): boolean {
+    if (!notePlan(this.agentLedger, agentId, change)) return false
+    this.saveAgents()
+    this.rt.publisher.mark('ops', 'hud')
+    return true
+  }
+
+  noteAgentEnd(agentId: string, reason: 'answer' | 'aborted' | 'refusal' | 'error', answer: string): void {
+    noteEnd(this.agentLedger, agentId, { at: this.now(), reason, answer })
+    this.saveAgents(true)
+    this.rt.publisher.mark('ops', 'hud', 'activity', 'pane')
+  }
+
+  /** A workflow run's tool call ended: its agents with no end of their own seen end with it. */
+  noteWorkflowEnd(toolUseId: string, status: string | null): void {
+    const n = noteWorkflowEnd(this.agentLedger, toolUseId, status, this.now())
+    if (n === 0) return
+    this.rt.trace(`agents: the workflow of ${toolUseId} ended (${status ?? 'ended'}); ${n} of its agents with no end seen end with it`)
+    this.saveAgents(true)
+    this.rt.publisher.mark('ops', 'hud', 'activity', 'pane')
+  }
+
+  /** Claude Code's list, looked at: the ledger reconciles with it (features/agents.ts reconcile). */
+  reconcileAgents(listed: Parameters<typeof reconcile>[1]): void {
+    if (!reconcile(this.agentLedger, listed, this.now())) return
+    this.saveAgents()
+    this.rt.publisher.mark('ops', 'hud', 'activity', 'pane')
+  }
+
+  /** The agents as the panel, the status bar and the limit count them now. */
+  agentRowsNow(): AgentRowView[] {
+    const rt = this.rt
+    const listed = rt.agents.list.map(a => ({ id: a.id, type: a.type, description: a.description, status: a.status, parentId: a.parentId, name: a.name, teammateId: a.teammateId }))
+    const activityOf = (agentId: string) => {
+      const items = rt.activity.items.filter(i => i.agentId === agentId)
+      const last = items.find(i => i.status === 'running') ?? items[0]
+      return { label: last === undefined ? null : doingOf(last), calls: items.length }
+    }
+    return agentRows(this.agentLedger, listed, this.now(), activityOf)
+  }
+
+  private saveTimer: Timer | null = null
+
   /**
    * The ledger rides `$.state`: a reload of the plugin keeps what this session saw of its agents (seen
    * live: after a reload a running background agent lost Stop and Message, and its time and model).
+   * Written at once for a start or an end, else at most every couple of seconds (an agent's every call).
    */
-  private saveAgents(): void {
-    void this.rt.host?.saveAgentLedger([...this.agentLedger.values()]).catch(() => undefined)
+  private saveAgents(isNow = false): void {
+    const host = this.rt.host
+    if (host === null) return
+    const write = () => void host.saveAgentLedger([...this.agentLedger.values()]).catch(() => undefined)
+    if (isNow) {
+      this.saveTimer?.cancel()
+      this.saveTimer = null
+      write()
+      return
+    }
+    if (this.saveTimer !== null) return
+    this.saveTimer = host.after(2000, () => {
+      this.saveTimer = null
+      write()
+    })
   }
 
   /** At a load: what the runtime before this one saw of the session's agents. */
@@ -1501,12 +1584,6 @@ export class Operations {
         source: w.source,
       }
     }
-    const listed = rt.agents.list.map(a => ({ id: a.id, type: a.type, description: a.description, status: a.status, parentId: a.parentId, name: a.name, teammateId: a.teammateId }))
-    const activityOf = (agentId: string) => {
-      const items = rt.activity.items.filter(i => i.agentId === agentId)
-      const last = items.find(i => i.status === 'running') ?? items[0]
-      return { label: last === undefined ? null : doingOf(last), calls: items.length }
-    }
     const check = this.budgetCheck()
     const b = ops.budget
     const m = this.metrics()
@@ -1522,7 +1599,7 @@ export class Operations {
       watchers: ops.watchers.filter(Ops.isWatcherOpen).sort((a, b) => a.wakeAt - b.wakeAt).map(wView),
       watchersDone: ops.watchers.filter(w => !Ops.isWatcherOpen(w)).slice(-4).reverse().map(wView),
       externalWakes: wakes,
-      agents: agentRows(this.agentLedger, listed, Date.now(), activityOf),
+      agents: this.agentRowsNow(),
       main: { state: headline.state, text: headline.text },
       budget: {
         isSet: b !== null,
@@ -1567,7 +1644,7 @@ export class Operations {
     const due = ops.queue.filter(q => q.status === 'due').length
     const watchers = ops.watchers.filter(Ops.isWatcherOpen)
     const w = Ops.holdingWatcher(ops)
-    const agents = rt.agents.list.filter(a => isAlive(a.status)).length
+    const agents = aliveRows(this.agentRowsNow()).length
     const check = this.budgetCheck()
     const budget =
       check === null

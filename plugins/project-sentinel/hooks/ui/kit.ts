@@ -52,16 +52,27 @@ export type Actions = {
   handoff: () => void
   fresh: () => void
   snooze: () => void
+  /** A handoff's ways out of a wait: hand off now and leave background work running, stop it first, wait longer, call it off. */
+  handoffNow: () => void
+  stopAndHandoff: (taskId?: string) => void
+  keepWaiting: () => void
+  cancelHandoff: () => void
   stopTask: (taskId: string) => void
   selectFile: (path: string | null) => void
   clearChanges: () => void
   toggleRow: (id: string) => void
   toggleFocus: () => void
   resetSettings: () => void
+  /** The first-run card's "Got it". */
+  dismissOnboarding: () => void
   copy: (text: string, surface: RenderSurface) => void
   /** Activity → Operations: opens the panel there (from the status bar's chips and alerts). */
-  /** Opens Activity → Operations, at one of its cards when given (`ops-agents`, `ops-review`, ...). */
+  /** Opens Activity → Operations, at one of its cards when given (`ops-review`, `ops-budget`, ...). */
   openOps: (section?: string) => void
+  /** Opens Activity → Agents (the agent band, the agents chip, Operations' line). */
+  openAgents: () => void
+  /** Milestone evidence: accept stale milestones' files as they are now (one by key, or all). */
+  acceptEvidence: (key: string | null) => void
   /** Opens or closes a row's details (a watcher, a queued item, an agent, a decision). */
   toggleOpsRow: (id: string) => void
   // Mission Queue

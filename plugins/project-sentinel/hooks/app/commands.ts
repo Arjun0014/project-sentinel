@@ -19,18 +19,21 @@ import { opsCommand } from './opsCommands'
 import { cacheState, keepWarmProof, keepWarmStatus } from '../ui/pane/cache'
 import { frontierDeliveryText } from '../ui/pane/behavior'
 import { hudOf, paneOf, profileOf, runLabelOf, statusOf } from './views'
+import { planDetail } from '../ui/hud'
 
 const HELP = [
   'Control Room  (/cr or /control-room)',
   '  /cr                       open or close Control Room',
   '  /cr status                everything at a glance',
-  '  /cr profile [name]        list profiles, or switch (normal, frontier, low-resource, release-qa, yours)',
+  '  /cr profile [name]        list profiles, or switch (normal, classic, frontier, low-resource, release-qa, yours)',
   '  /cr autopilot on|off|70%|700k',
   '  /cr handoff               hand off now, then continue in a fresh context',
-  '  /cr fresh                 start the fresh context of a written handoff (the notes and background work are checked first)',
+  '  /cr handoff now           hand off without waiting for background work (it keeps running for the fresh context)',
+  '  /cr handoff wait [30m]    keep waiting for it · stop [id|all]: stop it, then hand off · cancel: call the handoff off',
+  '  /cr fresh [now]           start the fresh context of a written handoff (notes checked; now: leave background work running)',
   '  /cr frontier|guard|qa|focus on|off',
   '  /cr resources off|low|medium|high|60/80',
-  '  /cr agents                what is running (Activity → Operations) · /cr agents unlimited|off|ask|<n>: what Claude may start',
+  '  /cr agents                what is running (Activity → Agents) · /cr agents unlimited|off|ask|<n>: what Claude may start',
   '  /cr router off|balanced|performance|economy|custom',
   '  /cr style standard|brief|ste|mission|quest   how Claude writes to you',
   '  /cr cache                 the prompt cache: lifetime, Keep warm, recent rebuilds',
@@ -44,6 +47,7 @@ const HELP = [
   '  /cr decisions             what Claude left for you to decide · /cr decide <id> [answer]',
   '  /cr budget [$30|6h|handoffs 5|notify|ask|finish|off|continue]   an optional run budget',
   '  /cr resume                what a fresh context would get now (Ready to resume)',
+  '  /cr evidence              what each verified milestone stood on · check · accept [n|all]',
   '  /cr hud band|status|both|off',
   '  /cr companion on|off      Kit, a small companion on the status bar · /cr motion on|off',
   '  /cr reset confirm         back to Normal (custom profiles are kept)',
@@ -62,6 +66,7 @@ export function statusText(rt: Runtime): string {
   const lines: [string, string][] = [
     ['Context', ctx],
     ['Cost', `${fmt.cost(hud.cost.usd)} this session${runCost}`],
+    ['Plan usage', planDetail(hud.plan, rt.clock())],
     ['Autopilot', rt.settings.autopilot.enabled ? `${st.autopilot.text} · ${rt.autopilot.note}` : st.autopilot.text],
     ['Frontier Max', rt.settings.frontier.enabled || paneOf(rt).frontier.delivery.state === 'stale' ? `${st.frontier.text} · ${frontierDeliveryText(paneOf(rt).frontier.delivery).text}` : st.frontier.text],
     ['Lazy-exit guard', st.guard.text],
@@ -225,9 +230,37 @@ export async function handleCommand(rt: Runtime, args: string): Promise<CommandR
       return { text: `Autopilot on. Hands off at ${m[2] === '%' ? `${rt.settings.autopilot.thresholdPercent}%` : fmt.tokens(rt.settings.autopilot.thresholdTokens)}.` }
     }
     // Each says what really happened: a handoff begun, a fresh context started, or why not.
-    case 'handoff':
-      return { text: await rt.requestHandoff() }
+    case 'handoff': {
+      if (a1 === undefined) return { text: await rt.requestHandoff() }
+      // The ways out of a wait: never only natural language.
+      if (a1 === 'now' || a1 === 'force') return { text: await rt.handoffNow() }
+      if (a1 === 'wait' || a1 === 'keep') {
+        const m = a2 === undefined ? null : /^(\d+(?:\.\d+)?)(m|min|h)?$/.exec(a2)
+        if (a2 !== undefined && m === null) return { text: 'Usage: /cr handoff wait [30m|2h]' }
+        return { text: await rt.keepWaiting(m === null ? undefined : Math.round(Number(m[1]) * (m[2] === 'h' ? 60 : 1)) * 60_000) }
+      }
+      if (a1 === 'cancel' || a1 === 'off') return { text: rt.cancelHandoff() }
+      if (a1 === 'stop') return { text: await rt.stopAndHandOff(args.trim().split(/\s+/)[2]) }
+      return { text: 'Usage: /cr handoff [now|wait [30m]|stop [task id|all]|cancel]' }
+    }
+    // Milestone evidence: what each verified milestone stood on; a stale one accepted as it is now.
+    case 'evidence': {
+      if (a1 === undefined) return { text: rt.evidenceText() }
+      if (a1 === 'check') {
+        await rt.checkEvidence('/cr evidence check')
+        return { text: rt.evidenceText() }
+      }
+      if (a1 === 'accept') {
+        const what = words.slice(2).join(' ')
+        if (what === '' || what === 'all') return { text: await rt.acceptEvidence(null) }
+        const key = rt.staleEvidenceKey(what)
+        return { text: key === null ? `No stale milestone matches "${what}". /cr evidence lists them.` : await rt.acceptEvidence(key) }
+      }
+      return { text: 'Usage: /cr evidence [check|accept [all|<number>|<milestone>]]' }
+    }
     case 'fresh':
+      if (a1 === 'now' || a1 === 'force') return { text: await rt.startFreshContext({ isForced: true }) }
+      if (a1 !== undefined) return { text: 'Usage: /cr fresh [now]' }
       return { text: await rt.startFreshContext() }
     case 'frontier':
     case 'guard':
@@ -236,16 +269,13 @@ export async function handleCommand(rt: Runtime, args: string): Promise<CommandR
       const toggle = onOff(a1)
       if (toggle === null) return { text: `Usage: /cr ${verb} on|off` }
       rt.update(s => {
-        if (verb === 'frontier') {
-          s.frontier.enabled = toggle
-          if (toggle) s.guard.enabled = true
-        }
+        if (verb === 'frontier') s.frontier.enabled = toggle
         if (verb === 'guard') s.guard.enabled = toggle
         if (verb === 'qa') s.qa.enabled = toggle
         if (verb === 'focus') s.focus.enabled = toggle
       })
       const name = { frontier: 'Frontier Max', guard: 'Lazy-exit guard', qa: 'Release check', focus: 'Focus view' }[verb]
-      return { text: `${name} ${toggle ? 'on' : 'off'}${verb === 'frontier' && toggle ? ', with the lazy-exit guard' : ''}.` }
+      return { text: `${name} ${toggle ? 'on' : 'off'}.` }
     }
     case 'resources':
     case 'res': {

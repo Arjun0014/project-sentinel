@@ -6,7 +6,7 @@ import { budgetText } from '../hooks/app/opsCommands'
 import { Runtime } from '../hooks/app/runtime'
 import * as Views from '../hooks/app/views'
 import { hudCells, hudSegments, tiersOf } from '../hooks/ui/hud'
-import { defaultSettings } from '../hooks/core/settings'
+import { classicSettings, defaultSettings } from '../hooks/core/settings'
 import type { Settings } from '../hooks/core/settings'
 import { fakeHost, flush } from './fixtures/fake-host'
 
@@ -31,7 +31,7 @@ async function started(
   if (options.store !== undefined) f.kept.store = options.store
   if (options.at !== undefined) await f.advance(options.at - f.now())
   if (options.store === undefined) {
-    const s = defaultSettings()
+    const s = classicSettings()
     patch(s)
     f.kept.store['settings.v1'] = s
   }
@@ -46,9 +46,7 @@ async function started(
 
 /** A reload of the plugin in the same process: the old runtime's timers are cancelled, a new one takes the run on. */
 async function reloaded(f: Started): Promise<Started> {
-  f.rt.ops.stop()
-  f.rt.cache.stop()
-  f.rt.monitor.stop()
+  f.rt.stopTimers()
   const rt = new Runtime()
   rt.bind(f.host)
   await rt.onSessionStart({ cwd: '/work', surface: 'terminal', isInteractive: true })
@@ -606,7 +604,8 @@ describe('Watchers', () => {
     expect(w).toMatchObject({ status: 'stale', needs: 'This run changed since the watcher was armed: a turn ran.' })
     expect(kept.toasts.at(-1)).toBe('Watcher due: S-002 result. This run changed since it was armed, so it waits for you.')
     expect(kept.traces).toContain('ops: W-1 due, but the run changed since it was armed (a turn ran): waits for you; nothing sent, nothing cleared')
-    expect(hud(rt).alert).toMatchObject({ kind: 'watcher', ref: 'W-1', tone: 'accent' })
+    // Waiting for the person reads amber (1.7.0: color is meaning; the brand's orange is only its mark).
+    expect(hud(rt).alert).toMatchObject({ kind: 'watcher', ref: 'W-1', tone: 'warn' })
     expect(hud(rt).alert?.text).toContain('Watcher due: S-002 result')
     expect(hud(rt).headline).toMatchObject({ state: 'waitingUser', text: 'Watcher due: S-002 result' })
     // Check now: a prompt in this context, never a clear.
@@ -1110,7 +1109,8 @@ describe('Agent Command Center', () => {
     await rt.refreshAgents()
     expect(view(rt).agents[0]).toMatchObject({ id: 'a1', status: 'running', model: 'claude-sonnet-5-5', isBackground: true, canStop: true, canMessage: true })
     expect(hud(rt).ops?.agents).toBe(1)
-    expect(hud(rt).chips.find(c => c.key === 'agents')).toMatchObject({ opens: 'ops' })
+    // The chip opens Activity → Agents, the agents' own view.
+    expect(hud(rt).chips.find(c => c.key === 'agents')).toMatchObject({ opens: 'agents' })
     await rt.ops.stopAgent('a1')
     expect(kept.stopped).toEqual(['a1'])
     expect(rt.ops.current().log[0]!.text).toBe('Stopped agent a1')
@@ -1118,28 +1118,30 @@ describe('Agent Command Center', () => {
     expect(kept.sentToAgents).toEqual([{ agentId: 'a1', text: 'Stop after this file' }])
   })
 
-  test('/cr agents and the chips open Operations at their own card (seen live: the Agents card was off-screen below the watcher form)', async () => {
+  test('/cr agents opens Activity → Agents, their own view; /cr decisions opens Operations at its card (seen live: a card off-screen below the watcher form)', async () => {
     const f = await started()
     const { rt, kept, advance } = f
     await rt.runCommand('agents')
     await advance(500)
-    // By the key the card is drawn under (seen live: the card's own name found nothing, and the panel stayed at its top).
-    expect(kept.scrolledTo).toEqual(['card-ops-agents'])
+    expect(rt.ui).toMatchObject({ tab: 'activity', activitySub: 'agents' })
+    expect(kept.scrolledTo).toEqual([])
     await rt.runCommand('decisions')
     await advance(500)
-    expect(kept.scrolledTo).toEqual(['card-ops-agents', 'card-ops-review'])
+    // By the key the card is drawn under (seen live: the card's own name found nothing, and the panel stayed at its top).
+    expect(rt.ui).toMatchObject({ tab: 'activity', activitySub: 'ops' })
+    expect(kept.scrolledTo).toEqual(['card-ops-review'])
   })
 
   test('a panel that has not drawn the card yet: the scroll is tried again a little later, the refusal traced; never past three tries, nor once the person moved it', async () => {
     const f = await started()
     const { rt, kept, live, advance } = f
-    live.paneRefusals = ['no element keyed card-ops-agents in control-room']
-    await rt.runCommand('agents')
+    live.paneRefusals = ['no element keyed card-ops-watchers in control-room']
+    await rt.runCommand('watchers')
     await advance(350)
     expect(kept.scrolledTo).toEqual([])
-    expect(kept.traces).toContain('ops: scroll to card-ops-agents refused (try 1): no element keyed card-ops-agents in control-room')
+    expect(kept.traces).toContain('ops: scroll to card-ops-watchers refused (try 1): no element keyed card-ops-watchers in control-room')
     await advance(650)
-    expect(kept.scrolledTo).toEqual(['card-ops-agents'])
+    expect(kept.scrolledTo).toEqual(['card-ops-watchers'])
     // Refused every time: three tries, then it stays where it is.
     kept.traces.length = 0
     live.paneRefusals = ['not drawn', 'not drawn', 'not drawn', 'not drawn']
@@ -1150,10 +1152,10 @@ describe('Agent Command Center', () => {
     // The person scrolled meanwhile: theirs stands.
     kept.traces.length = 0
     live.paneRefusals = ['the window moved meanwhile', 'not drawn']
-    await rt.runCommand('agents')
+    await rt.runCommand('watchers')
     await advance(5000)
-    expect(kept.traces.filter(t => t.startsWith('ops: scroll'))).toEqual(['ops: scroll to card-ops-agents refused (try 1): the window moved meanwhile'])
-    expect(kept.scrolledTo).toEqual(['card-ops-agents'])
+    expect(kept.traces.filter(t => t.startsWith('ops: scroll'))).toEqual(['ops: scroll to card-ops-watchers refused (try 1): the window moved meanwhile'])
+    expect(kept.scrolledTo).toEqual(['card-ops-watchers'])
   })
 
   test('/cr queue and /cr watch alone focus their field, handing the open panel the keyboard first (seen live: the prompt box kept it, and the focus was refused)', async () => {
@@ -1179,10 +1181,10 @@ describe('Agent Command Center', () => {
     expect(kept.traces.filter(t => t.startsWith('ops: focus'))).toEqual(['ops: focus ops-queue-input refused (try 1): that site does not hold the keyboard'])
     expect(kept.focused).toEqual(['ops-queue-input', 'ops-watch-label'])
     // A chip with the panel open moves nothing of the keyboard: no open, only the scroll.
-    await rt.runCommand('agents')
+    await rt.runCommand('decisions')
     await advance(1000)
     expect(kept.opens).toHaveLength(3)
-    expect(kept.scrolledTo).toEqual(['card-ops-agents'])
+    expect(kept.scrolledTo).toEqual(['card-ops-review'])
   })
 
   test('completed and failed: the answer’s first line, or why it ended; Claude Code’s refusal is shown as it words it', async () => {
