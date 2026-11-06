@@ -60,7 +60,9 @@ describe('register', () => {
     expect((await $.tool.call({ tool: 'Bash', command: 'git push origin main' })).deny).toBeUndefined()
     expect((await $.tool.call({ tool: 'Bash', command: 'git push --force origin main' })).deny).toBeUndefined()
     expect(w.kept.asked).toEqual([])
-    expect(checked).toEqual([])
+    // Both verdicts are Claude Code's own: since 2.1.3xx `tool.call`'s core runs `tool.check` through the
+    // hooks, so the stand-in sees each call once. Project Sentinel queried nothing and asked nothing.
+    expect(checked).toEqual(['git push origin main', 'git push --force origin main'])
     // No policy section, no status bar, no run recorded, nothing carried over.
     const composed = await $.prompt.compose(COMPOSE)
     expect(composed.sections.map(s => s.id)).toEqual(['intro'])
@@ -135,7 +137,9 @@ describe('register', () => {
     const w = world(on)
     let engine: 'allow' | 'ask' | 'deny' = 'allow'
     const checked: string[] = []
-    on('tool.check', ($, e) => {
+    on('tool.check', ($, e, next) => {
+      // Only the shell calls: `$.ui.ask` is itself a `tool.call` of AskUserQuestion, checked like any other.
+      if (e.tool !== 'Bash') return next(e)
       checked.push(String((e.input as { command?: string }).command))
       return { decision: engine, rule: 'Bash' }
     })
@@ -146,7 +150,8 @@ describe('register', () => {
     expect(yes.deny).toBeUndefined()
     expect(w.kept.asked.length).toBe(1)
     expect(w.kept.asked[0]).toContain('Git push is set to Ask')
-    expect(checked).toEqual(['git push origin main'])
+    // Twice: Control Room's own query of the verdict, then Claude Code's chain as the call passes on.
+    expect(checked).toEqual(['git push origin main', 'git push origin main'])
     // A no refuses it, and what the person typed reaches Claude.
     w.live.askAnswer = 'not from main'
     const no = await $.tool.call({ tool: 'Bash', command: 'git push origin main' })
