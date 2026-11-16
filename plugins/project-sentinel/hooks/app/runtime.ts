@@ -42,6 +42,7 @@ import * as Chain from '../features/chain'
 import * as Evidence from '../features/evidence'
 import * as Epoch from '../features/contextEpoch'
 import * as Artifact from '../features/handoffArtifact'
+import * as Deps from '../features/dependencies'
 import { type GitState, parseStatus } from '../features/git'
 import * as Handoff from '../features/handoff'
 import * as Ops from '../features/ops'
@@ -121,6 +122,8 @@ export const HANDOFF_CHOICE = {
   stop: 'Stop it and hand off',
   leave: 'Hand off, leave it running',
   wait: 'Keep waiting',
+  freshAnyway: 'Start fresh anyway',
+  keepHere: 'Keep this context',
 } as const
 
 const isOwnPrompt = (origin: PromptOrigin | undefined): boolean => origin?.kind === 'plugin' && origin.name === OWN_PLUGIN
@@ -348,7 +351,18 @@ export class Runtime {
   /** One task as Claude Code lists it, with its class: what the classifier said of it, else the rules. */
   private taskOf(b: { id: string; type: string; description: string; command?: string; agent_type?: string; name?: string }): Autopilot.BackgroundTask {
     const v = this.taskVerdicts.get(b.id) ?? Background.classifyTask({ id: b.id, type: b.type, description: b.description, ...(b.command === undefined ? {} : { command: b.command }), ...(b.agent_type === undefined ? {} : { agentType: b.agent_type }), ...(b.name === undefined ? {} : { name: b.name }) })
-    return { id: b.id, description: clean(b.description || b.command || `a ${b.type} task`, 80), class: v.class, why: v.why, by: v.by, ...(b.command === undefined ? {} : { command: clean(b.command, 200) }) }
+    // Left running by an earlier handoff and still running: a later handoff never waits for it again.
+    const session = this.run === null ? 1 : (Chain.currentSession(this.run)?.index ?? 1)
+    const isCarried = (this.run?.dependencies ?? []).some(d => d.id === b.id && d.endedAt === null && d.fromSession < session)
+    return {
+      id: b.id,
+      description: clean(b.description || b.command || `a ${b.type} task`, 80),
+      class: v.class,
+      why: isCarried ? 'left running by an earlier handoff: its result arrives by itself' : v.why,
+      by: v.by,
+      ...(b.command === undefined ? {} : { command: clean(b.command, 200) }),
+      ...(isCarried ? { isCarried: true } : {}),
+    }
   }
 
   /** When this context began (system clock): the companion wakes up with it. */
@@ -849,7 +863,7 @@ export class Runtime {
       await host.registerCommand({
         name: COMMAND,
         description: 'Open Control Room: context, behavior, guardrails, activity and setup',
-        argumentHint: '[status|queue <text>|watch in 2h <what>|watchers|decisions|decide <id>|budget|resume|evidence|profile <name>|autopilot on|off|<70%|700k>|handoff [now|wait|stop|cancel]|fresh [now]|cache|agents [mode]|help]',
+        argumentHint: '[status|queue <text>|watch in 2h <what>|watchers|decisions|decide <id>|budget|resume|evidence|profile <name>|autopilot on|off|resume|<70%|700k>|handoff [now|wait|stop|cancel]|fresh [now|force]|window accept|pause|cache|agents [mode]|help]',
       })
       this.commandsRegistered.add(COMMAND)
     } catch (error) {
@@ -877,7 +891,15 @@ export class Runtime {
     const now = await host.now()
     const existing = await findRunBySession(host, this.sessionId)
     if (existing !== null) {
-      this.run = { ...existing, status: 'active', plan: Plan.planOf(existing.plan), lastHandoff: Handoff.handoffRecordOf(existing.lastHandoff), ops: Ops.opsOf(existing.ops), ...(existing.evidence === undefined ? {} : { evidence: Evidence.evidenceOf(existing.evidence) }) }
+      this.run = {
+        ...existing,
+        status: 'active',
+        plan: Plan.planOf(existing.plan),
+        lastHandoff: Handoff.handoffRecordOf(existing.lastHandoff),
+        ops: Ops.opsOf(existing.ops),
+        ...(existing.evidence === undefined ? {} : { evidence: Evidence.evidenceOf(existing.evidence) }),
+        ...(existing.dependencies === undefined ? {} : { dependencies: Deps.dependenciesOf(existing.dependencies) }),
+      }
       // Milestones done before this runtime attached are no turn's doing.
       this.turnStartDone = this.progress().done
       return
@@ -888,7 +910,8 @@ export class Runtime {
     if (inFlight !== null && inFlight.fromSession !== this.sessionId && inFlight.root === this.root && Date.now() - inFlight.at < ADOPT_WITHIN_MS) {
       const raw = await host.storeGet(`${STORE_ENTRIES.runPrefix}${inFlight.runId}`).catch(() => undefined)
       if (Chain.isRun(raw)) {
-        this.run = Chain.rollOver({ ...raw, status: 'active', plan: Plan.planOf(raw.plan), ops: Ops.opsOf(raw.ops), ...(raw.evidence === undefined ? {} : { evidence: Evidence.evidenceOf(raw.evidence) }) }, { end: 'handoff', endNote: inFlight.endNote, nextId: this.sessionId, nextStart: 'handoff', now })
+        const run = { ...raw, status: 'active' as const, plan: Plan.planOf(raw.plan), ops: Ops.opsOf(raw.ops), ...(raw.evidence === undefined ? {} : { evidence: Evidence.evidenceOf(raw.evidence) }), ...(raw.dependencies === undefined ? {} : { dependencies: Deps.dependenciesOf(raw.dependencies) }) }
+        this.run = Chain.rollOver(run, { end: 'handoff', endNote: inFlight.endNote, nextId: this.sessionId, nextStart: 'handoff', now })
         this.adopted = inFlight
         await host.storeDelete(STORE_ENTRIES.clearInFlight).catch(() => undefined)
         this.turnStartDone = this.progress().done
@@ -1274,8 +1297,15 @@ export class Runtime {
     }
     const policies = this.policies().map(s => s.name)
     const sessionNumber = this.run === null ? 1 : (Chain.currentSession(this.run)?.index ?? 1)
-    // What the old context left running keeps running here (Claude Code keeps background work across /clear).
-    const left = this.autopilot.leftRunning
+    // What the old context left running keeps running here (Claude Code keeps background work across /clear), and
+    // what earlier handoffs left that has not ended yet (a multi-hour render, a server two contexts ago).
+    const running = Deps.runningOf(this.run?.dependencies ?? [])
+    const since = (id: string, description: string): string => {
+      const d = running.find(x => x.id === id)
+      return d === undefined || d.fromSession >= sessionNumber - 1 ? description : `${description} (since session ${d.fromSession})`
+    }
+    const earlier = running.filter(d => !this.autopilot.leftRunning.some(t => t.id === d.id))
+    const left = [...this.autopilot.leftRunning.map(t => ({ ...t, description: since(t.id, t.description) })), ...earlier.map(d => ({ id: d.id, description: since(d.id, d.description), class: d.class }))]
     const base = prompts.continuationContext({
       runNumber: this.run?.number ?? null,
       sessionNumber,
@@ -1289,7 +1319,7 @@ export class Runtime {
     })
     if (left.length > 0) {
       this.trace(`autopilot: the fresh context is told what still runs (${left.map(t => `${t.id} ${t.class ?? 'unknown'}`).join(', ')})`)
-      this.stepAutopilot({ kind: 'leftRunningTold' })
+      if (this.autopilot.leftRunning.length > 0) this.stepAutopilot({ kind: 'leftRunningTold' })
     }
     // What the run carries into it: the wake, work queued for a fresh context, answers and open decisions.
     const extras = this.ops.onFreshContext(purpose)
@@ -1833,6 +1863,8 @@ export class Runtime {
       quietMs: this.quietSince === null ? null : this.clock() - this.quietSince,
       lastError: ap.lastError,
       continuation: this.settings.autopilot.continuation,
+      notes: this.notesVerdict === null ? null : { state: this.notesVerdict.state, words: `${Artifact.STATE_WORDS[this.notesVerdict.state]}${this.notesVerdict.path === null ? '' : ` (${this.notesVerdict.path})`}` },
+      waitEndsWords: ap.waitUntil === null ? null : fmt.clock(ap.waitUntil),
     }
   }
 
@@ -2070,7 +2102,9 @@ export class Runtime {
       continuity: null,
       ...(left.length === 0 ? {} : { leftRunning: left.map(t => ({ id: t.id, description: t.description, class: t.class ?? 'unknown', endedAt: null, status: null })) }),
     }
-    this.run = { ...this.run, lastHandoff: record }
+    // What it left running joins the run's dependencies, which outlive this record (features/dependencies.ts).
+    const dependencies = left.length === 0 ? this.run.dependencies : Deps.noteLeft(this.run.dependencies ?? [], left, record.fromSession, Date.now())
+    this.run = { ...this.run, lastHandoff: record, ...(dependencies === undefined ? {} : { dependencies }) }
     this.persistRun()
     this.publisher.mark('pane')
   }
@@ -2698,6 +2732,11 @@ export class Runtime {
       this.lastStop = { ...this.lastStop, background: this.lastStop.background.filter(b => b.id !== id) }
     }
     this.trace(`background: ${id} ended${status === null ? '' : ` (${status})`}, as ${via} says`)
+    // A dependency of the run (left running by any earlier handoff): over, in this session.
+    if (this.run !== null && (this.run.dependencies ?? []).some(d => d.id === id && d.endedAt === null)) {
+      this.run = { ...this.run, dependencies: Deps.noteEnded(this.run.dependencies ?? [], id, status, Chain.currentSession(this.run)?.index ?? 1, now) }
+      this.persistRun()
+    }
     // Work the last handoff left running: its end is the run's record now (its result reached this context).
     const h = this.run?.lastHandoff
     if (this.run !== null && h !== undefined && h !== null) {
@@ -3696,15 +3735,48 @@ export class Runtime {
    * fresh now`, Hand off now): background work no longer holds it back (it keeps running, and the fresh
    * context is told); the notes still must be current, and a running turn still ends first.
    */
-  async startFreshContext(options: { isForced?: boolean } = {}): Promise<string> {
+  async startFreshContext(options: { isForced?: boolean; isNotesConfirmed?: boolean } = {}): Promise<string> {
     const host = this.host
     if (host === null) return 'Project Sentinel is not ready yet.'
-    const facts = { ...(await this.handoffFacts()), isForced: options.isForced === true }
+    const facts = { ...(await this.handoffFacts()), isForced: options.isForced === true, isNotesConfirmed: options.isNotesConfirmed === true }
     const now = await this.engineNow()
     const verdict = Autopilot.freshVerdict(this.autopilot, facts)
     this.trace(`autopilot: /cr fresh${facts.isForced ? ' now' : ''} in ${this.autopilot.state} (notes ${facts.notes}, ${facts.isTurnRunning ? 'a turn running' : 'idle'}, in flight ${facts.inFlight === null ? 'unknown' : facts.inFlight.length}): ${verdict.action}`)
     if (verdict.action === 'start-fresh') this.startFreshNow(now, facts.notesAt)
     return verdict.text
+  }
+
+  /**
+   * `/cr fresh force`, "start fresh now", Start fresh anyway: the fresh context even when Project Sentinel could not
+   * verify the notes (it could not inspect them, they look stale or are missing). What that means is said and the
+   * person is asked, in Claude Code's own question dialog: never a silent fresh start from notes nobody checked. With
+   * no one to ask (a headless run) nothing is cleared. Background work keeps running, as with /cr fresh now.
+   */
+  async forceFresh(): Promise<string> {
+    const host = this.host
+    if (host === null) return 'Project Sentinel is not ready yet.'
+    const first = await this.startFreshContext({ isForced: true })
+    // Started, or held by something other than the notes (a running turn, a handoff still writing them).
+    const v = this.notesVerdict
+    const isNotesHeld = v !== null && v.state !== 'valid' && v.state !== 'present' && (this.autopilot.state === 'awaiting' || this.autopilot.state === 'handoff' || this.autopilot.state === 'waiting-background')
+    if (!isNotesHeld || this.turn.isRunning) return first
+    const where = v.path ?? this.handoffPath()
+    const what =
+      v.state === 'uninspectable'
+        ? `Project Sentinel could not inspect the handoff notes: ${v.reason}.`
+        : v.state === 'missing'
+          ? `No notes were found (${v.reason}): the fresh context would start from the run's milestones and the project's own docs only.`
+          : `${where} was not updated for this handoff (${v.reason}): the fresh context would read it as it is.`
+    if (this.surfaces.length === 0) return `${first} Nobody to confirm a fresh start from unverified notes here, so nothing was cleared.`
+    let answer: string | null = null
+    try {
+      answer = await host.ask(`${what} Start the fresh context anyway? This context is cleared; background work keeps running.`, [HANDOFF_CHOICE.freshAnyway, HANDOFF_CHOICE.keepHere], 'Start fresh')
+    } catch {
+      answer = null
+    }
+    if (answer !== HANDOFF_CHOICE.freshAnyway) return 'Nothing was cleared: this context is kept.'
+    this.trace(`autopilot: the person confirmed a fresh start from notes Project Sentinel could not verify (${v.state}: ${v.reason})`)
+    return this.startFreshContext({ isForced: true, isNotesConfirmed: true })
   }
 
   /**
@@ -3801,8 +3873,9 @@ export class Runtime {
       case 'skip-wait':
         return this.handoffNow()
       case 'fresh-now':
-        // The notes come first: before them, or under a running turn, it is a handoff that will not wait.
-        return this.turn.isRunning || this.autopilot.state === 'pending' || this.autopilot.state === 'requested' ? this.handoffNow() : this.startFreshContext({ isForced: true })
+        // The notes come first: before them, or under a running turn, it is a handoff that will not wait. Notes that
+        // could not be verified are the person's call, asked (forceFresh).
+        return this.turn.isRunning || this.autopilot.state === 'pending' || this.autopilot.state === 'requested' ? this.handoffNow() : this.forceFresh()
       case 'keep-waiting':
         return this.autopilot.state === 'waiting-background' ? this.keepWaiting() : `Nothing was sent. ${Autopilot.handoffVerdict(this.autopilot, await this.handoffFacts()).text}`
       case 'cancel':

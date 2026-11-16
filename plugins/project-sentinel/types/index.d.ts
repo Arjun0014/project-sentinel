@@ -282,6 +282,8 @@ export type HudAlert = {
   canKeep?: boolean
   /** A stuck step: what the supervisor offers (features/supervisor.ts SupervisorAction). */
   offers?: string[]
+  /** Waiting for the person after notes Project Sentinel could not verify: Start fresh anyway (asked) is offered. */
+  canForce?: boolean
 }
 
 /** The orchestration layer as the status bar and Overview show it: counts, and the watcher that holds the run. */
@@ -537,6 +539,10 @@ export type SupervisorView = {
   /** While a handoff waits: how long until it goes on by itself (measured on the engine's clock when published). */
   goesOnInMs: number | null
   actions: string[]
+  /** What Project Sentinel does next by itself, in words; null when nothing. */
+  next: string | null
+  /** The notes as the canonical verdict last found them, in words; null before a look. */
+  notes: string | null
 }
 
 export type SystemId = 'autopilot' | 'frontier' | 'qa' | 'guard' | 'router' | 'subagents' | 'load' | 'focus' | 'answers'
@@ -616,7 +622,7 @@ export type HandoffView = {
   /** True while the fresh context's first turn is still under way. */
   isChecking: boolean
   /** What the handoff left running (servers, work it stopped waiting for), and each one's end once reported. */
-  leftRunning: { id: string; description: string; isService: boolean; endedAt: number | null; status: string | null }[]
+  leftRunning: { id: string; description: string; isService: boolean; endedAt: number | null; status: string | null; fromSession: number }[]
   /** Completed milestones whose verification is stale or being changed now (the run's evidence, live). */
   evidence: EvidenceRowView[]
 }

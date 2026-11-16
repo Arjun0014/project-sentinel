@@ -49,6 +49,10 @@ export type Diagnosis = {
   goesOnAt: number | null
   /** What the person can do now, most useful first. */
   actions: SupervisorAction[]
+  /** What Project Sentinel does next by itself, in words ("Checks the notes when this turn ends"); null when nothing. */
+  next: string | null
+  /** The notes as the canonical verdict last found them (features/handoffArtifact.ts), in words; null before a look. */
+  notes: string | null
 }
 
 export type SupervisorInput = {
@@ -73,6 +77,10 @@ export type SupervisorInput = {
   quietMs: number | null
   lastError: string | null
   continuation: 'clear' | 'compact' | 'manual'
+  /** The notes' canonical state and why (features/handoffArtifact.ts), as last checked; null before any look. */
+  notes?: { state: string; words: string } | null
+  /** The clock time a wait ends, in words, for `next` (the Runtime formats it). */
+  waitEndsWords?: string | null
 }
 
 /** How long each step may stand before the supervisor calls it stalled. */
@@ -112,9 +120,39 @@ const names = (tasks: readonly BackgroundTask[]): string => {
   return `${shown.join('; ')}${tasks.length > 2 ? ` and ${tasks.length - 2} more` : ''}`
 }
 
+/** What Project Sentinel does next by itself in each step, as the person reads it. */
+function nextOf(i: SupervisorInput): string | null {
+  switch (i.state) {
+    case 'off':
+    case 'armed':
+      return null
+    case 'pending':
+      return i.isTurnRunning ? 'Starts the handoff when this turn ends' : null
+    case 'requested':
+      return 'Starts the handoff turn: Claude writes the notes'
+    case 'handoff':
+      return i.isTurnRunning || i.quietMs === null || i.quietMs < QUIET_MS ? 'Checks the notes when this turn ends' : null
+    case 'waiting-background': {
+      if (blockingOf(i.background).length === 0 || i.skipWait) return i.isTurnRunning ? 'Hands off when this turn ends' : 'Checks the notes, then starts the fresh context'
+      const at = i.waitEndsWords ?? null
+      return `Hands off as soon as the work ends${at === null ? '' : `, or at ${at} at the latest, leaving it running`}`
+    }
+    case 'verifying':
+      return i.continuation === 'compact' ? 'Compacts the context once the notes check passes' : 'Starts the fresh context once the notes check passes'
+    case 'clearing':
+      return i.isTurnRunning ? 'Clears this context when the turn you queued ends' : 'Clears this context and starts the fresh one'
+    case 'compacting':
+      return 'Continues once the compaction finishes'
+    case 'resuming':
+      return 'Continues the work in the fresh context'
+    case 'awaiting':
+      return 'Nothing by itself: waits for you'
+  }
+}
+
 export function diagnose(i: SupervisorInput): Diagnosis {
   const forMs = i.stateSince === null ? 0 : Math.max(0, i.now - i.stateSince)
-  const base = { phase: PHASE[i.state], forMs, goesOnAt: null as number | null }
+  const base = { phase: PHASE[i.state], forMs, goesOnAt: null as number | null, next: nextOf(i), notes: i.notes === undefined || i.notes === null ? null : i.notes.words }
   const result = (status: SupervisorStatus, blocker: Diagnosis['blocker'], actions: SupervisorAction[], goesOnAt: number | null = null): Diagnosis => ({ ...base, status, blocker, actions, goesOnAt })
   // A question to the person holds any turn, the handoff's included: only they can end it.
   if (i.isTurnRunning && i.questionsOpen > 0 && i.state !== 'off' && i.state !== 'armed') {
@@ -195,5 +233,5 @@ export function toClassify(i: { now: number; waitSince: number | null; backgroun
 /** One line for the debug trace: the diagnosis as it changed. */
 export function traceLine(d: Diagnosis): string {
   const time = d.forMs >= 60_000 ? `${Math.round(d.forMs / 60_000)}m` : `${Math.round(d.forMs / 1000)}s`
-  return `supervisor: ${d.phase} for ${time} · ${d.status}${d.blocker === null ? '' : ` · ${d.blocker.kind}: ${d.blocker.text}`}`
+  return `supervisor: ${d.phase} for ${time} · ${d.status}${d.blocker === null ? '' : ` · ${d.blocker.kind}: ${d.blocker.text}`}${d.notes === null ? '' : ` · notes ${d.notes}`}${d.next === null ? '' : ` · next: ${d.next}`}`
 }

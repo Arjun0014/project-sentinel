@@ -509,6 +509,14 @@ export function alertActions(kit: Kit, alert: NonNullable<HudModel['alert']>): A
         { key: 'snooze', label: 'Later', onPress: a.snooze },
       ]
     case 'awaiting':
+      // Notes Project Sentinel could not verify: starting from them is the person's call (asked first).
+      if (alert.canForce === true) {
+        return [
+          { key: 'fresh-force', label: 'Start fresh anyway', onPress: a.freshForce, isPrimary: true },
+          { key: 'handoff-again', label: 'Hand off again', onPress: a.handoff },
+          { key: 'snooze', label: 'Later', onPress: a.snooze },
+        ]
+      }
       return [
         { key: 'fresh', label: 'Start fresh', onPress: a.fresh, isPrimary: true },
         { key: 'snooze', label: 'Later', onPress: a.snooze },

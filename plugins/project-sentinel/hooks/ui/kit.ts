@@ -51,6 +51,8 @@ export type Actions = {
   deleteProfile: (id: string) => void
   handoff: () => void
   fresh: () => void
+  /** Start fresh from notes Project Sentinel could not verify: it says what that means and asks first. */
+  freshForce: () => void
   snooze: () => void
   /** A handoff's ways out of a wait: hand off now and leave background work running, stop it first, wait longer, call it off. */
   handoffNow: () => void

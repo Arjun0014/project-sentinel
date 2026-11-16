@@ -41,6 +41,7 @@ export function actionsOf(rt: Runtime): Actions {
     deleteProfile: id => rt.update(s => deleteCustomProfile(s, id)),
     handoff: () => void rt.requestHandoff().then(text => rt.sayToPerson(text)),
     fresh: () => void rt.startFreshContext().then(text => rt.sayToPerson(text)),
+    freshForce: () => void rt.forceFresh().then(text => rt.sayToPerson(text)),
     snooze: () => rt.snoozeAutopilot(),
     handoffNow: () => void rt.handoffNow().then(text => rt.sayToPerson(text)),
     stopAndHandoff: taskId => void rt.stopAndHandOff(taskId).then(text => rt.sayToPerson(text)),

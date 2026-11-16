@@ -53,13 +53,25 @@ export type AutopilotState =
  * what it is, and whether it holds the handoff back (features/background.ts). A task without a class
  * (a record written before 1.7.0) is `unknown`, which blocks, as every task did then.
  */
-export type BackgroundTask = { id: string; description: string; class?: TaskClass; why?: string; by?: ClassBy; command?: string }
+export type BackgroundTask = {
+  id: string
+  description: string
+  class?: TaskClass
+  why?: string
+  by?: ClassBy
+  command?: string
+  /**
+   * Left running by an earlier handoff (the run's dependency, features/dependencies.ts): its result is already
+   * known to arrive in a later context, so no later handoff waits for it again.
+   */
+  isCarried?: boolean
+}
 
 /** A task's class, `unknown` when none was given. */
 export const classOf = (t: BackgroundTask): TaskClass => t.class ?? 'unknown'
 
-/** The tasks that hold a written handoff back: everything but infrastructure. */
-export const blockingOf = (tasks: readonly BackgroundTask[]): BackgroundTask[] => tasks.filter(t => isBlocking(classOf(t)))
+/** The tasks that hold a written handoff back: everything but infrastructure, and work an earlier handoff already left running. */
+export const blockingOf = (tasks: readonly BackgroundTask[]): BackgroundTask[] => tasks.filter(t => isBlocking(classOf(t)) && t.isCarried !== true)
 
 /** How long a written handoff waits for blocking background work by default before it hands off and leaves it running. */
 export const DEFAULT_WAIT_MS = 20 * 60_000
@@ -403,6 +415,7 @@ const tasksOf = (tasks: readonly BackgroundTask[]): BackgroundTask[] =>
       if (t.why !== undefined) out.why = t.why.slice(0, 80)
       if (t.by !== undefined) out.by = t.by
       if (t.command !== undefined) out.command = t.command.slice(0, 200)
+      if (t.isCarried === true) out.isCarried = true
       return out
     })
     .slice(0, 8)
@@ -515,6 +528,7 @@ const recordedTasks = (value: unknown): BackgroundTask[] =>
               ...(verdict === null && typeof t.why === 'string' ? { why: t.why } : {}),
               ...(verdict === null && BYS.includes(t.by as ClassBy) ? { by: t.by } : {}),
               ...(command === undefined ? {} : { command }),
+              ...(t.isCarried === true ? { isCarried: true } : {}),
             }
           }),
       )
@@ -863,10 +877,10 @@ export function step(model: Autopilot, event: AutopilotEvent, cfg: AutopilotConf
       if (event.isOk) return proceedAfterHandoff(set(model, { retries: 0, lastError: null }), cfg)
       if (event.state === 'uninspectable') {
         // Not missing: the file could not be looked at. Claude cannot fix that by writing it again.
-        const why = event.reason === undefined ? '' : ` (${event.reason})`
+        const why = event.reason === undefined ? '' : `: ${event.reason}`
         return {
           model: set(model, { state: 'awaiting', lastError: NOTES_UNINSPECTABLE, note: 'The handoff notes could not be checked' }),
-          effects: [{ kind: 'notify', text: `Project Sentinel could not inspect the handoff notes${why}, so the context was kept. /cr fresh force starts the fresh context anyway once you have checked them.`, level: 'error' }],
+          effects: [{ kind: 'notify', text: `Project Sentinel could not inspect the handoff notes${why}. The context was kept: /cr fresh force starts the fresh context anyway once you have checked them.`, level: 'error' }],
         }
       }
       if (model.retries < 1) {
@@ -1103,7 +1117,7 @@ function blockerOf(model: Autopilot, facts: HandoffFacts): string | null {
     case 'fresh':
       return null
     case 'uninspectable':
-      return `Project Sentinel could not inspect ${file}${why}, so the context was kept. Check the notes yourself, then /cr fresh force starts the fresh context from them.`
+      return `Project Sentinel could not inspect the handoff notes${facts.notesReason === undefined || facts.notesReason === null ? '' : `: ${facts.notesReason}`}. The context was kept. Check the notes yourself, then /cr fresh force starts the fresh context from them.`
     case 'present':
       // No handoff began in this context (a reload stopped one before its turn, a fresh context that filled up first):
       // only the last case has notes to start from, the ones the fresh context was handed.

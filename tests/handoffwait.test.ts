@@ -112,7 +112,7 @@ describe('the repro: a persistent server never holds a written handoff', () => {
     expect(h.leftRunning).toEqual([{ id: 'bvite01', description: 'Start the Vite preview server', class: 'persistent', endedAt: null, status: null }])
     expect(h.health.find(c => c.id === 'leftRunning')).toEqual({ id: 'leftRunning', label: 'Left running', state: 'none', detail: '1 service · fresh context told' })
     expect(h.health.some(c => c.id === 'background')).toBe(false)
-    expect(Views.paneOf(f.rt).handoff?.leftRunning).toEqual([{ id: 'bvite01', description: 'Start the Vite preview server', isService: true, endedAt: null, status: null }])
+    expect(Views.paneOf(f.rt).handoff?.leftRunning).toEqual([{ id: 'bvite01', description: 'Start the Vite preview server', isService: true, endedAt: null, status: null, fromSession: 1 }])
   })
 
   test('the server in the session never parks the Mission Queue, the Scout, the guard or the headline as "waiting"', async () => {
@@ -147,7 +147,7 @@ describe('long finite work: a bounded wait, Keep warm on, then the work left to 
     expect(clears(f)).toBe(0)
     expect(f.rt.keepWarmStandDown()).toBeNull()
     expect(f.rt.supervisor).toMatchObject({ status: 'waiting', blocker: { kind: 'finite' } })
-    expect(f.kept.traces.some(t => t.startsWith('supervisor: Waiting for background work for ') && t.endsWith(' · waiting · finite: waiting for Run the full test suite'))).toBe(true)
+    expect(f.kept.traces.some(t => t.startsWith('supervisor: Waiting for background work for ') && t.includes(' · waiting · finite: waiting for Run the full test suite · notes ') && t.includes(' · next: Hands off as soon as the work ends, or at '))).toBe(true)
     expect(Views.paneOf(f.rt).autopilot.waitLeftMs).toBeLessThanOrEqual(1 * MIN + 400)
     // Past it: the handoff goes on, the suite left running.
     await f.advance(2 * MIN)

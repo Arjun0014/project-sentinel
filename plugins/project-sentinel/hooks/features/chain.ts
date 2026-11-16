@@ -10,6 +10,7 @@
 
 import { LIMITS } from '../constants'
 import type { HandoffRecord } from './handoff'
+import type { Dependency } from './dependencies'
 import type { EvidenceStore } from './evidence'
 import { type RunOps, emptyOps } from './ops'
 import { type Plan, emptyPlan } from './plan'
@@ -81,6 +82,11 @@ export type Run = {
    * compared with the workspace later. Absent before 1.7.0; read through `evidenceOf`.
    */
   evidence?: EvidenceStore
+  /**
+   * Background work a handoff left running (features/dependencies.ts), kept until Claude Code reports its end,
+   * across any number of handoffs. Absent before 1.8.0; read through `dependenciesOf`.
+   */
+  dependencies?: Dependency[]
 }
 
 export function newSession(id: string, index: number, start: SessionStart, now: number): SessionEntry {

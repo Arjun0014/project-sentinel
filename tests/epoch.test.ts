@@ -209,7 +209,7 @@ describe('the machine: the notes baseline, the verdicts, the circuit breaker', (
     const r = step(verifying, { kind: 'handoffVerified', isOk: false, now: 4, state: 'uninspectable', reason: 'EACCES' }, CFG)
     expect(r.model).toMatchObject({ state: 'awaiting', lastError: NOTES_UNINSPECTABLE })
     expect(r.effects.some(e => e.kind === 'submitRetry')).toBe(false)
-    expect(r.effects.some(e => e.kind === 'notify' && e.text.includes('could not inspect the handoff notes (EACCES)'))).toBe(true)
+    expect(r.effects.some(e => e.kind === 'notify' && e.text.includes('could not inspect the handoff notes: EACCES'))).toBe(true)
     expect(step(r.model, { kind: 'notesRevalidated', now: 5 }, CFG)).toMatchObject({ model: { state: 'clearing', lastError: null }, effects: [{ kind: 'clear' }] })
     // Missing twice: kept; Claude writing them later goes on by itself.
     const missingTwice = run(verifying, [{ kind: 'handoffVerified', isOk: false, now: 4, state: 'missing' }, { kind: 'turnComplete', reason: 'answer', turn: 'retry', now: 5, background: [] }, { kind: 'handoffVerified', isOk: false, now: 6, state: 'missing' }])

@@ -117,7 +117,7 @@ describe('the Handoff Supervisor', () => {
     expect(d).toMatchObject({ status: 'waiting', phase: 'Waiting for background work', forMs: 60_000, goesOnAt: 40_000 + 20 * 60_000 })
     expect(d.blocker).toEqual({ kind: 'finite', text: 'waiting for Run the full test suite' })
     expect(d.actions).toEqual(['handoff-now', 'stop-and-handoff', 'keep-waiting', 'cancel'])
-    expect(traceLine(d)).toBe('supervisor: Waiting for background work for 1m · waiting · finite: waiting for Run the full test suite')
+    expect(traceLine(d)).toBe('supervisor: Waiting for background work for 1m · waiting · finite: waiting for Run the full test suite · next: Hands off as soon as the work ends')
     // Only unrecognised work: said so.
     expect(diagnose(look({ background: [ODD] })).blocker?.kind).toBe('unknown')
     // Notes not written yet: said so.

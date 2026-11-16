@@ -107,7 +107,10 @@ export function handoffCard(kit: Kit, view: HandoffView): RenderElement {
           glyph: t.endedAt === null ? G.wait : t.status === 'failed' || t.status === 'killed' ? G.fail : G.ok,
           tone: t.endedAt === null ? 'info' : t.status === 'failed' ? 'warn' : 'muted',
           text: t.description,
-          right: t.endedAt === null ? (t.isService ? 'Service · left running' : 'Left running · result goes to the fresh context') : `${t.status ?? 'Ended'} ${fmt.clock(t.endedAt)}`,
+          right:
+            t.endedAt === null
+              ? `${t.isService ? 'Service · left running' : 'Left running · result goes to the fresh context'}${t.fromSession === view.fromSession ? '' : ` · since session ${t.fromSession}`}`
+              : `${t.status ?? 'Ended'} ${fmt.clock(t.endedAt)}`,
           rightTone: 'muted',
           isDim: t.endedAt !== null,
         }),

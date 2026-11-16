@@ -101,7 +101,14 @@ function supervisorLine(kit: Kit, a: AutopilotView): RenderElement | null {
   const since = d.forMs >= 60_000 ? ` for ${fmt.duration(d.forMs)}` : ''
   const goes = d.goesOnInMs === null || a.skipWait ? '' : d.goesOnInMs > 0 ? ` · goes on in ${fmt.countdown(d.goesOnInMs)} at most, leaving it running` : ' · going on, leaving it running'
   const tone = d.status === 'stalled' || d.status === 'needs-you' ? 'warn' : d.status === 'waiting' ? 'info' : 'muted'
-  return note(kit, `${d.phase}${since}${d.blocker === null ? '' : ` · ${d.blocker.text}`}${goes}`, 'ap-supervisor', tone)
+  const { Box } = kit.ui
+  return (
+    <Box key="ap-supervisor-wrap" flexDirection="column">
+      {note(kit, `${d.phase}${since}${d.blocker === null ? '' : ` · ${d.blocker.text}`}${goes}`, 'ap-supervisor', tone)}
+      {d.notes === null ? null : note(kit, `Notes: ${d.notes}`, 'ap-supervisor-notes', 'muted')}
+      {d.next === null ? null : note(kit, `Next: ${d.next}`, 'ap-supervisor-next', 'muted')}
+    </Box>
+  )
 }
 
 /** The plan's windows in Context → Run: the status bar's 5H reading, with each window's use and reset spelled out. */

@@ -44,6 +44,7 @@ import { backgroundWords, blockingOf, classOf, handoffPoint, isHandoffActive } f
 import { CLASS_WORDS, isBlocking } from '../features/background'
 import { bandOf } from '../features/agents'
 import { anomalyText } from '../features/contextEpoch'
+import { runningOf } from '../features/dependencies'
 import * as Chain from '../features/chain'
 import { GROUP_LABEL, GROUP_ORDER, attentionOf, groupOf, isOpen, nowOf, turnSummaryOf } from '../features/digest'
 import { companionView, moodOf } from '../features/companion'
@@ -247,7 +248,11 @@ function alertOf(rt: Runtime, ops: HudOps | null): HudAlert | null {
   const s = rt.settings
   const loop = rt.autopilot.loop
   if (rt.autopilot.state === 'awaiting' && loop !== null) return { kind: 'loop', text: `Handoff loop prevented: ${loop.reason}`, tone: 'bad' }
-  if (rt.autopilot.state === 'awaiting') return { kind: 'awaiting', text: rt.autopilot.note, tone: awaitingTone(rt) }
+  if (rt.autopilot.state === 'awaiting') {
+    const e = rt.autopilot.lastError
+    const canForce = e === 'handoff notes could not be inspected' || e === 'handoff file not written'
+    return { kind: 'awaiting', text: rt.autopilot.note, tone: awaitingTone(rt), ...(canForce ? { canForce: true } : {}) }
+  }
   if (rt.windowHold !== null && s.autopilot.enabled) return { kind: 'window', text: `Model window changed unexpectedly: ${anomalyText(rt.windowHold)}. Autopilot holds its handoff`, tone: 'warn' }
   const handoff = handoffAlertOf(rt)
   if (handoff !== null) return handoff
@@ -561,7 +566,16 @@ export function paneOf(rt: Runtime): PaneModel {
       supervisor:
         rt.supervisor === null
           ? null
-          : { status: rt.supervisor.status, phase: rt.supervisor.phase, forMs: rt.supervisor.forMs, blocker: rt.supervisor.blocker, goesOnInMs: rt.supervisor.goesOnAt === null ? null : Math.max(0, rt.supervisor.goesOnAt - rt.engineTime()), actions: [...rt.supervisor.actions] },
+          : {
+              status: rt.supervisor.status,
+              phase: rt.supervisor.phase,
+              forMs: rt.supervisor.forMs,
+              blocker: rt.supervisor.blocker,
+              goesOnInMs: rt.supervisor.goesOnAt === null ? null : Math.max(0, rt.supervisor.goesOnAt - rt.engineTime()),
+              actions: [...rt.supervisor.actions],
+              next: rt.supervisor.next,
+              notes: rt.supervisor.notes,
+            },
       waitLeftMs: a.state === 'waiting-background' && a.waitUntil !== null ? Math.max(0, a.waitUntil - rt.engineTime()) : null,
       skipWait: a.skipWait,
       waitMinutes: rt.settings.autopilot.waitMinutes,
@@ -649,7 +663,13 @@ function handoffOf(rt: Runtime): PaneModel['handoff'] {
     health: h.health,
     continuity: h.continuity,
     isChecking: h.toSession !== null && h.continuity === null && h.toSession === index,
-    leftRunning: (h.leftRunning ?? []).map(t => ({ id: t.id, description: t.description, isService: t.class === 'persistent', endedAt: t.endedAt, status: t.status })),
+    leftRunning: [
+      ...(h.leftRunning ?? []).map(t => ({ id: t.id, description: t.description, isService: t.class === 'persistent', endedAt: t.endedAt, status: t.status, fromSession: h.fromSession })),
+      // What an earlier handoff left running that still runs: the run's dependencies outlive the record above.
+      ...runningOf(rt.run.dependencies ?? [])
+        .filter(d => !(h.leftRunning ?? []).some(t => t.id === d.id))
+        .map(d => ({ id: d.id, description: d.description, isService: d.class === 'persistent', endedAt: null, status: null, fromSession: d.fromSession })),
+    ],
     evidence: [...evidenceRowsOf(rt).values()].filter(e => e.status !== 'rebaselined'),
   }
 }

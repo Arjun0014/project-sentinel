@@ -13,6 +13,7 @@ import { ANSWER_STYLES, type AnswerStyle, defaultSettings } from '../core/settin
 import type { CacheView } from '../../types'
 import { VERSION } from '../constants'
 import * as Chain from '../features/chain'
+import { anomalyText } from '../features/contextEpoch'
 import type { Runtime } from './runtime'
 import { recordLine } from './ledger'
 import { opsCommand } from './opsCommands'
@@ -207,6 +208,10 @@ export async function handleCommand(rt: Runtime, args: string): Promise<CommandR
     }
     case 'autopilot':
     case 'auto': {
+      // For this session only (the saved settings are unchanged): paused, resumed, or the loop breaker's Recheck.
+      if (a1 === 'pause') return { text: rt.pauseAutopilot('you paused it with /cr autopilot pause') }
+      if (a1 === 'resume') return { text: rt.resumeAutopilot() }
+      if (a1 === 'recheck') return { text: rt.recheckLoop() }
       const toggle = onOff(a1)
       if (toggle !== null) {
         rt.update(s => {
@@ -215,7 +220,7 @@ export async function handleCommand(rt: Runtime, args: string): Promise<CommandR
         return { text: `Autopilot ${toggle ? 'on' : 'off'}.` }
       }
       const m = a1 === undefined ? null : /^(\d+(?:\.\d+)?)(%|k|m)?$/.exec(a1)
-      if (m === null) return { text: 'Usage: /cr autopilot on|off|70%|700k' }
+      if (m === null) return { text: 'Usage: /cr autopilot on|off|70%|700k|pause|resume|recheck' }
       const n = Number(m[1])
       rt.update(s => {
         s.autopilot.enabled = true
@@ -258,9 +263,20 @@ export async function handleCommand(rt: Runtime, args: string): Promise<CommandR
       }
       return { text: 'Usage: /cr evidence [check|accept [all|<number>|<milestone>]]' }
     }
+    // A context-window change held for you (a model switch that reports a far smaller window).
+    case 'window': {
+      if (a1 === 'accept') return { text: rt.resolveWindowHold('accept') }
+      if (a1 === 'pause') return { text: rt.resolveWindowHold('pause') }
+      if (a1 === 'back') return { text: await rt.revertWindowModel() }
+      if (a1 !== undefined) return { text: 'Usage: /cr window [accept|back|pause]' }
+      const hold = rt.windowHold
+      return { text: hold === null ? 'No window change is held: Autopilot measures against the window Claude Code reports.' : `${anomalyText(hold)}. Autopilot holds its handoff until you choose: /cr window accept (use Claude Code's limit), /cr window back (switch back to ${hold.fromModel ?? 'the model before'}), or /cr window pause (pause Autopilot for this session).` }
+    }
     case 'fresh':
-      if (a1 === 'now' || a1 === 'force') return { text: await rt.startFreshContext({ isForced: true }) }
-      if (a1 !== undefined) return { text: 'Usage: /cr fresh [now]' }
+      // now: do not wait for background work. force: also start from notes Project Sentinel could not verify, after asking you.
+      if (a1 === 'now') return { text: await rt.startFreshContext({ isForced: true }) }
+      if (a1 === 'force') return { text: await rt.forceFresh() }
+      if (a1 !== undefined) return { text: 'Usage: /cr fresh [now|force]' }
       return { text: await rt.startFreshContext() }
     case 'frontier':
     case 'guard':
