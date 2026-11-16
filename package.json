@@ -5,7 +5,7 @@
   "license": "MIT",
   "scripts": {
     "typecheck": "node tools/test/mod.mjs typecheck",
-    "validate": "claude plugin validate plugins/project-sentinel --strict && claude plugin validate .",
+    "validate": "node tools/test/validate.mjs",
     "source": "node tools/test/source.mjs",
     "test": "node tools/test/mod.mjs test",
     "check": "npm run typecheck && npm run validate && npm run source && npm run test",
