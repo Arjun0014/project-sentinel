@@ -175,7 +175,7 @@ describe('the fresh context never inherits the old context usage', () => {
 })
 
 describe('the circuit breaker', () => {
-  test('a third handoff into fresh contexts within minutes is refused: Handoff loop prevented, and the person chooses', async () => {
+  test('after three handoffs into fresh contexts within minutes the next is refused: Handoff loop prevented, and the person chooses', async () => {
     const f = await started(() => undefined)
     const { rt, kept } = f
     // Each fresh context reads itself in, starts working, and fills again within minutes.

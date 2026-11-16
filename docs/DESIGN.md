@@ -30,7 +30,24 @@ This page records the decisions behind the UI, so later changes keep it that way
    what Claude Code reports, a check passed when its command did. A fact that cannot be known (a
    background command's outcome, a diff no tool reported) says so in words. A figure derived from
    reported ones (the cache's expiry, its hit ratio, why it was rebuilt) is named as derived
-   where it is shown.
+   where it is shown. An agent is shown only from Claude Code's own evidence of it (its spawn,
+   its agent list, its SubagentStart and SubagentStop hooks, its own calls), and what Claude Code
+   does not report (a subagent's context usage, its cost, a percent complete) is not shown: the
+   view says so. A context figure not yet proven to belong to this context is never acted on,
+   and is drawn with `~` where it is shown.
+9. **One long context, one main model, one stable cache.** A prompt cache belongs to one model:
+   switching the main conversation's model re-sends its whole context uncached, and a long run
+   lives on one large cache that Keep warm holds. So Project Sentinel never switches the main
+   conversation's model: it is Claude Code's, chosen with `/model`. 1.8 removed the main-loop
+   router for that reason (each of its switches rebuilt the cache Cache Guardian was keeping
+   warm). A switch the person makes over a large warm cache is asked about first, however it was
+   made. A model choice lives where it costs the main cache nothing: a subagent, which starts a
+   fresh context of its own (the Agent Model Policy, off by default).
+10. **Claude Code decides first.** Guardrails default to Claude Code's own permissions:
+   *Default* means Project Sentinel does not override the action, and Claude Code's permission
+   mode and rules decide; it never means "allow everything". A stricter choice (Ask, Deny, the
+   Guarded profile) is the person's, said as what Project Sentinel adds on top, in plain text: a
+   choice, not a problem, so never amber.
 
 ## Hierarchy and rhythm
 
@@ -204,7 +221,10 @@ gray, read as a tag rather than a button).
 - **Context** is a solid bar: cells filled in its tone (green, amber near the handoff point, red
   past it) over a track in the theme's quietest gray, and the handoff point as a full-height orange
   cell that stands a little proud of the bar. Then the percentage, and Autopilot's point or the
-  step under way (`· hands off 80%`, `· Writing the handoff`).
+  step under way (`· hands off 80%`, `· Writing the handoff`). The percentage is this context's
+  own: after a handoff or a `/clear` it reads `—` until a request made in the fresh context is
+  answered, never the old context's figure (1.8); after a plugin reload a figure not yet proven
+  for this context is drawn with `~` (`~47%`), and Autopilot does not act on it.
 - **Cache** is a clock face emptying as the prompt cache's lifetime runs out (`◕ 42m left`),
   shown in the terminal only while it can matter: when you are away, or for a few minutes after a
   costly rebuild (`● rebuilt 446k`, amber). While Claude works, its requests keep the cache warm.
@@ -237,10 +257,14 @@ Resume Guard kept (**Put back**, **Send now**, **Discard**), the run budget hold
 (**Continue anyway**, **Budget ›**), the Watcher Scout's suggestion (**Create watcher**, **Change
 time**, **Ignore**), a written handoff waiting for background work (**Hand off now**, **Stop & hand
 off**, **Keep waiting** near its end or once stalled, **Call off**), a handoff the supervisor found
-stuck (what holds it, and what fits). None of them while a turn runs, except the handoff's.
+stuck (what holds it, and what fits), a handoff loop the breaker stopped (*Handoff loop
+prevented*: **Recheck**, **Continue here**, **Start fresh**, **Pause Autopilot**), a context window
+that changed under a model switch (*Model window changed unexpectedly*: **Use Claude Code's
+limit**, **Switch back**, **Pause Autopilot**). None of them while a turn runs, except the handoff's.
 
-**The agent band**, above all of it and only while subagents run: one line per agent (what it is
-doing in a few words, for how long, its own plan's count when it keeps one), up to three; past
+**The agent band**, above all of it and only while subagents run: one line per agent (its name,
+its model, what it is doing in a few words, its own plan's count when it keeps one, for how long:
+`researcher · Sonnet · reading docs · plan 2/4 · 3m`), up to three; past
 three, one line counting them by what they do (`5 agents · 2 reading · 2 editing · 1 checking`).
 Each line is a control that opens Activity → Agents. It is gone the moment no agent runs.
 
@@ -370,6 +394,18 @@ switch* and *Keep policies stable*. The lifetime sits in the card's aside, with 
 from (`1-hour cache · as Claude Code reports it`, or `Lifetime not known yet`). The footnote says
 that the expiry, the hit ratio and the causes are derived from the tokens Claude Code reports.
 
+**Keep warm's two clocks** (1.8) are never mixed: the cache's lifetime, renewed by each request or
+refresh that reads it, and the idle allowance (*Stop after 3 h*), which counts from the last
+turn's end and which a refresh never resets. While Claude works the card says so (`Ready: starts
+when this turn finishes, then holds the cache for up to 3 h of idle time. The countdown has not
+started.`). While the person is away: *Idle for*, *Keep warm left*, *Started*, *Stops*, *Next
+refresh* (and in how long), *Cache expires in … without one*, the cache's lifetime and where it
+came from, the refreshes and the last one's status. When the allowance in force differs from the
+one asked for, both are said, with why: `Requested 2 h · Effective 45 min` (the five-minute cache's
+cap: past it, refreshing costs more than rebuilding), or `Requested idle limit 2 h · Watcher holds
+until 05:20` with `Reason: warm watcher resume (W-1: …)`. Every time is a reading, never an
+estimate.
+
 **Cache health** lists the recent rebuilds, one line each (what happened, tokens re-cached, when),
 and under it, wrapping, its kind (*Preventable*, *Expected*, *Unexplained*) and what would avoid
 the next one. Only a costly rebuild that could have been avoided, or one that keeps happening
@@ -385,7 +421,9 @@ start the fresh context, it sits right under the handoff card, where that choice
 
 **Last handoff**, after one: what the handoff left for the fresh context and what the fresh
 context picked up, each a `✓`, `✗` or a dim `○` (not needed), with a score (`5 of 6`), and below
-them the verified milestones whose evidence is stale or being changed now. It is counted from tool
+them the verified milestones whose evidence is stale or being changed now, and the work left
+running (*Service · left running*, or *Left running · result goes to the fresh context*), with
+`since session 2` for work an earlier handoff left that still runs (1.8). It is counted from tool
 calls, never from what Claude said, and the footnote says so.
 
 Context leads with the Autopilot's state and meter, then its **Handoff** card: while Autopilot is
@@ -393,8 +431,10 @@ off, the three numbered steps it would take (they teach); while it simply watche
 (`At 70% Claude finishes the step it is on and writes NEXT_SESSION_PROMPT.md. The context is
 cleared, and Claude carries on by itself.`) and *Hand off now*, since the settings card under it
 says the same; while a handoff is under way, the supervisor's line (what holds it, since when),
-each background task with what it is and *Stop*, and the ways out. **Ready to resume** speaks up in
-red and amber only while a fresh start is in play (a handoff under way, the Cold Resume Guard
+then *Notes:* with their state in words (written for this handoff, on disk, not updated for this
+handoff, empty, missing, could not be inspected) and *Next:* with what Project Sentinel does next
+by itself, each background task with what it is and *Stop*, and the ways out. **Ready to resume**
+speaks up in red and amber only while a fresh start is in play (a handoff under way, the Cold Resume Guard
 armed, a watcher that may wake fresh); otherwise it reads *Not needed yet* in gray: a run that
 keeps no notes yet is how a run begins, not a fault.
 
@@ -456,7 +496,14 @@ the run over time, leading with what needs the person:
    or milestones (never a percent made up from time or calls), its result or failure, **Stop** and
    **Message** only where Claude Code takes them. An agent shows from its spawn (*starting* until
    Claude Code lists it); one missing from the list for a moment keeps its status. *What Claude may
-   start ›* goes to Guardrails, whose Subagents card links back.
+   start ›* goes to Guardrails, whose Subagents card links back. Since 1.8 an agent whose spawn was
+   not seen shows from Claude Code's SubagentStart, a row carries the effort its requests went
+   with and its own compactions, and a finished subagent this session saw end offers **Resume**
+   (a message Claude Code resumes it with; never a workflow's agent, a fork or a teammate). *No
+   subagents in this context* is said only when nothing at all was seen: calls from a loop no
+   record names (an engine fork, an agent from before a reload) are counted instead. The footer
+   says each subagent has its own context and compacts it itself, and that Claude Code reports no
+   usage per agent, so none is shown.
 6. **Run budget**: one quiet row (*No budget for this run · Set a budget ›*) until one is set; then
    a meter per limit, the limits' fields and stepper, *At a limit*, **Continue anyway** at a limit.
 7. **Recent operations**: one dim line of the last few steps (queued, delivered, armed, woke,
@@ -487,6 +534,45 @@ a plan of three or more finished; a handoff with verified notes), never from lin
 calls, which would reward churn, and never from what Claude says. Claude is told never to state
 points itself. Levels need more XP each time (50·n·(n−1)), so they mark real runs, not single
 edits.
+
+## Models
+
+Frontier Max's card, earlier on the page, says plainly what it does: it gives Claude Project
+Sentinel's strongest engineering policy (investigate, finish, verify) and requests the chosen
+effort where the model takes one; it never switches the model. *Reached Claude in this context* is
+read from the requests themselves (the policy ledger), never from what Claude says; a model with
+no effort setting is said so.
+
+Behavior's **Models** card (1.8) answers one question: which model does what? It leads with the
+main conversation, shown and never switched: *Main conversation* is Claude Code's (chosen with
+`/model`), and *Cache protection* says whether a switch over 100k or more warm cached tokens is
+asked about, as a link to Context, where that setting lives. Then the Agent Model Policy's switch
+(*Agent models by kind of work*). Off, each subagent runs on its own definition's model or Claude's
+choice. Turned on with nothing chosen yet, it starts from a suggestion instead of an empty form
+(search on Haiku; research, planning and review on Sonnet; implementation on the session's model;
+debugging and security on Opus; general on the agent's own), and a picker per kind of work opens
+in place: *Agent's own*, *Session model*, *Haiku*, *Sonnet*, *Opus*, and *Fable* once the session
+has seen it answer. *Per agent* lists overrides by agent type, and *Latest agent* says what the
+policy did last. The footnote says why: a prompt cache belongs to one model, and a subagent's
+fresh context costs the main cache nothing. Overview carries one row, *Agent models*.
+
+The card ends with the **Advisor** row: the setting as Claude Code reads it back, never what was
+asked, and whether Claude consulted it in this context (subagents' calls counted apart). Claude
+Code does not tell a plugin which advisor models an account has, so the documented ones are
+offered with the hint *if this account has it: Claude Code says if not* until `/advisor`'s own reply
+names this account's; with no `/advisor` in the session the row reads *Not available*.
+
+## Guardrails
+
+Guardrails say what Project Sentinel adds to Claude Code's own permissions, and by default that is
+nothing (1.8). Each category's row says its value in words: *Claude Code decides (its permission
+mode and rules)* for Default; for Ask or Deny what it does, then *Project Sentinel adds this on top
+of Claude Code*, as the row's quiet subtitle. Until 1.8 a value that differed from the default was
+amber with its default beside it; a stricter choice is the person's, not a problem, so it no longer
+raises its voice. The footnote's actions set every category at once: **All to Default (Claude Code
+decides)** and **Use the Guarded set** (Project Sentinel's Ask/Deny set before 1.8), each shown only
+while it would change something. The footnote says what Default means (not "allow everything"),
+and that shell commands are matched by pattern: it narrows what Claude does, it is not a sandbox.
 
 ## Moving around
 

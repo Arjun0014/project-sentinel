@@ -12,29 +12,34 @@ Claude Code gives every plugin its own store, a JSON file under `~/.claude/plugi
 Project Sentinel keeps `settings.v1` (settings and custom profiles), its run records and what it
 learned about the prompt cache (`cache.v1`) there, in `project-sentinel_<source>-<id>.json`. The
 store is validated on load: unknown values fall back to defaults, numbers are clamped to the
-ranges below, and a permission saved as `allow` (a state removed in 1.4.0) reads as `default`.
+ranges below, a permission saved as `allow` (a state removed in 1.4.0) reads as `default`, and a
+permission that cannot be read takes its state in the Guarded set, the stricter reading, never a
+looser Default.
 Hand-editing is possible but not needed. `/cr reset confirm` restores the defaults (Normal) and
 keeps custom profiles. A fresh install also keeps `onboarding.v1`: when the first-run card first
 showed, and when you dismissed it.
 
-**Fresh installs and updates** (1.7.0). The defaults in the tables below are a fresh install's, the
-**Normal** profile. Settings are saved with a `defaults` marker, the generation of defaults they
-were saved under (2 since 1.7.0; absent before it, read as 1). At the first load after an update:
+**Fresh installs and updates** (1.7.0, 1.8). The defaults in the tables below are a fresh
+install's, the **Normal** profile. Settings are saved with a `defaults` marker, the generation of
+defaults they were saved under (3 since 1.8, whose Guardrails leave every action to Claude Code; 2
+for 1.7.0; absent before 1.7.0, read as 1). At the first load after an update:
 
 | What the store holds | What happens |
 | --- | --- |
-| no `settings.v1`, and nothing else of Project Sentinel's (no run, run counter, cache memory or Quest log) | a fresh install: the 1.7.0 defaults are saved (Normal, so the panel never reads "Normal · edited"), the first-run card shows in Overview until *Got it*, and one toast says what is on |
+| no `settings.v1`, and nothing else of Project Sentinel's (no run, run counter, cache memory or Quest log) | a fresh install: the defaults are saved (Normal, so the panel never reads "Normal · edited"), the first-run card shows in Overview until *Got it*, and one toast says what is on |
 | no `settings.v1`, but runs, a run counter, cache memory or a Quest log | an install used before that never changed a setting (settings are saved only when one changes): **Classic** is saved, so its behaviour is unchanged and no card shows |
-| `settings.v1` without a `defaults` marker (saved before 1.7.0) | every value is kept, read against Classic so a group an older version never saved is not switched on by the new defaults; a profile named Normal is relabelled **Classic** (the values were Normal's before 1.7.0, so it does not read "edited" against the new Normal); then the marker is saved |
-| `settings.v1` with the marker | read as it is |
+| `settings.v1` without a `defaults` marker (saved before 1.7.0) | every value is kept, read against Classic so a group an older version never saved is not switched on by the new defaults; a profile named Normal is relabelled **Classic** (the values were Normal's before 1.7.0, so it does not read "edited" against the new Normal); then the Guardrails step in the next row |
+| `settings.v1` with a marker below 3 (saved by 1.7.0, or the row above) | Guardrails, once: only permissions exactly equal to the old built-in set (installs, downloads, edits outside the project, deletes, push and deploy Ask; force push and resets, and dangerous commands Deny) under Normal or Classic move to Default, and one note says so (*Guardrails now leave every action to Claude Code's own permissions (Default). Your earlier built-in Ask/Deny set is the Guarded profile (Setup), if you want it back.*). A value you changed, a stricter profile (Frontier Max, Low Resource, Release / QA) and custom profiles are kept as they are. Then marker 3 is saved |
+| `settings.v1` with marker 3 | read as it is |
+| a 1.7 store's `router` (no `agentModels`) | its subagent choices carry into the Agent Model Policy (below); its main-conversation routing is dropped |
 
 Settings carried over from Control Room's store (below) win over a fresh install's defaults
 written moments earlier at the same first load: that install is not new, so no card shows.
 
 **Classic**, an install from before 1.7.0, differs from Normal in two places: Autopilot is off
 (`autopilot.enabled`), and Frontier Max is off with its effort at Maximum (`frontier.enabled`,
-`frontier.effort`). The permission defaults are the same in both, and were not changed (see
-Permissions).
+`frontier.effort`). The permission defaults are the same in both: every category Default since 1.8
+(see Permissions).
 
 **Coming from Control Room.** Before 1.4.0 the plugin was called Control Room, and Claude Code
 keeps a plugin's store under its name. When Project Sentinel first loads after the rename, before
@@ -55,7 +60,7 @@ In the panel: **Context**.
 
 | Setting | Values | Default | Notes |
 | --- | --- | --- | --- |
-| `enabled` | on / off | on (Classic: off) | `/cr autopilot on\|off` |
+| `enabled` | on / off | on (Classic: off) | `/cr autopilot on\|off`. `/cr autopilot pause\|resume` pauses it for this session only (the setting is unchanged); `/cr autopilot recheck` after *Handoff loop prevented* (1.8). |
 | `thresholdMode` | `percent` / `tokens` | `percent` | |
 | `thresholdPercent` | 10–95 | 70 | Percent of the live context window |
 | `thresholdTokens` | 10,000–10,000,000 | 700,000 | `/cr autopilot 700k` |
@@ -68,6 +73,18 @@ In the panel: **Context**.
 The effective threshold is capped at 97% of the window. It is also kept below Claude Code's own
 auto-compact point (minus 5% of the window), so the handoff runs before Claude Code would
 compact. The Context section says when this clamp applies.
+
+The threshold is measured against this context's own size (1.8): after a handoff or a `/clear` the
+size is unknown until a request made in the new context is answered (a compaction or a resume
+gives it at once, from Claude Code's own count), and an earlier context's figure is never used.
+Two holds have no setting, only commands for this
+session: after three handoffs into fresh contexts within 30 minutes, or a fresh context at its
+handoff point within two turns without growing, Autopilot refuses the next handoff (*Handoff loop
+prevented*: `/cr autopilot recheck`, or `pause`); and a window that shrinks under a model switch
+while the context holds more than its new handoff point holds Autopilot (*Model window changed
+unexpectedly*: `/cr window accept` uses Claude Code's limit, `/cr window back` switches back with
+Claude Code's own `/model`, `/cr window pause` pauses Autopilot). Project Sentinel never forces a
+window Claude Code does not report.
 
 ### Frontier Max (`frontier`)
 
@@ -105,38 +122,54 @@ The guard only judges turns you started (and Autopilot continuations). It stands
 handoff, in plan mode, while background work Claude started is still running, and when Claude
 repeats the answer it was just continued from.
 
-### Model router (`router`)
+### Agent Model Policy (`agentModels`)
+
+In the panel: **Behavior → Models**. `/cr models` shows it in words.
 
 | Setting | Values | Default | Notes |
 | --- | --- | --- | --- |
-| `strategy` | `off` / `balanced` / `performance` / `economy` / `custom` | `off` | |
-| `mainLoop` | on / off | on | Route the main conversation per turn (see below) |
-| `subagents` | on / off | on | Route subagents by type |
-| `custom.*` | `session` / `haiku` / `sonnet` / `opus` / `fable` per class | see below | `trivial`, `simple`, `standard`, `hard`, `explore`, `plan`, `general` |
+| `enabled` | on / off | off | *Agent models by kind of work*. `/cr models on\|off`. Turned on while every kind is `agent`, it starts from the suggestion below. |
+| `explore`, `research`, `planning`, `implementation`, `debugging`, `review`, `security`, `general` | `agent` / `session` / `haiku` / `sonnet` / `opus` / `fable` | `agent` | The model for a subagent whose work is of that kind. `/cr models <kind> <model>` |
+| `overrides` | a list of `{ type, model }`, at most 12 | none | A model for every agent of one type (`Explore`, a plugin's agent), before its kind. `/cr models type <agent-type> <model>\|clear` |
 
-Built-in tables:
+| Kind | In the panel | Suggested when turned on |
+| --- | --- | --- |
+| `explore` | Explore / search | haiku |
+| `research` | Research | sonnet |
+| `planning` | Planning / architecture | sonnet |
+| `implementation` | Implementation | session |
+| `debugging` | Debugging | opus |
+| `review` | Review / QA | sonnet |
+| `security` | Security | opus |
+| `general` | General | agent |
 
-| Class | Balanced | Performance | Economy |
-| --- | --- | --- | --- |
-| trivial (acknowledgements) | haiku | sonnet | haiku |
-| simple (lookups, short questions) | sonnet | session | haiku |
-| standard (implementation) | session | session | sonnet |
-| hard (design, debugging, analysis) | session | fable | session |
-| Explore subagents | haiku | sonnet | haiku |
-| Plan subagents | session | opus | sonnet |
-| other subagents | sonnet | opus | haiku |
+The values: `agent` leaves the subagent as Claude Code would start it (its own definition's model,
+or Claude's choice); `session` gives it the main conversation's model; `haiku`, `sonnet` and `opus`
+are the aliases Claude Code resolves at a spawn (or the full id once one was seen answering in this
+session); `fable` only once a Fable model was seen answering in this session (until then the
+agent keeps its own model, and the panel offers Fable only from then).
 
 Rules:
 
-- The main conversation is routed once per turn, never mid-turn. It is routed only while the
-  context is small (60k tokens or less), except for upgrades on hard work. A smaller-window model
-  is only chosen under 150k tokens.
-- It is routed only to a model whose full id Claude Code has reported answering in this session.
-  Claude Code rejects a bare alias on a model request.
-- Frontier Max vetoes downgrades unless the strategy is Custom. Subagents never go below Sonnet
-  under Frontier Max.
-- A model that Claude Code refuses is not chosen again in that session.
-- Forks inherit the parent's model, and a model Claude chose explicitly for a subagent is respected.
+- The main conversation's model is never changed: it is the one chosen in Claude Code (`/model`).
+  A prompt cache belongs to one model, and a switch re-sends the whole context uncached. A
+  subagent starts a fresh context of its own, so its model costs the main cache nothing.
+- A spawn's kind comes from its agent type first (`Explore`, `Plan`, a plugin's agent), then from
+  the words of its description. No model is asked.
+- A model Claude names in its Agent call is kept. A fork runs on its parent's model, and a
+  workflow's agents keep the script's.
+- A model Claude Code refuses for a subagent is not asked for again in that session: those
+  agents keep their own model.
+- Each decision is in Behavior → Models (*Latest agent*), `/cr models` and the debug log
+  (`agent models: …`).
+
+**From the model router** (1.7). The `router` setting and the main-conversation routing are gone
+(1.8): the router switched the main conversation's model by task, and every switch re-sent the
+whole context uncached to the other model. At the first load, a 1.7 router that routed subagents
+(any strategy but `off`, with subagent routing on) carries its subagent choices into the policy and
+turns it on: its Explore choice as `explore`, its Plan choice as `planning`, its other-subagents
+choice as `general`, every other kind `agent`. A router that was off, or did not route subagents,
+leaves the policy off. `/cr router` says why it was removed.
 
 ### Run progress (`progress`)
 
@@ -193,17 +226,17 @@ In the panel: **Context → Cache**. `/cr cache` shows it in words.
 | Setting | Values | Default | Notes |
 | --- | --- | --- | --- |
 | `keepWarm` | on / off | off | *Keep warm while you are away*: refresh the cache shortly before it lapses by re-sending the last request (see below). `/cr cache keep on\|off` |
-| `maxIdleMinutes` | 15–480 | 120 | *Stop after*: how long Keep warm holds the cache while you have not come back. The panel steps through 15, 30, 45 minutes, 1, 1.5, 2, 3 … 8 hours; `/cr cache idle 45m` or `idle 2h` takes any value in range. The five-minute cache stops at 45 minutes whatever is set: past that, refreshing it costs more than one rebuild. |
+| `maxIdleMinutes` | 15–480 | 120 | *Stop after*: how long Keep warm holds the cache while you have not come back. It counts from the end of the last turn, and a refresh never resets it (the next turn's end starts it again); while Claude works it has not started. The panel steps through 15, 30, 45 minutes, 1, 1.5, 2, 3 … 8 hours; `/cr cache idle 45m` or `idle 2h` takes any value in range. The five-minute cache stops at 45 minutes whatever is set: past that, refreshing it costs more than one rebuild. A watcher set to keep the cache warm holds it past this, until a minute after its wake. |
 | `minTokens` | 5,000–1,000,000 | 20,000 | Keep warm leaves a smaller context alone (starting it cold costs little), and *Keep policies stable* holds only a cache at least this large. Not in the panel. |
-| `guardModelSwitch` | on / off | on | *Ask before a model switch*: a switch you make (`/model`, the model picker) that would re-send 100k or more warm tokens is confirmed first, with Claude Code's own estimate of what it costs. `/cr cache guard on\|off` |
+| `guardModelSwitch` | on / off | on | *Ask before a model switch*: a switch you make that would re-send 100k or more warm cached tokens is confirmed first. `/model` and the terminal's model picker: in Claude Code's own dialog, with its estimate of what it costs. A switch through `set_model` (Desktop's model picker, Remote Control, an IDE), for which Claude Code has no dialog (1.8): at your next message, in Claude Code's question dialog: *Switch back* (Claude Code's own `/model`, then your message, once), *Send anyway*, *Start fresh* (while Context → *Ready to resume* reads Ready) or *Cancel* (the message comes back to the prompt box). A switch you confirmed is not asked about again. Behavior → Models shows it as *Cache protection*. `/cr cache guard on\|off` |
 | `stablePolicies` | on / off | on | *Keep policies stable*: while the cache is warm, a setting you change reaches Claude as a note, and the system prompt keeps the policies it was cached with until the cache lapses or the context starts fresh. Off, every change rewrites the system prompt, which rebuilds the whole cache. `/cr cache stable on\|off` |
 | `coldResume` | on / off | on | *Ask before a cold resume* (Context → **Cold Resume Guard**): before a message is sent into a context whose prompt cache has surely lapsed, Claude Code's question dialog asks first: *Continue full session*, *Start fresh from resume state* (only while Context → *Ready to resume* reads Ready), *Compact first* (compaction reads the context once, then it is smaller), or *Cancel* (the message comes back to the prompt box). Never for a prompt typed while Claude works, never where no one can be asked. |
 | `coldResumeTokens` | 20,000–2,000,000 | 100,000 | *Warn above*: the context, in tokens, from which a cold resume is asked about. The panel steps through 20k, 50k, 100k, 150k, 200k, 300k, 400k, 500k, 750k, 1M, 1.5M and 2M. |
 
 Claude Code reports how many tokens each request read from the cache and wrote to it. From those
 Project Sentinel derives the rest: a request that read less than half of what the one before it sent
-missed the cache, and the change it saw before it is the cause (a model or effort switch, the
-model router's switch, changed policies, the output style, a new tool, compaction), else idling
+missed the cache, and the change it saw before it is the cause (a model or effort switch, changed
+policies, the output style, a new tool, compaction), else idling
 past the cache's lifetime, else *unexplained*. The lifetime is the one Claude Code reports at a
 model switch, or learned: a request that still read the cache after more than five idle minutes
 proves the one-hour cache, and that is remembered across sessions. Where Claude Code is told which
@@ -215,8 +248,18 @@ default; a miss after five idle minutes corrects it to five. While a turn is
 running (a long command, a long answer) the cache counts as warm unless a five-minute lifetime is
 known: Claude Code's own requests keep it warm, so the panel never says it may have lapsed then.
 
+A model or effort change rebuilds the cache in a way Project Sentinel follows from Claude Code's
+own facts (1.8): a cache belongs to one model; Claude Code's docs say Fable 5.1 and later, Opus
+5.5, Sonnet 5.5 and Haiku 5.5 keep their cache across effort levels, so on other models an effort
+change likely rebuilds it, and a rebuild seen on this machine is remembered. Thinking settings
+are not documented either way: they are traced, never guessed. Each main request's model and
+effort are compared with the last one's before it goes; nothing is changed, and a large rebuild
+nobody confirmed is said in a toast.
+
 **Keep warm** refreshes only while you are away (no turn running), the context is at least
-`minTokens`, no handoff is about to clear the context, and the idle limit has not passed. It
+`minTokens`, no handoff is about to clear the context (the clear itself, and the fresh context
+resuming: never while a handoff is due, written, waiting or checking its notes), and the idle
+limit has not passed. It
 refreshes a sixth of the lifetime before the expiry (ten minutes ahead for the one-hour cache, one
 minute for the five-minute one); with the lifetime unknown, one refresh six minutes after the
 last request learns it. A refresh asks Claude Code to re-send the last request with a one-word
@@ -224,6 +267,16 @@ reply asked for; the transcript never sees it, and it costs tokens (mostly cache
 of the input price, plus the short reply). It checks itself: the first request after an expiry it
 replaced must still read the cache. If refreshes do not hold the cache, it says so and stops;
 turning it on again lets it try afresh.
+
+Keep warm keeps two clocks apart (1.8): the cache's lifetime, which each request or refresh that
+reads the cache renews, and the idle allowance (`maxIdleMinutes`), which counts from the last
+turn's end. Context → Cache and `/cr cache` read both out: while Claude works, *Ready: starts when
+this turn finishes, then holds the cache for up to 3 h of idle time. The countdown has not
+started.*; while you are away, *Idle for*, *Keep warm left*, *Started*, *Stops*, *Next refresh*, *Cache
+expires in … without one*, the cache's lifetime and where it came from, and the refreshes. When
+the allowance in force differs from the one set, both are shown with why: *Requested 2 h ·
+Effective 45 min* (the five-minute cache's cap), or *Requested idle limit 2 h · Watcher holds until
+05:20* (*Reason: warm watcher resume*, and the watcher).
 
 *Surely lapsed* means one of: the cache's lifetime is known and its expiry passed; more than an
 hour passed since the last request (longer than any lifetime); or Claude Code said so when the
@@ -310,25 +363,31 @@ see [SECURITY.md](../SECURITY.md#what-it-observes) for how they are measured.
 
 In the panel: **Guardrails**.
 
-Each category is `default` (shown as *Default*: Claude Code decides), `ask` or `deny`. Guardrails
-says each one's value in words and whether it is the default ("Asks you first · default"); a changed
-one is amber and names its default. 1.7.0 changed none of these defaults: making the categories
-Default would remove two Deny and six Ask protections and hand those calls back to Claude Code's
-own rules.
+Each category is `default` (shown as *Default*: Claude Code decides), `ask` or `deny`. Since 1.8
+every category is Default on a fresh install, in Normal and in Classic: Project Sentinel does not
+override the action, and Claude Code's own permission mode and rules decide. That is not "allow
+everything": Claude Code stays the authority. Project Sentinel's earlier Ask/Deny set is the
+**Guarded** profile, and Frontier Max, Low Resource and Release / QA keep it (Release / QA asks for
+commits too). Guardrails says each value in words: Default reads *Claude Code decides (its
+permission mode and rules)*; Ask or Deny says what it does and *Project Sentinel adds this on top of
+Claude Code*, quietly (until 1.8 a changed value was amber). **All to Default (Claude Code
+decides)** and **Use the Guarded set** set every category at once. An install updated from 1.7.0
+or earlier moves to Default only if its permissions were exactly the old built-in set (see Fresh
+installs and updates, above).
 
-| Category | Examples | Default |
-| --- | --- | --- |
-| `install`: package installs | `npm install zod`, `pip install requests` | ask |
-| `network`: internet and network access | `curl https://…`, `git pull` | Default |
-| `download`: downloading files | `wget https://…/model.bin` | ask |
-| `edit`: project edits | Edit `src/app.ts` | Default |
-| `editOutside`: changes outside the project | Write `~/.bashrc` | ask |
-| `delete`: deleting files | `rm -rf dist` | ask |
-| `commit`: Git commits | `git commit -m "…"` | Default |
-| `push`: Git push | `git push origin main` | ask |
-| `gitDestructive`: force push and resets | `git push --force`, `git reset --hard` | deny |
-| `deploy`: deploy and publish | `npm publish`, `terraform apply` | ask |
-| `dangerous`: dangerous system commands | `rm -rf ~`, `curl … \| sh` | deny |
+| Category | Examples | Default | Guarded |
+| --- | --- | --- | --- |
+| `install`: package installs | `npm install zod`, `pip install requests` | Default | ask |
+| `network`: internet and network access | `curl https://…`, `git pull` | Default | Default |
+| `download`: downloading files | `wget https://…/model.bin` | Default | ask |
+| `edit`: project edits | Edit `src/app.ts` | Default | Default |
+| `editOutside`: changes outside the project | Write `~/.bashrc` | Default | ask |
+| `delete`: deleting files | `rm -rf dist` | Default | ask |
+| `commit`: Git commits | `git commit -m "…"` | Default | Default |
+| `push`: Git push | `git push origin main` | Default | ask |
+| `gitDestructive`: force push and resets | `git push --force`, `git reset --hard` | Default | deny |
+| `deploy`: deploy and publish | `npm publish`, `terraform apply` | Default | ask |
+| `dangerous`: dangerous system commands | `rm -rf ~`, `curl … \| sh` | Default | deny |
 
 - **Deny** refuses before any dialog, in every permission mode, for Claude and its subagents.
 - **Ask** always asks you first. Where Claude Code would ask anyway, its own permission prompt
@@ -357,7 +416,7 @@ In the panel: **Setup**.
 
 ### Nothing to set
 
-Some 1.7.0 features have no setting, because they only report what Claude Code and the workspace
+Some features have no setting, because they only report what Claude Code and the workspace
 say:
 
 - **Five-hour plan usage** on the status bar (`5H 63% · 2h14m`) is Claude Code's own reading of the
@@ -371,13 +430,29 @@ say:
 - **The agent band** shows while subagents run and is gone when none do.
 - **The Handoff Supervisor** runs while a handoff is under way; its one setting is
   `autopilot.waitMinutes`.
+- **The handoff notes' verdict** (1.8) looks for `autopilot.handoffFile` in every place it may be
+  (the project root now and at load, the working directory, the repository root, wherever
+  Claude's editing tool wrote it) and runs `git hash-object` on the notes file to tell whether it
+  changed (see [SECURITY.md](../SECURITY.md)). `/cr fresh force` asks before starting from notes it
+  could not verify.
+- **The Advisor** (1.8) is Claude Code's own setting, `advisorModel`, which its `/advisor` command
+  saves in your user settings. Behavior → Models → *Advisor* and `/cr advisor [model|off]` set it
+  only through Claude Code's own `/advisor`, then show what the setting reads back, and whether
+  Claude consulted it in this context. Claude Code does not tell a plugin which advisor models
+  your account has: the documented ones (Fable, Opus, Sonnet) are offered as unconfirmed until
+  `/advisor`'s own reply names yours. It is session-wide: subagents inherit it where Claude Code
+  pairs it with their model, and there is no per-subagent advisor.
+- **`/cr router`** (1.8) only says why the model router was removed; see the Agent Model Policy.
 
 ## Profiles
 
 A profile is a complete set of the systems above (everything except Display). The built-in
-profiles are Normal (a fresh install's defaults), Classic (Normal before 1.7.0: Autopilot and
-Frontier Max off), Frontier Max, Low Resource and Release / QA; the last three are built on Classic,
-as they always were, and are described in the [README](../README.md#profiles). Custom profiles are saved from
+profiles are Normal (a fresh install's defaults), Guarded (Normal with Project Sentinel's own
+Ask/Deny Guardrails on top of Claude Code's: the permission defaults before 1.8), Frontier Max,
+Low Resource, Release / QA and Classic (Normal before 1.7.0: Autopilot and Frontier Max off). Normal
+and Classic leave every permission to Claude Code (Default); Frontier Max, Low Resource and
+Release / QA are built on Classic, as they always were, keep the Ask/Deny set, and are described in
+the [README](../README.md#profiles). Custom profiles are saved from
 Setup with a name. Saving a name again replaces that profile, and custom profiles can be
 deleted there. `profile` records which profile was applied last. When the current settings differ from it, the
 panel reads "Normal · edited" and Setup lists each change in the panel's own words

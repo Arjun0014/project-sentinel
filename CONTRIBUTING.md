@@ -29,11 +29,19 @@ This page lists them and how to check your work.
    npm run check
    ```
 
-   That is the type-check, `claude plugin validate plugins/project-sentinel --strict`,
-   `claude plugin validate .` (the marketplace), the source rules (`npm run source`) and the tests.
-   The type-check and the tests run on `.build/mod`, a scratch copy of the plugin folder with the
-   repository's `tests/` beside its `hooks/` (`tools/test/mod.mjs` assembles it), because the
-   plugin folder ships only the plugin.
+   That is the type-check, the validation (`npm run validate`), the source rules (`npm run source`)
+   and the tests. The type-check and the tests run on `.build/mod`, a scratch copy of the plugin
+   folder with the repository's `tests/` beside its `hooks/` (`tools/test/mod.mjs` assembles it),
+   because the plugin folder ships only the plugin.
+
+   `npm run validate` (`tools/test/validate.mjs`) runs `claude plugin validate --strict` on
+   `.build/validate`, a copy of the plugin folder without the declarations step 3 laid
+   (`.claude-plugin/types/` and `tsconfig.json`: git-ignored, so the marketplace never serves
+   them), then `claude plugin validate .` (the marketplace). With the declarations in place, the
+   validator's own type-check of the hooks takes in the engine's full declarations and, on Claude
+   Code 2.1.325, runs past its 2048 MiB limit, which `--strict` reports as a failure that says
+   nothing about the plugin. The plugin's own type-check against those declarations is
+   `npm run typecheck`.
 
 ## Rules the code follows
 
@@ -46,12 +54,16 @@ This page lists them and how to check your work.
   are pure functions or small classes without I/O. `hooks/app/runtime.ts` wires them together and
   performs effects.
 - **No network, no telemetry, no secrets.** Don't add HTTP calls, telemetry hooks, environment
-  reads or project-file reads. File access is limited to `stat` of the handoff file and of edited
-  paths, `/proc` on Linux, and the one-time read of the store the plugin kept as Control Room.
+  reads or project-file reads. File access is limited to `stat` of the handoff notes (in each place
+  they may be) and of edited paths, `/proc` on Linux, and the one-time read of the store the plugin
+  kept as Control Room.
 - **Never loosen safety.** A deny stays a deny, plan mode stays plan mode, and managed settings
   win. Fallbacks (`.catch`) must be at least as strict as Claude Code without the plugin.
 - **No invented numbers.** Show cost, context and effort only as Claude Code reports them;
   otherwise show "—".
+- **The main conversation's model is the person's.** Nothing sets it on a request; Claude Code's
+  `/model` runs only when the person presses *Switch back* (or runs `/cr window back`). A
+  subagent's model is set only at its spawn, only with the Agent Model Policy on.
 - **Presentation never changes behaviour.** Focus view and the status bar only draw.
 - **Hooks stay fast.** A hook has a 10-second own-time budget, so long work runs from timers.
   Don't block `session.end`.
@@ -85,14 +97,22 @@ Tests live in the repository's `tests/` folder, written as if they sat beside `h
 `claude plugin test` on it:
 
 - **Pure logic:** settings, profiles, permissions classifier, guard heuristics, Autopilot reducer
-  (and its recovery after a reload), router, chain, run plan, validation and Activity's signal
+  (and its recovery after a reload), context epochs, the handoff notes' verdict and the loop
+  breaker (`epoch.test.ts`), the Agent Model Policy and the subagent choices a 1.7
+  store carries into it (`agentmodels.test.ts`), chain, run plan, validation and Activity's signal
   (`signal.test.ts`), activity, resource parsers, answer styles (`answers.test.ts`), the Quest
   log (`quest.test.ts`), the prompt cache model (`cache.test.ts`), Kit's moods, its behaviour model
   (never a jump, moods that settle, reactions, calm) and both renderers (`companion.test.ts`), the
   former store's carry-over (`formerstore.test.ts`) and Git's status parser (`git.test.ts`).
 - **Runtime:** `runtime.test.ts`, with the in-memory host in `tests/fixtures/fake-host.ts` (a manual
-  clock and recorded effects); Cache Guardian and Keep warm (`guardian.test.ts`); Handoff Health
-  and Continuity, through a whole handoff (`handoff.test.ts`).
+  clock and recorded effects); Cache Guardian and Keep warm (`guardian.test.ts`); Keep warm's two
+  clocks (`keepwarm.test.ts`); the model and effort cache guard and `/cr models` (`models.test.ts`);
+  agents through SubagentStart/Stop, their compactions, Resume, and the Advisor
+  (`agentsplus.test.ts`); the handoff's background work across contexts, the supervisor and the
+  ways out (`supervisor.test.ts`); Handoff Health and Continuity, through a whole handoff
+  (`handoff.test.ts`); one run across three fresh contexts with everything at once
+  (`chaos.test.ts`, see its header); and replays of real long-run failures, each failing on 1.7.0
+  but a positive control (`repro.test.ts`).
 - **Engine-driven:** `register.test.ts` and `ui.test.ts`, using the real engine with the world
   answered beneath the plugin by `tests/fixtures/world.ts`, and UI mounted on the `terminal`,
   `desktop` and `mobile` surfaces.
@@ -103,7 +123,7 @@ assuming one.
 ### Continuous integration
 
 `.github/workflows/check.yml` runs on every push to `main` and every pull request: the type-check,
-strict validation of the plugin and the marketplace, the source rules and the tests, on Linux, Windows and macOS
+validation of the plugin (as it ships, `npm run validate`) and the marketplace, the source rules and the tests, on Linux, Windows and macOS
 with the latest Claude Code from npm, and on Linux with the oldest supported engine (2.1.289). The
 engine's type declarations are laid by loading the plugin once in a headless session, which stops
 at "Not logged in" before any model call; no step signs in. CI does not run the live machine-load
@@ -134,7 +154,8 @@ Unit tests don't paint. Before a release:
   does not reload it mid-test. Disable the installed copy in the test project's
   `.claude/settings.local.json` (`"enabledPlugins": { "project-sentinel@control-room": false }`).
   Claude Code's `/effort` and `/model` save your default for new sessions: pass `--model` instead,
-  or put it back after a test.
+  or put it back after a test. `/cr advisor <model>` runs Claude Code's `/advisor`, which saves
+  `advisorModel` in your user settings: put that back too.
 - Desktop first through [`tools/desktop-preview`](tools/desktop-preview/README.md): it renders
   the status bar's and the panel's `desktop` element trees as HTML with the CSS the app's own
   renderer gives them (units, row alignment, the picker), so layout and graphics are faithful; the

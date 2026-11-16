@@ -9,8 +9,14 @@ match. `claude plugin tag plugins/project-sentinel` checks this when tagging a r
 ## [Unreleased]
 
 A second hardening pass for long runs across many contexts (branch `sentinel-hardening-1.8`; not released, the
-version is still 1.7.0). In progress: the rest of this list is written as the work lands. 614 tests pass on
-Claude Code 2.1.325.
+version is still 1.7.0). One long context now means one main model and one stable prompt cache: Project Sentinel
+no longer switches the main conversation's model, and guards every way a model or effort change can rebuild a large
+warm cache. Context usage belongs to the context it was measured in, while the run carries across any number of
+contexts; the handoff notes are judged in one place, wherever they really are. Agents are tracked through every
+channel Claude Code offers, the session's Advisor gets a control, Guardrails defer to Claude Code's own permissions
+by default, and Keep warm says exactly when it starts and stops. 649 tests pass on Claude Code 2.1.325 and on
+2.1.289 (with a type-check against its own declarations); an integrated test runs one run across three fresh
+contexts with all of it at once.
 
 ### Fixed
 
@@ -35,12 +41,22 @@ Claude Code 2.1.325.
   only (a new session's task 1 replaced the previous one's, even a completed one).
 - **Keep warm stood down while the handoff only checked its notes**; it now stands down only for the clear itself
   and the fresh context resuming.
+- **Model switches from Claude Desktop went through unwarned.** Claude Code reports a switch made through
+  `set_model` (Desktop's picker, Remote Control, an IDE) as `source: sdk`, which 1.7 let through without asking, and
+  nothing else looked. Such a switch is now caught at the next message: before it re-sends a large warm cache to
+  another model, Sentinel asks (Switch back, Send anyway, Start fresh, Cancel); Switch back runs Claude Code's own
+  `/model`, then sends the message once.
+- **"No subagents in this context" while Claude Code ran agents.** Claude Code's SubagentStart and SubagentStop are
+  now evidence too (a row for an agent whose spawn this runtime never saw, an end its turn.complete did not report),
+  and an agent loop acting that no record names is counted: "No subagents" is said only when nothing was seen.
+- **The Cold Resume Guard gave up where Desktop attached after the load** (no surface known yet): the surfaces are
+  read again first. Every message now says in the debug log why the guard did or did not arm.
 - Claude Code 2.1.325: the status bar's `isCollapsed` prop, Desktop's minimized-pane `widget` placement (a glance),
   and the engine's own `tool.check` during a call (tests).
 
 ### Added
 
-- **A handoff-loop circuit breaker**: a third handoff into fresh contexts within 30 minutes, or a fresh context at
+- **A handoff-loop circuit breaker**: after three handoffs into fresh contexts within 30 minutes the next one, or a fresh context at
   its handoff point within two turns without growing, is refused ("Handoff loop prevented"); Recheck, Continue
   here, Start fresh, Pause Autopilot.
 - **Context window sanity guard**: a window that shrinks under a model switch (a 1M model reported as 200k) while
@@ -54,6 +70,52 @@ Claude Code 2.1.325.
 - The Handoff Supervisor says what Sentinel does next and the notes' state. `/cr fresh force` (and "start fresh
   now") asks before starting from notes Sentinel could not verify; `/cr fresh` starts from notes written in this
   context. `/cr autopilot pause|resume|recheck` for this session only.
+- **Agent Model Policy** (`features/agentModels.ts`, Behavior → Models, `/cr models`): a subagent's model by its kind
+  of work (explore, research, planning, implementation, debugging, review, security, general), each its own model,
+  the session's, or Haiku, Sonnet, Opus or Fable (Fable once seen answering), with per-agent-type overrides. Subagents
+  start fresh contexts, so their model costs the main cache nothing. Off by default; turned on, it starts from a
+  suggestion (search on Haiku, debugging and security on Opus, implementation on the session's model). Claude's own
+  choice in an Agent call is kept; forks and workflow agents keep theirs.
+- **Model / effort cache guard** (`features/modelGuard.ts`) in four layers: Claude Code's PreModelSwitch dialog for
+  `/model` and picker switches; the next message for any other switch; each main request's own model and effort
+  before it goes (traced, and a large unconfirmed rebuild said); Cache Guardian's fingerprint for the proven cause.
+  Effort follows Claude Code's docs (Fable 5.1+, Opus 5.5, Sonnet 5.5 and Haiku 5.5 keep their cache across effort
+  levels) and what this machine saw rebuild; thinking settings are undocumented and only traced.
+- **Advisor** (`features/advisor.ts`, Behavior → Models, `/cr advisor`): what Claude Code's `/advisor` is set to and
+  whether it was consulted in this context (its server tool calls, main and subagents), set on the person's choice
+  through Claude Code's own `/advisor` and read back from `advisorModel`. Claude Code's command list names no models
+  to plugins, so the documented ones are offered as unconfirmed until `/advisor`'s reply names this account's.
+- **Agents**: each agent's model and effort, its own compactions, Resume for a finished subagent (Claude Code resumes
+  it from its transcript when sent a message), and its model in the band above the status bar. Claude Code reports
+  no context usage per agent, and the view says so instead of estimating one.
+- **Keep warm timing** (Context → Cache, `/cr cache`): the cache's lifetime and the idle allowance are two clocks,
+  and a refresh never resets the allowance. Ready while Claude works ("the countdown has not started"); while idle:
+  idle for, Keep warm left, started, stops, next refresh, when the cache expires without one, the lifetime and its
+  source, the refreshes and the last one's status; the allowance asked for and the one in force when the 5-minute
+  cache caps it, and a watcher holding the cache past it, with why.
+- **Guarded**, a built-in profile: Normal with Project Sentinel's own Ask/Deny Guardrails on top of Claude Code's.
+- A context figure not yet proven in this context (after a plugin reload) is drawn with "~".
+
+### Changed
+
+- **Guardrails default to Claude Code's own permissions.** For new installs, Normal and Classic, every category is
+  Default: Project Sentinel overrides nothing and Claude Code's permission mode and rules decide (not "allow
+  everything"). The earlier Ask/Deny set is the Guarded profile, and Frontier Max, Low Resource and Release / QA keep
+  it. An install still exactly on the old built-in set under Normal or Classic moves to Default once, and is told;
+  any value the person changed, a stricter profile and custom profiles are kept as they are. A stored value that
+  cannot be read still falls back to the stricter reading. The pane says what Default means, and a stricter choice is
+  no longer drawn in amber.
+- Frontier Max's card says plainly what it does (its policy, the effort where the model takes one, never the model),
+  and "Reached Claude in this context" is read from the requests themselves.
+- `npm run validate` validates the plugin as it ships: without the declarations Claude Code lays beside it for
+  development, the validator's own type-check no longer runs past its 2048 MiB limit on Claude Code 2.1.325.
+
+### Removed
+
+- **The model router.** It switched the main conversation between models by task, and every switch re-sent the whole
+  context uncached to the other model, fighting Cache Guardian on long runs. The main conversation stays on the model
+  chosen in Claude Code. A 1.7 store's router carries its subagent choices into the Agent Model Policy; its
+  main-conversation routing is dropped. `/cr router` now explains the removal.
 
 ## [1.7.0] - 2026-10-13
 

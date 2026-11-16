@@ -6,8 +6,10 @@ Room until 1.4.0; its panel still is) is built on it, and why each decision was
 made. Written before implementation, kept current.
 
 Target platform: Claude Code function-hooks plugins ("mods"), verified on
-**2.1.289** (the minimum), **2.1.292**, **2.1.293** and **2.1.296** (the CLI on
-this machine for the 1.7.0 hardening pass). The mods API is early access; the
+**2.1.289** (the minimum), **2.1.292**, **2.1.293**, **2.1.296** (the CLI on
+this machine for the 1.7.0 hardening pass) and **2.1.325** (for the 1.8
+hardening pass on branch `sentinel-hardening-1.8`, not released: the version is
+still 1.7.0). The mods API is early access; the
 generated declarations (`.claude-plugin/types/claude-code/index.d.ts`) are the
 authority.
 
@@ -30,15 +32,15 @@ versions, with a prototype mod. Log excerpts are in the development notes.
 | Subagent enforcement | `agent.spawn` answering `{ deny }` | ✅ model receives "Subagent spawn denied by a plugin: …" |
 | Ask before a call | In `tool.call`, before `next`: `$.tool.check({ tool, input })` reads Claude Code's own verdict (it runs nothing); where Claude Code would not ask (allow, no verdict, auto mode), `$.ui.ask(question, { options: ['Run it', "Don't run it"], header: 'Approve' })` asks in Claude Code's question dialog; a decline answers `{ deny }` | ✅ in the engine harness; the dialog is Claude Code's own. There is no `tool.check` hook: the directory refuses one that reads what `next` answered, and answering a permission check is what the removed *Allow* did. (Until 1.3.0: `tool.check` answering `{ decision: 'ask' }`, which held in `bypassPermissions` mode.) |
 | Per-request effort | `turn.step` → `next({ ...e, effort: 'max' })` | ✅ accepted (Sonnet 5.5 default `medium` → sent `max`); `e.effort` is absent for models without effort (Haiku) |
-| Live context / cost | `session.measure` (pushed after every main turn) + `$.session.usage()` | ✅ `context.tokens/window/percent`, `cost.usd`, `rateLimits` |
+| Live context / cost | `session.measure` (pushed after every main turn) + `$.session.usage()` | ✅ `context.tokens/window/percent`, `cost.usd`, `rateLimits`. ⚠ Claude Code documents no reset of the context figures at `/clear` (only cost resets), a `session.measure` may come late, and a request made before a boundary may answer after it: seen in a real run, a fresh context was told it had reached its handoff point at the old context's ~701k. Since 1.8 these session-level readings never prove a context's size (§6, *Context epochs*). |
 | Host CPU/RAM | `$.process.spawn` of one long-lived sampler, by name with fixed arguments (no shell) | ✅ Windows `typeperf` (1.4.2): ~0.3 s CPU / 30 s, ~9 MB, plus `systeminfo` once (~2.6 s) for the total memory; read live on 2.1.293 against Windows' own figure (84% vs 85%). Until 1.4.1 a PowerShell P/Invoke script (~0.5 s / 30 s, ~80 MB), which the directory blocks: it reads a shell running an inline script as a program it cannot pin. One-shot probes cost ~2.4 s each (rejected). |
-| Model per request | `turn.step` → `next({ ...e, model })` | ⚠ **full ids only**: a bare alias (`haiku`) fails the turn on 2.1.292 (`unrecognized_model` → `model_fallback` → an error answer). Ids reported in `usage.model` (main and subagent steps) work. Subagent spawns *do* resolve aliases. |
+| Model per request | `turn.step` → `next({ ...e, model })` | ⚠ **full ids only**: a bare alias (`haiku`) fails the turn on 2.1.292 (`unrecognized_model` → `model_fallback` → an error answer). Ids reported in `usage.model` (main and subagent steps) work. Subagent spawns *do* resolve aliases. Since 1.8 Project Sentinel sets no model on a main-conversation request: only a subagent's, at its spawn (§7, *Agent Model Policy*). |
 | Store scope | `$.store` | One store per plugin name and source (`~/.claude/plugins/store/<name>_<source>-<hash>.json`, the hash the first 12 hex digits of the SHA-256 of `<name>@<source>`; the source `inline` for a folder or a directory marketplace loaded in place); every `--plugin-dir` load of `project-sentinel` shares one. |
 | A renamed plugin and its store | the marketplace's `renames` (`{ "control-room": "project-sentinel" }`); `$.fs.read` of the former store's file once | ✅ in an isolated configuration (2.1.293): `claude plugin marketplace update` rewrote `enabledPlugins` to the new name, the next session installed and loaded it, and the carry-over (`app/formerStore.ts`: at the first load, before a setting is read, the configuration folder from `CLAUDE_CONFIG_DIR`, `USERPROFILE` or `HOME`, else the session's transcript path at its start; of the candidate files, the one written last) copied the settings, the cache memory, the Quest log and a run, renumbering the new one. The old file is only read. |
 | Two copies in one session | Claude Desktop hands a Code tab session its plugins once, when its process starts (the SDK's `plugins`, loaded as `<name>@inline` from the paths in `installed_plugins.json`); when that file changes it sends `reload_plugins` to every live session (idle ones at once, busy ones when their turn ends), which keeps those and adds what `enabledPlugins` names | ✅ seen live (1.4.0-rc.1, Claude 2.26454, Claude Code 2.1.293): after `claude plugin marketplace update control-room` the idle sessions ran Control Room 1.3.0 and Project Sentinel side by side, Project Sentinel on its defaults. Since rc.2 Project Sentinel reads Control Room's `hud` in `$.state` when it loads and, if Control Room published one, stands by: every hook passes its event on until the session restarts. |
 | The cache's lifetime on a plan | `$.session.usage().rateLimits` naming `five_hour` or `seven_day` windows | Read as a claude.ai plan, whose default prompt-cache lifetime is one hour: used below anything learned or reported, never stored, corrected by a miss after five idle minutes. |
 | Prompt cache figures | `turn.step` answer `usage` (`input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `model`) for each main-thread request | ✅ in the engine harness and live. ⚠ Claude Code keeps its own tracker (expiry, hit ratio, misses and their causes), but hands it only to the **status line** (`prompt_cache` in its input), never to a mod: `$.session.usage()` has context, rate limits and cost only. So Project Sentinel derives the same figures from the usage and names them as derived. Checked live against the status line's `prompt_cache` (1-hour cache, Sonnet 5.5): the derived expiry within a second of the engine's, the hit ratio identical (0.62185) once Keep warm's refreshes are left out of it, as the engine leaves them. |
-| Cache lifetime and a confirmed model switch | `classic.PreModelSwitch` (`prompt_cache_warm`, `cache_ttl`, `context_tokens`, `estimated_cache_write_usd`) answering `permissionDecision: 'ask'` with a reason; `classic.PostModelSwitch` (`from_model`, `to_model`, `cache_ttl`, `source`) | ✅ live on 2.1.293 (143k warm, Sonnet → Opus): Claude Code asks "Switch model?" with the hook's reason and Yes / No; declining keeps the model and the cache. ⚠ The reason is drawn on one line and cut at the terminal's width, so it is kept short. After the switch, the lifetime as Claude Code reports it, and the rebuild named as Claude Code names it (model and effort changed, 143k re-cached). |
+| Cache lifetime and a confirmed model switch | `classic.PreModelSwitch` (`prompt_cache_warm`, `cache_ttl`, `context_tokens`, `estimated_cache_write_usd`) answering `permissionDecision: 'ask'` with a reason; `classic.PostModelSwitch` (`from_model`, `to_model`, `cache_ttl`, `source`) | ✅ live on 2.1.293 (143k warm, Sonnet → Opus): Claude Code asks "Switch model?" with the hook's reason and Yes / No; declining keeps the model and the cache. ⚠ The reason is drawn on one line and cut at the terminal's width, so it is kept short. After the switch, the lifetime as Claude Code reports it, and the rebuild named as Claude Code names it (model and effort changed, 143k re-cached). ⚠ A switch made through `set_model` (Desktop's model picker, Remote Control, an IDE) reaches both hooks with `source: 'sdk'`, for which Claude Code documents no dialog: 1.7 let it through unasked, which is why switches in Desktop went unwarned. Since 1.8 it is traced and caught at the next message (§7, *Model / effort cache guard*), in the runtime suite and the engine harness only: not yet driven in the Desktop app. |
 | Keep the cache warm | `$.model.fork({ prompt })` from a `$.clock.after` timer | ✅ live on 2.1.293 (Sonnet 5.5, 1-hour cache): a fork re-sends the main thread's last request plus one user message, never added to the transcript (0 rows), and returns the request's usage. The engine counts a fork that reads the cache as a *touch*, not a request: its own expiry moved 05:38 → 05:44 → 06:34 with each refresh (requests stayed 2). A real prompt 66 minutes after the last one, past the expiry the refreshes replaced, read the cache (0 misses), and Keep warm marked itself verified. Each refresh of an 87k context cost about $0.02. On a 5-minute cache too: the probe learned the lifetime (it found the cache gone, as a probe past five minutes must), refreshes every four minutes read the whole 141k, and a prompt after a replaced expiry hit. ⚠ Claude Code's own tracker touches the expiry only for a fork that *reads* the cache, so after a probe that rebuilt it the status line says cold while the cache is warm (the next refresh read all of it). `nothing-to-fork` before the first response. |
 | A drawing with its own clock | a `Client` element naming a surface module, written `<ui.Client module="./kit.client.tsx" />` with `const ui = $.ui.resolve(e)` (the directory reads a `Client` taken out of the table as one with no fixed path); the module gets `surface.every`, `setState`, `onPointer`, `post`; `ui.message` carries its posts to the hooks module | ✅ terminal, live in a real console (Kit through a demo turn, clicks). Desktop runs the module in its own page (a frame with Claude Code's runtime): pointer events in cells of 1ch × 1lh, its local state kept across redraws under one key; a hand-made `{ type: 'Svg', props }` element is accepted in its tree (at most 2000 nodes, depth 32, scalar props; an `Svg` source up to 131072 characters). Chromium decodes a fresh data-URL image before its first paint (60 of 60), and Desktop replaces the region's DOM per render, so an image per frame does not flicker. No `ui.fault` hook: it is not on the directory's list of events; a module that cannot draw posts `{ fault }` instead. |
 | Graphics on Desktop | `Svg` with `source`, `alt`, `width`, `height`; `isInteractive` draws it in a script-less sandboxed frame instead of an image | ⚠ A frame with no `width` takes the browser's default (300 px), and a frame whose color scheme differs from the page's is painted opaque: 1.2.0's animated work track showed as a white bar on Desktop. So Project Sentinel draws every graphic as an image and never asks for a frame: with an explicit size. Kit's lane asks for a width half as wide again as its region (at most 4096 px), so the image's `max-width: 100%` makes its box the region's width, and stretches its drawing to that box (a region is counted in cells of 1ch, whose size a module never learns). ⚠ A surface module's tree is checked by Desktop's page more strictly than a hooks module's: there an `Svg` needs both `width` and `height` (positive, at most 4096 px), and only `Box`, `Text`, `div`, `span`, `b`, `Svg`, `Button`, `Input` and `Select`, with scalar props, at most 2000 nodes, 32 deep, 262144 characters as JSON; a tree that fails it is not drawn at all ("returned a tree the page cannot draw"). 1.5.0's lane gave no width and was refused in the app; `tests/fixtures/desktop.ts` holds the page's check, and every Kit frame in the tests passes it. (SMIL animates inside a plain image too, but an image that animates itself restarts from its own beginning whenever it is replaced: 1.3.0's Kit teleported back at each mood change. Kit is now an image per frame from its surface module.) |
@@ -47,8 +49,10 @@ versions, with a prototype mod. Log excerpts are in the development notes.
 | What a stopped turn leaves running | `classic.Stop` input `background_tasks` (id, type, description) and `session_crons` (schedule, recurring) | ✅ in the engine harness (2.1.293): the status bar says *Waiting for …* instead of *done* while a job or a wake-up will bring the turn back. |
 | The project's Git state | `$.session.repo()` (the repository root, or null) and `$.process.run(['git', 'status', '--porcelain=v1', '--branch', ...], { timeoutMs: 10_000 })` | ✅ live in a real console: `master · clean`, then `master · 4 uncommitted` after a turn that changed four files. |
 | The plan's usage windows | `$.session.usage().rateLimits` and `session.measure`'s `rateLimits`: `{ kind, percentUsed, resetsAt? }` per window (`five_hour`, `seven_day`, a gateway's `spend_limit`); `changed` names `'rateLimits'` when a window moves a whole point, appears or leaves; `classic.StopFailure` `error` (`rate_limit`, Claude Code's word for a request it ended on the limit) | ✅ live on 2.1.296 (a headless probe, and a real interactive terminal): `[]` before a headless session's first response (an interactive one had a reading at its start), then `five_hour` 47% resetting 04:20Z and `seven_day` 17%; `session.measure` fired with `'rateLimits'` in `changed` as the window moved; readings carry across `/clear`; empty off a subscription. ⚠ Pull-only between responses: nothing fires when a window's reset time passes, so the countdown is drawn from `resetsAt` on a one-minute tick while a window counts down. `StopFailure` `rate_limit` is declared since 2.1.289 and handled; no limit was reached live. |
-| Background work across `/clear` | `classic.Stop` `background_tasks` (`id`, `type`, `status`, `description`, `command`); the end of each task as a `prompt.submit` with origin `task-notification` | ✅ live on 2.1.296: shells started before `/clear` are listed by the fresh context's Stop, and a task's `<task-notification>` arrives in the fresh context and starts a turn there; a background agent resumed there. A server started with no timeout ran about 25 minutes across `/clear`, with no notification (nothing bounds it); one started with a 45 s timeout was killed at 45 s and reported `killed`. A headless session's exit does not stop its background shells. |
+| Background work across `/clear` | `classic.Stop` `background_tasks` (`id`, `type`, `status`, `description`, `command`); the end of each task as a `prompt.submit` with origin `task-notification` | ✅ live on 2.1.296: shells started before `/clear` are listed by the fresh context's Stop, and a task's `<task-notification>` arrives in the fresh context and starts a turn there; a background agent resumed there. A server started with no timeout ran about 25 minutes across `/clear`, with no notification (nothing bounds it); one started with a 45 s timeout was killed at 45 s and reported `killed`. A headless session's exit does not stop its background shells. Claude Code 2.1.319 fixed `/clear` killing background agents' commands (its changelog). |
 | Agents as Claude Code lists them | `$.agent.list()` (`AgentInfo`: id, status, parent, name, type, teammate address); `agent.spawn` (type, description, model, background, fork, `parentAgentId`, `workflow`); the agent loop's `tool.call`, `turn.step` and `turn.complete` carrying its `agentId` | ✅ live on 2.1.296: a background agent and a foreground one are listed as soon as the spawn's `next` resolves; a child names its parent (the parent reads `waiting` meanwhile); ended agents stay listed `completed` for a while, then go. ⚠ A workflow's agents (`workflow-subagent`, `workflow: { runId, agentIndex }`; 2.1.289's declarations have no `workflow`, so it is read through a cast) are **never** listed: only their loop's events and their `turn.complete` show them, and the Workflow run itself is a background task of type `workflow`. |
+| Subagents' own starts, ends and compactions | `classic.SubagentStart` (`agent_id`, `agent_type`), `classic.SubagentStop` (`agent_id`, `agent_type`, `last_assistant_message`); `session.compact` with an `agentId` (its answer's `tokensAfter`) | In the runtime suite over the in-memory host (1.8), not yet seen live. The engine's own forks (compaction, memory) run loops whose calls carry agent ids with no SubagentStart. ⚠ Claude Code reports no context usage per subagent, and no max-turns end: `turn.complete`'s reasons are `answer`, `aborted`, `refusal` and `error`, so a stop on a turn limit cannot be told apart. |
+| The session's advisor | `$.command.list()` (each command's `name`, `description`, `source`); `$.command.run({ command: 'advisor', args })` and a `command.run` hook on `advisor`; `$.settings.read()`'s `advisorModel`; a `turn.step` answer's `serverToolUses` named `advisor` | ✅ read live on 2.1.325 (headless): `/advisor` is listed, with no models (its argument hint does not reach a plugin), and `advisorModel` reads back. Setting it was not run live: it changes the person's own settings. `--advisor` sets it for one launch, which a settings read does not see. |
 | A small question of a separate model | `$.model.classify(text, labels)`: one isolated request that sees only `text`, answered with one of `labels` | ✅ live on 2.1.296: asked once, after a minute of waiting, about `python ingest_daemon.py` (a listener no rule recognises), with its command and Claude Code's description only (never the conversation); it answered `persistent_service` and the handoff went on. In the engine harness too; a failure or an unclear answer leaves the task waited for. |
 | A milestone's file evidence | `$.fs.stat` per file; `$.process.run(['git', 'hash-object', '--no-filters', '--', ...paths])` (Git's blob id of each file, at most 50 a call, 10 s) and `['git', 'rev-parse', '--verify', '-q', 'HEAD']` (5 s) | ✅ in the engine harness (a modeled workspace and Git's answers). Only blob ids come back; Project Sentinel never reads a file's content. `git hash-object` hashes outside a repository too (checked by hand); HEAD is then left out. |
 
@@ -82,8 +86,8 @@ Platform constraints discovered and designed around:
 | Surface element | Mechanism | Terminal | Desktop |
 | --- | --- | --- | --- |
 | **Status bar** (persistent) | `ui.render` `AbovePrompt` band, yields to surveys; or `$.ui.status`. Two lines: what Claude is doing with the plan's five-hour usage (`5H ▂▂▂▂▂▂ 63% · 2h14m`; the run's cost moved to Overview, Context and `/cr status`) and the panel button, then the three lifecycles (Context, Work, Cache) and the checks; graphics as glyphs, SVG on Desktop | ✅ | ✅ |
-| **Agent band** (temporary) | the same band, above the status bar, only while subagents run: a line per agent (at most three, then counted by what they do), each opening Activity → Agents; gone when none run | ✅ | ✅ |
-| **Alert line** (temporary) | the same band, above the status bar, while something needs the person: a handoff due, waiting for background work (Hand off now, Stop & hand off, Keep waiting once stalled or in the wait's last five minutes, Call off) or stuck (the supervisor's ways out), a watcher due, a held message, the budget | ✅ | ✅ |
+| **Agent band** (temporary) | the same band, above the status bar, only while subagents run: a line per agent with its model (at most three, then counted by what they do), each opening Activity → Agents; gone when none run | ✅ | ✅ |
+| **Alert line** (temporary) | the same band, above the status bar, while something needs the person: a handoff due, waiting for background work (Hand off now, Stop & hand off, Keep waiting once stalled or in the wait's last five minutes, Call off) or stuck (the supervisor's ways out), a handoff loop prevented (Recheck, Continue here, Start fresh, Pause Autopilot), a model window changed unexpectedly (Use Claude Code's limit, Switch back, Pause Autopilot), a watcher due, a held message, the budget | ✅ | ✅ |
 | **Kit** (optional) | a row under the status bar: a `Client` surface module in the terminal, a self-animating SVG on Desktop | ✅ | ✅ (SVG) |
 | **Launcher / sidebar** | `Pane` `control-room`: docked beside the transcript in the fullscreen TUI, inline otherwise; placed by Desktop | ✅ | ✅ |
 | **Control Room panel** | the same pane: six sections drawn by the design system (`ui/primitives.tsx`) | ✅ | ✅ (native controls, SVG meters) |
@@ -117,7 +121,8 @@ plugins/project-sentinel/
     commands.ts / actions.ts      /cr sub-commands; the panel's actions
     opsCommands.ts                /cr queue, watch, watchers, decisions, decide, budget, resume, agents
     operations.ts                 the orchestration layer at work (§10): boundaries, deliveries, timers,
-                                  the Cold Resume Guard, the budget gate, agents' controls, its views
+                                  the Cold Resume Guard, the model switch guard at a message, the budget
+                                  gate, agents' controls and evidence, its views
     persist.ts                    store reads/writes (settings, runs, index), debouncing, pruning; whether an
                                   install without saved settings was used before (`hasPriorUse`); the
                                   first-run card's record (`onboarding.v1`)
@@ -130,19 +135,30 @@ plugins/project-sentinel/
     formerStore.ts                the one-time carry-over from the store kept as Control Room; standby beside it
   hooks/core/
     settings.ts                   schema, defaults (`defaultSystems`: a fresh install's; `classicSystems`: those
-                                  before 1.7.0), the `defaults` generation, normalisation (clamps, a saved allow
-                                  → default; a stored record read against Classic)
-    profiles.ts                   built-in (Normal, Classic, Frontier Max, Low Resource, Release / QA) + custom
-                                  profiles, labelled diffs
+                                  before 1.7.0), the permission sets (`NATIVE_PERMISSIONS`: every category
+                                  Default; `LEGACY_PERMISSIONS`: the Ask/Deny set before 1.8), the `defaults`
+                                  generation, normalisation (clamps, a saved allow → default, an unreadable
+                                  permission → its Guarded state; a stored record read against Classic; a 1.7
+                                  `router` read into `agentModels`)
+    profiles.ts                   built-in (Normal, Guarded, Frontier Max, Low Resource, Release / QA, Classic)
+                                  + custom profiles, labelled diffs
     policy.ts                     effective() snapshot (the priority system) + system-prompt sections
     answers.ts                    answer styles in the panel's words: labels, hints, sample lines, notes
     format.ts / text.ts / version.ts
   hooks/features/
-    autopilot.ts                  threshold maths + pure state machine (events → model + effects)
+    autopilot.ts                  threshold maths + pure state machine (events → model + effects); the
+                                  circuit breaker (`loopReason`)
+    contextEpoch.ts               context epochs: which context a usage reading belongs to (proven, provisional,
+                                  set aside), what Autopilot may act on; the context window's sanity check
+    handoffArtifact.ts            the handoff notes' one verdict (valid, present, stale, empty, missing,
+                                  uninspectable): the places to look, the three proofs, the trace lines
     background.ts                 each background task's class (persistent, finite, agent, unknown) and why,
                                   from Claude Code's own words for it; the isolated classifier's labels
+    dependencies.ts               background work a handoff left running: a dependency of the run, kept across
+                                  any number of handoffs until Claude Code reports its end
     supervisor.ts                 the Handoff Supervisor: a handoff's diagnosis (status, what holds it, the ways
-                                  out), the step due at a wait's end, the tasks to ask the classifier about
+                                  out, what it does next, the notes' state), the step due at a wait's end, the
+                                  tasks to ask the classifier about
     intent.ts                     handoff-control words in a short message ("handoff now", "keep waiting")
     planUsage.ts                  the plan's five-hour and seven-day windows from Claude Code's readings: reset,
                                   limit, absent; the status bar's and Context's view of them
@@ -150,7 +166,12 @@ plugins/project-sentinel/
                                   the comparison with the workspace (current, changing, stale, re-baselined)
     chain.ts                      run + session records, totals (reported costs only)
     guard.ts                      premature-exit heuristics, thresholds, repeat detection
-    router.ts                     task classes, tables, main/subagent routing, model families
+    agentModels.ts                the Agent Model Policy: a spawn's kind of work (its agent type, then its
+                                  description's words), the model for it; a 1.7 router's subagent choices
+    modelGuard.ts                 the model / effort cache guard: model ids compared (`[1m]` left out, an alias
+                                  inconclusive), which effort changes rebuild a cache, layers 2 and 3's verdicts
+    advisor.ts                    Claude Code's advisor: the models offered (`/advisor`'s own words, else the
+                                  documented ones, unconfirmed), `advisorModel`, the pairing with a main model
     subagents.ts                  spawn decisions, live counts
     activity.ts                   tool-call tracker, changed files and hunks, refusals and reasons, summary line
     plan.ts                       the run plan from Claude's task tools (TodoWrite, TaskCreate/Update/List), progress
@@ -158,7 +179,8 @@ plugins/project-sentinel/
     digest.ts                     signal: change groups, Attention, the turn in counted lines, what Claude is doing now
     quest.ts                      Quest log: XP table, levels, achievements, validation of the stored quest
     cache.ts                      the prompt cache model: observeRequest, miss causes and kinds, the TTL
-                                  learned, nextRefresh (Keep warm's schedule), the stored cache.v1
+                                  learned, nextRefresh (Keep warm's schedule), keepWarmTiming (its two
+                                  clocks as the person reads them), the stored cache.v1
     handoff.ts                    Handoff Health and Continuity: healthOf, continuityOf, the stored record
     companion.ts                  Kit: its mood from the status bar's state, and the props for its module
     git.ts                        `git status --porcelain=v1 --branch` parsed into a line
@@ -169,7 +191,8 @@ plugins/project-sentinel/
     resume.ts                     resume health and the Resume Preview
     scout.ts                      the Watcher Scout (an explicit wait read from milestones or Claude's words)
     agents.ts                     the agent ledger: each agent from its spawn, reconciled with Claude Code's list,
-                                  fed by its loop's calls, steps, plan and end; rows, the hierarchy, the band
+                                  fed by its loop's calls, steps (model, effort), plan and end, SubagentStart and
+                                  SubagentStop, its own compactions; rows, the hierarchy, the band
     permissions/                  shell tokenizer, category classifier, decisions + invariants
     resources/                    samplers + parsers (Windows/macOS/Linux), pressure, heavy commands
   hooks/ui/                       design system (primitives.tsx, theme.ts, kit.ts: the view kit, not
@@ -194,10 +217,12 @@ sites redraw. No feature module touches `$`.
 
 | Layer | Holder | Survives | Contents |
 | --- | --- | --- | --- |
-| Settings | `$.store` `settings.v1` (normalised on load) + module memory | everything | active profile, per-system settings, custom profiles; `defaults`, the generation of defaults the record was saved under (absent before 1.7.0, read as 1; 2 now), which keeps an upgrade from reading an older record against the new defaults |
+| Settings | `$.store` `settings.v1` (normalised on load) + module memory | everything | active profile, per-system settings, custom profiles; `defaults`, the generation of defaults the record was saved under (absent before 1.7.0, read as 1; 2 for 1.7.0; 3 now, 1.8's Guardrails left to Claude Code), which keeps an upgrade from reading an older record against the new defaults |
 | First run | `$.store` `onboarding.v1` | everything | written only on a fresh install: when the first-run card first showed, and when the person dismissed it (*Got it*) |
 | Run / chain | `$.store` `run.v1.<id>` + `runs.index.v1` + `runs.counter.v1` | `/clear`, reload, restart | run id, sessions (ids, times, peak context, cost, turns, model, end reason, transitions); 30 runs × 60 sessions kept |
-| Run plan and objective | inside the run record (`plan`, `objective`) | `/clear`, reload, restart | Claude's milestones as its task tools left them; the objective as Claude stated it, else the person's latest substantial request |
+| Run plan and objective | inside the run record (`plan`, `objective`) | `/clear`, reload, restart | Claude's milestones as its task tools left them; the objective as Claude stated it, else the person's latest substantial request. Since 1.8 open milestones of earlier sessions are kept until a later list names them (a reworded title is matched), Claude marks them `dropped`, or new work begins; Claude Code's task ids name a task of their own session only |
+| Run dependencies | the run record's `dependencies` (1.8, read through `dependenciesOf`) | `/clear`, any number of handoffs, reload, restart | background work a handoff left running: Claude Code's task id, its description, its class, the session that left it and when, and once Claude Code reports it, its end, status and the session the end arrived in; at most 20, an ended one listed for a day |
+| Clear in flight | `$.store` `handoff.pending.v1` (1.8) | a reload or a restarted process during Project Sentinel's own `/clear` | the run, the session it leaves, the project root, whether a handoff or a fresh start, and the first prompt the fresh context is owed. The runtime that ran the clear deletes it once it saw the fresh session; a runtime that loads after the clear, in another session of the same root within 30 minutes, adopts the run and delivers that prompt once (never once a turn ran there) |
 | Milestone evidence | inside the run record (`evidence`, validated by `evidenceOf` whenever the run is read from the store) | `/clear`, reload, restart | `work`: per milestone under way, when it began and the files its work changed (at most 12) and the outputs Claude named (at most 10); `snapshots` (at most 30): per completed milestone, when and in which session it was verified, its green checks (kind, label, command, when; at most 6), its files (path, Git blob id, size, modification time, whether it is documentation), HEAD, later changes seen (at most 24), the last comparison's status and changes, what re-baselined it. Never file contents. |
 | Quest log | `$.store` `quest.v1`, and the run record's `quest` | everything | lifetime XP, achievements with when each was earned, the last 8 awards; per run, its XP and the milestones already paid for |
 | Prompt cache memory | `$.store` `cache.v1` | everything | the cache lifetime learned (`5m` or `1h`) and how; Keep warm's verdict on itself and when; the short model names on which an effort change was seen to rebuild the cache (at most 12) |
@@ -206,7 +231,7 @@ sites redraw. No feature module touches `$`.
 | Last handoff | the run record's `lastHandoff` | `/clear`, reload, restart | when, from and to which session, how (clear, compact, manual), Handoff Health's checks (with *Verification current* and the work left running), the milestone under way then, the plan's count, the tasks left running (each one's end, once its notification reached the fresh context), and Continuity's checks once the fresh context's first turn ended |
 | Handoff in flight | `$.state` `autopilot` (`{ record }`) | hot reload only (gone after restart or `/clear`) | the Autopilot step under way, when it began (`stateSince`), retries, a snooze; the background tasks waited for with their class, the wait's bounds (`waitSince`, `waitUntil`), `skipWait`, the work left running: what a reload needs to carry the handoff on instead of starting a second one |
 | Agent ledger | `$.state` `agents` | hot reload only | each agent seen this session: its spawn's facts, status, parent, workflow run, calls, latest activity, plan, end |
-| Live session | module memory (`Runtime`) | `/clear` (module stays loaded) | context, cost, the plan's usage windows (re-read from `$.session.usage()` at load), autopilot machine and the supervisor's last diagnosis, guard counters, activity, changes, resources, agents, learned model ids; this context's cache state (requests, misses, Keep warm's refreshes; reset at a fresh context); the Git state |
+| Live session | module memory (`Runtime`) | `/clear` (module stays loaded) | context, cost, the plan's usage windows (re-read from `$.session.usage()` at load), autopilot machine and the supervisor's last diagnosis, guard counters, activity, changes, resources, agents, learned model ids and the families refused this session; the context epoch (§6; a new one at each boundary; a fresh runtime after a reload starts one marked `reload`); the notes' baseline and the writes seen; the last main request's model and effort, a switch the person confirmed; the advisor as last read; this context's cache state (requests, misses, Keep warm's refreshes; reset at a fresh context); the Git state |
 | View models | `$.state` atoms `hud`, `pane`, `resources`, `chain`, `activity`, `permissions`, `focus`, `spinner`, `ops` | hot reload (re-published after `/clear`) | render-ready projections only |
 
 On hot reload `session.start` fires again: settings and run are re-read from
@@ -237,11 +262,15 @@ computed from settings + live state, in this order (higher wins):
    boundary and the handoff turn; no new large work is encouraged.
 5. **Resource Governor** — constrains *how* (parallelism, heavy jobs), never
    *whether*; applies under Frontier Max too.
-6. **Subagent Control** — hard spawn limits; Frontier/Router cannot exceed.
-7. **Frontier Max** — behaviour + max effort; vetoes Router economy
-   downgrades of the main loop (unless the person customises the router).
+6. **Subagent Control** — hard spawn limits; Frontier Max and the Agent
+   Model Policy cannot exceed them.
+7. **Frontier Max** — behaviour + the chosen effort where the model takes
+   one; never switches the main model.
 8. **No-Lazy-Exit Guard** — subordinate to 3–6 and to its own loop limits.
-9. **Model Router** — acts only where nothing above constrains.
+9. **Agent Model Policy** — subagents only, a model per kind of work, set at
+   the spawn and only where nothing above refused it; never the main
+   conversation. (1.8 removed the Model Router, which also switched the main
+   conversation's model.)
 10. **Focus View** — presentation only; never changes what Claude reads.
 
 Overview shows each system's *effective* state with the reason when it
@@ -253,7 +282,7 @@ The UI's design decisions are recorded in [DESIGN.md](DESIGN.md).
 ```
 off ─enable→ armed ─(context ≥ threshold: mid-turn from turn.step usage, or after the turn)→
 pending ─(main turn completes, not aborted)→ requested ─($.prompt.submit handoff prompt)→
-handoff ─(handoff turn completes, its Stop lists nothing in flight)→ verifying ─(NEXT_SESSION_PROMPT.md freshly written)→
+handoff ─(handoff turn completes, its Stop lists nothing in flight)→ verifying ─(the notes' verdict: valid for this handoff)→
 clearing ─($.command.run clear; classic.SessionStart{clear}, before or after it resolves; prompt.context seeds the fresh context)→
 resuming ─(continuation prompt submitted, turn starts)→ armed (new session, same run)
 
@@ -268,9 +297,14 @@ waiting-background ─(supervisor: nothing blocking left, session quiet 30 s)→
 waiting-background ─(the person: Hand off now / "handoff now" / /cr handoff now)→ verifying (work left running)
 pending / requested / handoff / waiting-background / awaiting ─(the person: Call off)→ armed (snoozed)
 
+armed ─(this context's proven size past the point, but a loop: the circuit breaker)→ awaiting (Handoff loop prevented)
+awaiting (loop) ─(Recheck · /cr autopilot recheck)→ armed (only this context's next proven reading decides)
+
 clearing ✗ (refused, or no fresh session in 15 s) → compacting (if allowed) → resuming
                                                → else awaiting [Start fresh context · /cr fresh]
-verifying ✗ (file not written)        → one corrective prompt, then awaiting (no clear)
+verifying ✗ (notes missing, empty or stale) → one corrective prompt, then awaiting (no clear);
+                                        notes written after that are checked at once, and the handoff goes on
+verifying ✗ (notes uninspectable)     → awaiting (no clear; /cr fresh force asks before starting fresh)
 continuation = manual                 → awaiting after a verified handoff
 aborted by the person                 → stays pending (no auto action) + HUD actions
 handoff / waiting-background / awaiting, nothing moving it → /cr fresh: checked, then clearing (or why not)
@@ -367,7 +401,13 @@ for named work, checking, starting fresh). `/cr fresh` recovers a handoff
 no event will move on (`handoff` after its turn ended unseen, `waiting-background`
 with nothing left in flight, `awaiting`) through the same verified clear
 path, never blindly: work in flight, or notes not written since the handoff
-began, keep the context, and the words say which.
+began, keep the context, and the words say which. Since 1.8 `/cr fresh` also
+starts from notes written in this context when no handoff is under way (1.7
+refused them: "no handoff is under way"); `/cr fresh force` asks in Claude
+Code's question dialog (*Start fresh anyway* / *Keep this context*) before it
+starts from notes Project Sentinel could not verify, and clears nothing where
+no one can be asked (headless). "Start fresh now" typed during a handoff goes
+to the same path, never into the old context.
 
 **A reload mid-handoff.** A hot reload or `/reload-plugins` starts a fresh
 Runtime, whose module memory is empty. Every step of the machine is
@@ -381,7 +421,99 @@ or may not have happened (`requested`: the handoff prompt about to go out;
 `compacting`) waits for the person instead of being repeated. The context
 crossing the threshold again never starts a second handoff.
 
-* Threshold: exact tokens or % of the live window; clamped below Claude
+**A reload during Project Sentinel's own `/clear`** (1.8). Just before the
+clear, the run is written and a marker kept in the store
+(`handoff.pending.v1`: the run, the session it leaves, the root, the first
+prompt the fresh context is owed). The runtime that saw the clear through
+deletes it. A runtime that loads after the clear instead (a reload, a
+restarted process) finds no run for its new session, adopts the run from the
+marker (the same root, another session, within 30 minutes), rolls it over and
+gives the fresh context its continuation or resume prompt once, when the fresh
+session's start is reported or 4 s after the load, never once a turn ran
+there. Tested: twelve handoffs in one run stay coherent.
+
+**Context epochs** (1.8, `features/contextEpoch.ts`). Run state carries
+across contexts (objective, milestones, evidence, decisions, queue, watchers,
+background dependencies, history); context usage does not. Each real
+boundary opens a new epoch: Project Sentinel's own handoff `/clear`, a fresh
+start, a `/clear` by the person, a compaction, a resume, a session start of
+any source. A new epoch's size is unknown until a request made in it is
+answered: `turn.step` stamps each request with the epoch it was made in, and
+an answer to a request made before the boundary is set aside. A compaction's
+`tokensAfter` and a resumed transcript's `context_tokens` prove the new size
+at once (the engine counted it). Session-level figures (`session.measure`,
+`$.session.usage()`) never prove an epoch and never move a proven one; one
+equal (within 1%, at least 2k) to the previous epoch's last figure is that
+epoch's echo, and is rejected. Autopilot acts only on `trustedTokens`, null
+while the epoch is unproven, so an old context's size can never hand a fresh
+one off, and a fresh context that really grows (it read a huge file) is
+measured by its own requests. A fresh runtime after a plugin reload, where
+no boundary was seen, starts an epoch marked `reload`: the session's figure is
+shown provisionally, drawn with `~`, and never acted on. The window is the
+model's fact and carries across epochs. The debug log says each epoch
+(`context: opened …`, `context: proven by a request …`, `context: set aside …`).
+
+**The handoff notes' verdict** (1.8, `features/handoffArtifact.ts`,
+`Runtime.inspectNotes`). One verdict for every reader: the handoff's check
+before the clear, `/cr handoff`, `/cr fresh`, the supervisor, Ready to resume
+and the panel. It stats every place the notes may be: the configured root now,
+the working directory (a Desktop worktree lives under
+`<root>/.claude/worktrees/`), the repository root, the root at load, and
+wherever Claude's editing tool wrote a file of that name; Windows paths are
+compared without case, POSIX paths with case. States: `valid`, `present` (a
+file, and no handoff began in this context to compare it with), `stale`,
+`empty`, `missing` and `uninspectable` (a stat error other than "no such
+file" is never `missing`). Three proofs that the notes are this handoff's,
+any one enough: Claude's own write seen during the handoff; a change since
+the handoff began (created, size, time or `git hash-object`'s blob id, from a
+snapshot of each place taken at the handoff's start); the time (modified
+after the handoff began, less 5 s of slack). The baseline is the handoff's
+first turn: a retry or a restart never moves it. A shell write (Bash, a
+Python script) is a hint, never proof: the disk decides. Notes Claude writes
+after Project Sentinel asked again are checked at once, and the handoff goes
+on by itself. The prompts name the exact path; the debug log lists each place
+looked at and what was there (`notes: …`). It stats more paths than 1.7 and
+runs `git hash-object` on the notes file.
+
+**The circuit breaker** (1.8, `loopReason` in `features/autopilot.ts`). At
+the threshold, before a handoff starts: after three handoffs into fresh
+contexts within 30 minutes (sessions the run started by a handoff), or in a
+fresh context that reaches its handoff point within two turns without growing
+past its room (or with no proven starting size), the handoff is refused and
+Autopilot waits (`awaiting`, *Handoff loop prevented*, with why). The person
+chooses: *Recheck* (`/cr autopilot recheck`: only this context's next proven
+reading decides), *Continue here*, *Start fresh*, or *Pause Autopilot*
+(`/cr autopilot pause`, this session only; `resume` undoes it).
+
+**The context window's sanity** (1.8, `windowAnomaly`). A window that
+shrinks to under three quarters of what it was, under a model switch and with
+no boundary to explain it, while the context already holds more than the new
+window's handoff point (or a context larger than its window), would make
+Autopilot hand off at once, and again. Autopilot holds instead (*Model window
+changed unexpectedly*: the previous model and window, the new ones, why; the
+debug log adds the host's version); the person uses Claude Code's limit (`/cr window accept`),
+switches back (`/cr window back`, Claude Code's own `/model`) or pauses
+Autopilot for the session (`/cr window pause`). The hold lifts by itself only
+when the session is back on the previous model and window. Project Sentinel
+never forces a 1M window the host does not report. Claude Code 2.1.323
+changed the default window of a model it does not know from 200K to 1M (its
+changelog); an older bundled engine likely read Fable 5.2 as 200K. Tested
+with synthetic telemetry only.
+
+**Background work across handoffs** (1.8, `features/dependencies.ts`). Work
+still running when a handoff goes on (a server, a watcher, finite work past
+its wait) becomes a dependency of the run, in its record, kept across any
+number of handoffs until Claude Code's notification of its end arrives
+(recorded with the session it ended in). A later handoff never waits for it
+again (Claude Code's Stop still lists it; the task is marked `isCarried`). The
+fresh context's block says what still runs and since which session. Nothing
+here waits, polls or wakes anything. The Handoff Supervisor says, for each
+look, the phase and how long it has stood, the blocker, the notes' state,
+what is persistent, finite or unknown, the wait's deadline, and what Project
+Sentinel does next.
+
+* Threshold: exact tokens or % of the live window, against this context's
+  proven size (Context epochs, above); clamped below Claude
   Code's own auto-compact threshold (warned in the UI).
 * **Room for a fresh context** (`handoffPoint`, `roomOf`). A context after
   a handoff or a clear is *orienting* until it starts working: Project Sentinel
@@ -412,17 +544,20 @@ crossing the threshold again never starts a second handoff.
   counted from tool calls only, kept in the run record (`lastHandoff`) and
   shown in Context → *Last handoff*.
 * Keep warm stands down only once the old context is about to be discarded
-  (`keepWarmStandDown`): the notes check before a clear, the clear itself,
-  the fresh context resuming. A handoff that is due, under way, waiting for
-  background work or for the person, or a context past the threshold keeps
-  the cache warm: each of those still reads the old context again (1.6.3 stood
-  down for them, and a stuck handoff let a 775k cache lapse). A handoff that
-  compacts keeps it throughout.
+  (`keepWarmStandDown`): the clear itself (`clearing`) and the fresh context
+  resuming. A handoff that is due, under way, waiting for background work or
+  for the person, checking its notes (`verifying`: the check may fail and ask
+  Claude again, which re-reads the old context; 1.7 stood down there), or a
+  context past the threshold keeps the cache warm: each of those still reads
+  the old context again (1.6.3 stood down for them, and a stuck handoff let a
+  775k cache lapse). A handoff that compacts keeps it throughout.
 * After `/clear`: `classic.SessionStart{clear}` marks the fresh context
   (and is passed on unchanged); the plugin invalidates `prompt.context`, and
   the fresh context's first message carries one block, `contextAutopilot`,
-  once: the run and session numbers, where the handoff file is, and the run
-  plan's milestones and objective, so the fresh context rebuilds its task
+  once: the run and session numbers, where the handoff file is (the place the
+  verdict found it valid, when that is not the configured one), the run
+  plan's milestones and objective, and the background work still running
+  (with the session that left it, when earlier), so the fresh context rebuilds its task
   list and work progress carries on (the policies are in the system prompt);
   the continuation prompt asks Claude to read project docs +
   `NEXT_SESSION_PROMPT.md` and continue; ask the person only for decisions
@@ -447,7 +582,11 @@ crossing the threshold again never starts a second handoff.
   (the first sentence of the person's latest substantial request) live in
   the run record, so they survive `/clear`, reloads and restarts; after a
   handoff the continuation context names the open milestones so the fresh
-  context records them again. Progress is done of total, never estimated.
+  context records them again. Since 1.8 a new session's first list no longer
+  drops the open milestones of earlier sessions: they are kept until a later
+  list names them (a reworded title is matched), Claude marks them `dropped`
+  (a status the milestones tool takes), or new work begins; Claude Code's task
+  ids name a task of their own session only. Progress is done of total, never estimated.
   `validation.ts` and `digest.ts` turn the same tool calls into Activity's
   checks, Attention, change groups and the "now" line.
 * **Answer styles** — `answers.style` adds one policy section
@@ -483,14 +622,70 @@ crossing the threshold again never starts a second handoff.
   heuristics are unsure; `{ block }` with the specific unfinished items;
   per-turn and per-session caps, `stop_hook_active` respected, suspended by
   autopilot handoff, aborts, plan mode, background work in flight.
-* **Model Router** — off by default. Subagent model selection via
-  `agent.spawn` (cache-neutral; aliases, which the engine resolves);
-  main-loop routing decided once per turn (never per step), only while the
-  switch is cheap (≤ 60k context unless upgrading hard work), a small-window
-  model only under 150k, never downgrading under Frontier Max, and only to a
-  full model id the engine has reported answering in this session (`usage.model`
-  of any main or subagent step), because a request with a bare alias fails.
-  A refused model's family is disabled for the session.
+* **One long context, one main model** (1.8). A prompt cache belongs to one
+  model: a request on another model reads none of the conversation's cache
+  and writes it all again. So nothing of Project Sentinel's sets the main
+  conversation's model; it stays the one chosen in Claude Code. The Model
+  Router (until 1.7) routed the main loop per turn, and each switch re-sent a
+  long run's whole context uncached, against what Cache Guardian keeps warm:
+  it was removed (`features/router.ts` deleted; `/cr router` explains).
+* **Agent Model Policy** (`features/agentModels.ts`, 1.8) — off by default.
+  A subagent's model by its kind of work: explore / search, research,
+  planning / architecture, implementation, debugging, review / QA, security,
+  general. At `agent.spawn`, after Subagent Control allowed it, `categoryOf`
+  reads the spawn's agent type (`Explore`, `Plan`, a plugin's agent), then the
+  words of its description (no model call); a per-agent-type override comes
+  before the kind. Each choice is `agent` (the agent's own definition's model,
+  or Claude's choice: the spawn is left alone), `session` (the parent's model),
+  or `haiku`, `sonnet`, `opus` (the full id seen answering in this session, else
+  the alias, which a spawn resolves) or `fable` (only once an id was seen
+  answering). Left alone: a model Claude named in its Agent call, a fork (it
+  runs on its parent's), a workflow's agents (the script's). An agent the
+  policy gave a model that answers nothing and does not stop was refused: that
+  family is not asked for again this session. Turned on with every kind at
+  `agent`, it starts from `SUGGESTED`. A subagent starts a fresh, isolated
+  context, so its model never touches the main conversation's cache. Each
+  decision is traced (`agent models: …`) and the latest shown in Behavior →
+  Models.
+* **Model / effort cache guard** (`features/modelGuard.ts`, 1.8), in four
+  layers, none enough alone. (1) `classic.PreModelSwitch`: a `/model` or picker
+  switch (`source` `command`, `picker`) over 100k or more warm cached tokens is
+  confirmed in Claude Code's own dialog; a `set_model` switch (`sdk`: Desktop's
+  picker, Remote Control, an IDE) has no documented dialog, so it is traced and
+  left to (2). (2) `prompt.submit` (`Operations.switchGuard`, after the Cold
+  Resume Guard's checks): the session's model read again (`$.session.model()`)
+  against the model the warm cache was made on; armed, Claude Code's question
+  dialog asks *Model switch*: *Switch back* (Claude Code's own `/model`, then
+  the message, once), *Send anyway*, *Start fresh* (while the resume state is
+  healthy), *Cancel* (the message back in the prompt box). A switch confirmed
+  in Claude Code's dialog or by *Send anyway* is not asked again. (3)
+  `turn.step`, before each main request: its model and effort against the last
+  request's; nothing is changed (the request is the person's), the change is
+  traced, and a large rebuild nobody confirmed is said in a toast. (4) Cache
+  Guardian's request fingerprint names the proven cause of a rebuild. Model ids
+  are compared without the `[1m]` suffix; an alias against an id of the same
+  family is *inconclusive*, never asked on. Effort: Claude Code's docs say
+  Fable 5.1 and later, Opus 5.5, Sonnet 5.5 and Haiku 5.5 keep their cache
+  across effort levels; other models likely rebuild; a rebuild seen on this
+  machine is learned (`cache.v1`). Thinking settings are undocumented: traced,
+  never guessed. No event announces an effort change before a request, so
+  effort is observed only at `turn.step`. Each layer traces (`model guard: …`).
+* **Advisor** (`features/advisor.ts`, 1.8). Claude Code's `/advisor
+  <model|off>` turns on its server-side advisor tool, a stronger model the
+  main model consults at key moments; it saves `advisorModel` in the user
+  settings. `$.command.list()` gives a plugin only each command's name,
+  description and source (seen live on 2.1.325), no models: the documented
+  ones (fable, opus, sonnet) are offered marked unconfirmed until `/advisor`'s
+  own reply names this account's ("Usage: /advisor <…>"), which is learned;
+  no `/advisor` listed reads *not available*. It is set only on the person's
+  choice, through Claude Code's own `/advisor`, then `advisorModel` is read
+  back: the panel shows the setting, never what was asked; a `/advisor` the
+  person runs is read back too (the `command.run` hook). Consults are counted
+  from each answered request's `serverToolUses` named `advisor`, main and
+  subagents, per context. It is session-level: subagents inherit it where
+  Claude Code pairs it with their model (the advisor must rank at or above
+  it); there is no per-subagent advisor, and none is offered. Changing it
+  keeps the cached prefix.
 * **Subagent Control** — off by default; Off (offer hidden + spawn denied),
   Ask (`$.ui.ask`, fails closed headless), Max N (the agent ledger's alive
   agents, plus a slot held from each spawn's decision until it settles, so two
@@ -514,7 +709,18 @@ crossing the threshold again never starts a second handoff.
   (`ui/pane/agents.tsx`, `hierarchyOf`) draws them under their parents; the
   agent band (`bandOf`) draws up to three lines above the status bar, more
   counted by what they do. No percent and no cost per agent: neither is
-  observable.
+  observable. Since 1.8 Claude Code's classic hooks are evidence too:
+  `classic.SubagentStart` makes a row for an agent whose spawn this runtime
+  never saw (begun before a reload, or in another hook frame), and
+  `classic.SubagentStop` ends one whose end was not otherwise seen (an end
+  already seen stands). `session.compact` with an `agentId` is the agent's own
+  compaction (a count, the last time, the size left). The engine's own forks
+  (compaction, memory) run loops with agent ids and no SubagentStart: no row is
+  ever made from calls alone; such loops are counted, and *No subagents in this
+  context* is said only when nothing at all was seen. Each agent's requests
+  give its model and effort; the band names the model (`researcher · Sonnet ·
+  reading docs · plan 2/4 · 3m`). Claude Code reports no context usage per
+  agent, so none is shown, and the view's footer says so.
 * **Focus View** — compact one-line tool rows, hidden results and inline
   diffs by default when on; reveal per Focus toggle, the Activity tab and
   Activity → Changes (per-file hunks from `structuredPatch`, `<Code format="diff">`).
@@ -536,28 +742,46 @@ crossing the threshold again never starts a second handoff.
   question dialog (`$.ui.ask`) and passes the call on after a yes. Nothing
   answers a permission check. Shell commands are tokenized and every segment
   classified; the strictest wins.
-* **Profiles** — Normal, Classic, Frontier Max, Low Resource, Release/QA +
-  custom; shown as an explicit diff; individual overrides mark the profile
-  modified. Normal is a fresh install's defaults (`defaultSystems`), Classic
-  the defaults before 1.7.0 (`classicSystems`); Frontier Max, Low Resource
-  and Release/QA are built on Classic, as they always were.
+* **Profiles** — Normal, Guarded, Frontier Max, Low Resource, Release/QA,
+  Classic + custom; shown as an explicit diff; individual overrides mark the
+  profile modified. Normal is a fresh install's defaults (`defaultSystems`),
+  Classic the defaults before 1.7.0 (`classicSystems`); both take Claude Code's
+  own permissions (`NATIVE_PERMISSIONS`, every category Default, 1.8). Guarded
+  is Normal with the Ask/Deny set Project Sentinel had by default before 1.8
+  (`LEGACY_PERMISSIONS`). Frontier Max, Low Resource and Release/QA are built
+  on Classic, as they always were, and keep that set (Release/QA asks for
+  commits too), so a person who applied one before 1.8 does not find it
+  "edited".
 * **Fresh-install defaults and the upgrade** (`Runtime.settleDefaults`, at the
   first load, after the former store's carry-over is looked for). No
   `settings.v1` and no sign of earlier use (`hasPriorUse`: a run counter, a
   run index, the cache's memory or the Quest log in the store; `migrated.v1`
   proves nothing, it is written at every first load): a fresh install, so the
-  new defaults are saved with `defaults: 2`, `onboarding.v1` is written,
+  new defaults are saved with `defaults: 3`, `onboarding.v1` is written,
   Overview shows the first-run card until *Got it*, and one toast says what is
   on. No `settings.v1` but earlier use (an install that never changed a
   setting): Classic is saved, so nothing changes. A `settings.v1` without
   `defaults` (saved before 1.7.0): read against Classic (`normalizeSettings`,
   so a group an older version never saved is not switched on), a profile
-  `normal` relabelled `classic`, every value untouched, `defaults: 2` saved.
+  `normal` relabelled `classic`, every value untouched. Then, for any record
+  below generation 3, the Guardrails step (1.8): only permissions exactly
+  equal to the old built-in set (`LEGACY_PERMISSIONS`) under the profile
+  `normal` or `classic` move to Default (`NATIVE_PERMISSIONS`), announced once
+  ("Guardrails now leave every action to Claude Code's own permissions
+  (Default). Your earlier built-in Ask/Deny set is the Guarded profile
+  (Setup), if you want it back."); a value the person changed, a stricter
+  built-in profile and custom profiles are kept; `defaults: 3` is saved, and
+  the debug log says which (`settings: defaults generation 2 → 3; permissions …`). A stored
+  permission that cannot be read falls back to its state in the old set, the
+  stricter reading, never a looser Default.
   Control Room's store, carried over at the same first load, still wins over
   the fresh-install defaults written moments before (`isFreshDefaults`): that
-  install is not fresh, so its card and record are removed. The permission
-  defaults did not change (2 Deny, 6 Ask, the rest Default); Guardrails
-  shows each value with "· default" or, changed, in amber with its default.
+  install is not fresh, so its card and record are removed. Since 1.8 a fresh
+  install's permissions are all Default: Project Sentinel overrides nothing,
+  and Claude Code's permission mode and rules decide (not "allow
+  everything"). Guardrails reads Default as "Claude Code decides (its
+  permission mode and rules)" and a stricter choice as "Project Sentinel adds
+  this on top of Claude Code", quietly: until 1.8 a changed value was amber.
 * **Five-hour plan usage** (`features/planUsage.ts`) — the status bar's cell
   that held the run's cost. Readings come from `session.measure`'s
   `rateLimits` (pushed when a window moves a point) and
@@ -615,7 +839,7 @@ crossing the threshold again never starts a second handoff.
   what it means: a request that reads less than half of the prompt the one
   before it sent missed the cache (prompts under 4,096 tokens are ignored).
   The cause is the change seen before it, in order: compaction (expected),
-  a model switch (by the person, the engine, or the router), changed
+  a model switch (by the person or the engine; 1.7's router too), changed
   policies, the output style, the tools offered (`$.tool.list` at each turn
   start), an effort change; else idling past the lifetime; else
   *unexplained*. A change made after the cache had surely lapsed is not
@@ -630,19 +854,26 @@ crossing the threshold again never starts a second handoff.
   the context is worth keeping (`cache.minTokens`, 20k), no handoff is about
   to clear it, and the idle limit is not reached (`cache.maxIdleMinutes`,
   capped at 45 for the five-minute cache, past which refreshing costs more
-  than one rebuild). A refresh is `$.model.fork` with a one-word answer
+  than one rebuild). Two clocks, never mixed (`keepWarmTiming`, 1.8): the
+  cache's lifetime is renewed by each request or refresh that reads it; the
+  idle allowance counts from the last turn's end, and a refresh never resets
+  it (the next turn's end starts it again). While Claude works it has not
+  started. A watcher holding the cache (`holdUntil`) carries it past the
+  allowance to a minute after its wake. Context → Cache and `/cr cache` read
+  both clocks out, the allowance asked for and the one in force with why, as
+  readings only. A refresh is `$.model.fork` with a one-word answer
   asked for. It checks itself: the first request after the expiry a
   refresh replaced must still read the cache; if it does, Keep warm is
   verified, and if it does not, Keep warm stops, as it does after two
   refreshes sent in time that found the cache gone. The verdict is kept in
   `cache.v1` until the person turns Keep warm on again. *Ask before a model
-  switch* answers PreModelSwitch with `ask` when a switch the person makes
-  would re-send 100k or more warm tokens. *Keep policies stable* holds
+  switch* answers PreModelSwitch with `ask` when a `/model` or picker switch
+  would re-send 100k or more warm tokens, and gates the question at a message
+  (layer 2 of the *Model / effort cache guard*, above). *Keep policies stable* holds
   Project Sentinel's system-prompt section while the cache is warm and sends a
   setting change as a hidden note instead (and a second note when the
   settings go back). An effort change on a model where one was seen to
-  rebuild the cache is announced. The router does not downgrade the main
-  conversation while 20k or more tokens are warm.
+  rebuild the cache is announced.
 * **Kit** — `features/companion.ts` is pure: a mood from the status bar's
   state and the time (`moodOf`) and the props for Kit's module
   (`companionView`: the mood and its caption, the calm switches, whether a
@@ -708,18 +939,24 @@ behaviour (never looser than without Project Sentinel). Store corruption →
 defaults with a one-time notice. Sampler failure → monitoring "unavailable"
 while the static policy still applies. Clear failure → compact fallback or
 the START FRESH CONTEXT action. Model classification failure → heuristics
-only. Unknown future events/props → passed through untouched.
+only. Unknown future events/props → passed through untouched. Notes that
+cannot be looked at → `uninspectable`, never `missing`, and nothing is
+cleared. A *Switch back* Claude Code refuses → the held message goes back to
+the prompt box: it is sent once or not at all.
 
 ## 9. Testing strategy
 
-* `claude plugin test` (576 tests in 33 files, run on 2.1.296 and on 2.1.289, and in CI on the latest
-  Claude Code for Linux, Windows and macOS and on 2.1.289 for Linux). The
+* `claude plugin test` (1.8: 649 tests in 40 files on 2.1.325 and on 2.1.289; 1.7.0: 576 in 33
+  files on 2.1.296 and on 2.1.289, and in CI on the latest
+  Claude Code for Linux, Windows and macOS and on 2.1.289 for Linux; CI has not run the 1.8 branch
+  yet: its workflow needs a manual dispatch). The
   tests live in the repository's `tests/`, outside the plugin folder (which
   Anthropic's directory scans, and which ships only the plugin);
   `tools/test/mod.mjs` copies the plugin and `tests/` into `.build/mod` and
   runs `tsc` and `claude plugin test` there. Suites:
   pure-logic suites (settings, profiles, permissions classifier, guard
-  heuristics, resource parsers, Autopilot reducer, router, chain, activity,
+  heuristics, resource parsers, Autopilot reducer, the Agent Model Policy,
+  the model / effort cache guard, context epochs and the notes verdict, chain, activity,
   the cache model, handoff health and continuity, the former store's
   carry-over, Kit's moods, its behaviour model and both renderers, Git's
   parser),
@@ -733,16 +970,20 @@ only. Unknown future events/props → passed through untouched.
   card's title) with the world answered beneath the mod. Engine-driven tests
   start Project Sentinel's own turns with the text framed as Claude Code frames a
   plugin's prompt, since the test kit passes the bare text.
-* `tsc` against the engine-written declarations of 2.1.293 (and earlier of
-  2.1.292 and 2.1.289).
+* `tsc` against the engine-written declarations of 2.1.325 and 2.1.289 (1.8;
+  earlier of 2.1.293, 2.1.292 and 2.1.289).
 * `claude plugin validate --strict` (plugin) and `claude plugin validate .`
   (marketplace), and `tools/test/source.mjs`: the source rules Anthropic's
   directory reads (no local `h`/`Fragment`, no `name('!', VALUE)` calls, no
   accessors, no tests in the plugin folder, every `Client` with a fixed
-  path).
+  path). `npm run validate` (`tools/test/validate.mjs`) validates a copy of
+  the plugin folder without the declarations Claude Code lays beside it for
+  development (`.claude-plugin/types/`, `tsconfig.json`; git-ignored): with
+  them in place the validator's own type-check runs past its 2048 MiB limit
+  on 2.1.325, which `--strict` reports as a failure.
 * Live headless stream-json runs (the Desktop host protocol) of the final
   plugin: the full Autopilot chain on 2.1.292 and 2.1.289; Permission Deny,
-  subagent block, Router learning and routing, and the Windows sampler on
+  subagent block, the Model Router's learning and routing (removed in 1.8), and the Windows sampler on
   2.1.292; a live resource-pressure notice that Claude acted on (2.1.289).
 * Terminal UI in a real console (Windows conhost at 150, 120 and 100
   columns, docked and in the frame above the prompt): the status bar and
@@ -843,6 +1084,30 @@ only. Unknown future events/props → passed through untouched.
   30-second budget: the kit's 5 s default timed out on a machine shared with
   other sessions. Unit harnesses that predate 1.7.0 start from
   `classicSettings()`, the defaults they were written against.
+* 1.8's hardening pass: `repro.test.ts` (real long-run failures replayed
+  against the Runtime as Claude Code raises them: notes written yet reported
+  missing, a fresh context told it was at the old ~701k, a 1M → 200k window
+  change handing off again and again, handoff after handoff with no growth,
+  `/cr fresh` refusing notes written in this context, Keep warm standing down
+  for the notes check, the router switching the main model, a Desktop
+  `source: sdk` switch going through unasked, *No subagents* while an agent's
+  loop acted; 18 of its 19 tests fail on 1.7.0, checked in a 1.7.0 worktree,
+  the 19th a positive control), `epoch.test.ts` (context epochs, the notes
+  verdict, the notes baseline, the circuit breaker), `supervisor.test.ts` (a
+  multi-hour render across three contexts, a confirmed fresh start from
+  notes that could not be verified, what the supervisor says happens next,
+  the session-only Autopilot and window commands), `models.test.ts` (the
+  model / effort cache guard, pure and in the runtime), `agentmodels.test.ts`
+  (the Agent Model Policy), `agentsplus.test.ts` (SubagentStart and
+  SubagentStop, an agent's compactions and effort, Resume, *No subagents*
+  only when nothing was seen), `keepwarm.test.ts` (Keep warm's two clocks),
+  and `chaos.test.ts`: one run across three fresh contexts with everything at
+  once (its header lists what it holds and checks). `router.test.ts` went with
+  the router. Live on 2.1.325, headless, with a renamed copy of the plugin:
+  `/cr models`, `/cr advisor`, `/cr router`, and `/advisor` read. Not
+  verified: the Desktop app itself (preview and headless only), model switches
+  and handoffs against a real model (synthetic only), setting the advisor
+  live, CI.
 * Not yet done: the answer styles with a real model, and live sampling on
   macOS and Linux.
 
@@ -897,8 +1162,16 @@ again at the wake; a warm hold makes Keep warm refresh past its idle limit and t
 to the wake (`nextRefresh`'s `holdUntil`). A warm wake over a cache that went cold asks, unless
 Smart and healthy resume state allow a fresh wake.
 
-**The Cold Resume Guard** runs first in `prompt.submit`, before the budget's question and before
-any context is added. It returns `{ drop }` for every choice but *Continue*, so nothing has entered
+**The Cold Resume Guard** runs in `prompt.submit` after the handoff guard (`Runtime.handoffGuard`),
+before the budget's question and before any context is added. Every message traces why it did or
+did not arm (`cold resume: …`, 1.8): delivered into a running turn, a turn running, a message that is
+not the person's own (only `composer`, `bridge` and `sdk` origins are guarded; a task notification,
+a scheduled trigger, a peer or a channel is not), Project Sentinel's own prompt, no surface to ask
+on, then the cache's facts (`warm until`, `lapsed at`, or `lifetime unknown` and the idle minutes;
+Claude Code's own side request; under the threshold). With no surface known, the surfaces are read
+again before giving up (Desktop may attach after the load). Not armed, the message goes on to the
+model switch guard (§7). Armed while the session is on another model than the cache's, it asks once,
+as a cold resume that says the model changed too. It returns `{ drop }` for every choice but *Continue*, so nothing has entered
 when it asks; *Cancel* (and a dismissed dialog) puts the text back with `$.prompt.fill` after
 400 ms, or keeps it in memory where the host has no box. *Start fresh* and *Compact first* carry the
 message into the fresh or compacted context (`freshStart`'s prompt; `submitAsUser` once
@@ -923,9 +1196,13 @@ milestone` adds a note with the next tool results. It never cancels anything.
 `starting`) and are reconciled with Claude Code's list (`$.agent.list`, read at load, before a spawn's limit is
 decided and after the spawn settles, at an agent's end, at a Stop, when a control opens one of
 Activity's views, and every 2 s from any spawn while an agent is alive); the agent's own loop (`tool.call`, `turn.step`, `turn.complete` with
-its `agentId`) feeds its activity, model, plan and end. The ledger is mirrored in `$.state` `agents`,
-so a reload keeps it. Stop is `$.tool.call({ tool: 'TaskStop', task_id })`, Message is
-`$.session.send({ to: { agentId } })`; both offered only for background agents and teammates.
+its `agentId`) feeds its activity, model, effort, plan and end; `classic.SubagentStart`,
+`classic.SubagentStop` and an agent's own `session.compact` add to it (1.8, §7). The ledger is
+mirrored in `$.state` `agents`, so a reload keeps it. Stop is `$.tool.call({ tool: 'TaskStop',
+task_id })`, Message is `$.session.send({ to: { agentId } })`; both offered only for background
+agents and teammates. Resume (1.8) is the same `$.session.send` to a finished subagent's id, which
+Claude Code resumes from its transcript: offered for one this session saw end, never for a
+workflow's agent, a fork or a teammate.
 
 **Ended runs.** A run ended by `session.end` keeps its operations inert: its timers stopped with the
 process, and a new run never reads them. `findForeign` offers the newest ended run of the same

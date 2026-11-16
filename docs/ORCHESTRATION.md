@@ -6,7 +6,11 @@
 > model (the changelog's *Verified live* lists what was proven, and how). **1.7.0**
 > moved the agents to a view of their own (Activity → Agents, and a band above the status bar while
 > they run), and gave the Mission Queue a third way in: a message typed while a written handoff
-> waits, which the person sends on to the fresh context.
+> waits, which the person sends on to the fresh context. The **1.8** hardening pass (branch
+> `sentinel-hardening-1.8`, not released) carries the run across any number of contexts while each
+> context's usage stays its own, keeps background work as a dependency of the run across handoffs,
+> and follows agents through every channel Claude Code offers ([Across contexts](#across-contexts-18),
+> [Agents](#agents-activity--agents)).
 
 How Project Sentinel orchestrates a long run over time: work queued for later, decisions Claude
 leaves for the person, runs parked until a result is due, the cost of coming back to a cold cache,
@@ -55,8 +59,8 @@ the band is gone.
 
 | Belongs to | Survives | Holds |
 | --- | --- | --- |
-| **The run** (its record in the plugin store) | `/clear`, Autopilot handoffs, a reload of the plugin, a resumed session, a watcher's sleep and wake | Mission Queue, Decision Inbox, Watchers, Run Budget, run progress |
-| **The context** (module memory, reset at a fresh context) | a reload (through `$.state`, as 1.5.0 kept the policy section) | context use, the prompt cache, what this context was told |
+| **The run** (its record in the plugin store) | `/clear`, Autopilot handoffs, a reload of the plugin, a resumed session, a watcher's sleep and wake | Mission Queue, Decision Inbox, Watchers, Run Budget, run progress and its objective, milestone evidence, the background work earlier handoffs left running (1.8), the run's history |
+| **The context** (module memory, reset at a fresh context) | a reload (through `$.state`, as 1.5.0 kept the policy section) | context use (unknown in a new context until a request made in it is answered, 1.8), the prompt cache, what this context was told |
 | **The process** (Claude Code's own agent list, and Project Sentinel's agent ledger beside it) | the ledger survives a reload (through `$.state`); the list is read again | the agents running, and those that ended in the last ten minutes |
 
 A run is the work of one `claude` process, or of a session resumed into it (1.0's rule). An
@@ -86,6 +90,64 @@ put them), then the rest. Each starts its turn; the next waits for that turn's e
 A prompt is marked delivered when Claude Code says it entered the session (`$.prompt.submit`
 resolves without a drop). One that was on its way when the plugin reloaded is never sent again by
 itself: it reads *Sent before a reload, check the transcript* with **Send again**.
+
+## Across contexts (1.8)
+
+A long run outlives many contexts: Autopilot hands off, the person clears, a watcher wakes fresh,
+Claude Code compacts. What the run holds carries across all of them; what a context measured stays
+with that context. The mechanisms are in
+[ARCHITECTURE.md](ARCHITECTURE.md#6-context-autopilot-state-machine).
+
+**Usage belongs to its context.** Each real boundary opens a new context epoch: Project Sentinel's
+own handoff `/clear`, a fresh start, a `/clear` by the person, a compaction, a resume, a session
+start. A new context's size is unknown until a request made in it is answered; Claude Code's
+session-level figures never prove it (seen in a real run: right after a handoff, the fresh context
+was told it had reached its handoff point at the old context's ~701k). Autopilot acts only on
+proven figures. After a plugin reload, where no boundary was seen, the session's figure is shown
+with `~` and never acted on.
+
+**A handoff never loops.** After three handoffs into fresh contexts within 30 minutes, or when a
+fresh context reaches its handoff point within two turns without growing past its room, Autopilot
+refuses the next handoff and waits: *Handoff loop prevented*, with why. The person chooses:
+**Recheck** (`/cr autopilot recheck`: only this context's next proven reading decides), **Continue
+here**, **Start fresh**, or **Pause Autopilot** (`/cr autopilot pause`, for this session only;
+`/cr autopilot resume`). A context window that shrinks under a model switch (a 1M model reported as
+200k) while the context holds more than its new handoff point holds Autopilot the same way (*Model
+window changed unexpectedly*: `/cr window accept|back|pause`).
+
+**One verdict on the notes.** The handoff's own check, `/cr handoff`, `/cr fresh`, the supervisor,
+Ready to resume and the panel read one verdict on `NEXT_SESSION_PROMPT.md`: written for this
+handoff, on disk, not updated for this handoff, empty, missing, or could not be inspected (a file
+that could not be looked at is never called missing). It looks wherever the notes may be (the
+project root now and at load, the working directory, which in a Desktop worktree session is under
+`<root>/.claude/worktrees/`, the repository root, wherever Claude's editing tool wrote them) and
+takes Claude's own write, a change since the handoff began, or the time as proof. Notes Claude
+writes after Project Sentinel asked again are checked at once, and the handoff goes on by itself.
+`/cr fresh` starts the fresh context from notes written in this context; `/cr fresh force` asks
+(*Start fresh anyway* / *Keep this context*) before it starts from notes Project Sentinel could not
+verify, and clears nothing where no one can be asked.
+
+**Background work across handoffs.** A handoff never waits for hours. Finite work still running
+when the wait runs out (20 minutes by default), and every server or watcher, is left running for the
+fresh context: Claude Code keeps background work across `/clear` and delivers its end to whichever
+context is current then. Each such task becomes a dependency of the run, kept across any number of
+handoffs until Claude Code's notification of its end arrives (recorded with the session it ended
+in); it never holds a later handoff. Each fresh context is told what still runs and since which
+session. The Handoff Supervisor (deterministic, no model call, about every 30 seconds while a
+handoff is under way) says the phase and how long it has stood, what holds it, the notes' state,
+which work is persistent, finite or unknown, the wait's deadline, and what Project Sentinel does
+next. Keep warm holds the old context's cache through all of it (the handoff due, written, waiting,
+its notes checked) and stands down only when the clear is imminent and while the fresh context
+resumes.
+
+**Queue, decisions and watchers carry on.** They are the run's, so a handoff, a `/clear` or a reload
+changes none of them: work queued *After the handoff*, answers and open decisions go into the fresh
+context's first message; a watcher keeps its checkpoint, so a context cleared since it was armed
+makes it ask instead of waking by itself. Open milestones of earlier sessions are carried until a
+later list names them (a reworded title is matched), Claude marks them `dropped`, or new work
+begins. A reload during Project Sentinel's own `/clear` loses nothing: a marker in the store
+(`handoff.pending.v1`) lets the runtime that loads next adopt the run and give the fresh context
+its continuation once. Tested: twelve handoffs in one run stay coherent.
 
 ## Mission Queue (person → Claude)
 
@@ -225,8 +287,14 @@ starts once the held prompt is dropped, and the message goes once the compaction
 either, the copy Claude Code puts back in the prompt box is cleared, so the message goes once.
 *Cancel* sends nothing and puts the message back in the prompt box (or, where the box cannot take
 it, keeps it in Needs review with **Put back** and **Send now**). The guard is off for prompts typed
-while Claude works (its requests keep the cache warm) and where no one can be asked (a headless
-run).
+while Claude works (its requests keep the cache warm), where no one can be asked (a headless
+run), and for messages that are not the person's own (a task notification, a scheduled trigger, a
+peer, a channel); where Desktop attached after the plugin loaded, its surface is looked for again
+before the guard gives up (1.8). When the session is also on another model than the cache's, it
+asks once, as a cold resume that says the model changed too; a switch over a cache that is still
+warm is the model switch guard's question instead
+([CONFIGURATION.md](CONFIGURATION.md#prompt-cache-cache), *Ask before a model switch*). Every
+message says in the debug log why the guard did or did not arm (`cold resume: …`).
 
 ## Resume state and Resume Preview
 
@@ -257,12 +325,37 @@ it last did anything and its model; a task list or milestones it keeps in its ow
 or why it stopped. A workflow's agents are never in Claude Code's list (seen live): they show from
 their spawn and their loop's events, grouped under their run, and end with it.
 
+**More evidence** (1.8). Claude Code's SubagentStart gives a row to an agent whose spawn this
+runtime never saw (one begun before a reload, or in another hook frame), and its SubagentStop ends
+one whose end was not otherwise seen. The engine's own forks (compaction, memory) run loops with
+agent ids and no SubagentStart: no row is ever made from calls alone; such loops are counted, and
+*No subagents in this context* is said only when nothing at all was seen. Each agent's requests
+give its model and effort; the band above the status bar names the model (`researcher · Sonnet ·
+reading docs · plan 2/4 · 3m`).
+
+**A subagent's own context.** Each subagent has its own context and compacts it natively, in its
+own window: Project Sentinel shows its compactions (how many, the last, the size left) and no
+usage, because Claude Code reports no context usage per agent; the view's footer says so. Claude
+Code exposes no max-turns flag (an agent's end is an answer, aborted, a refusal or an error), so a
+stop on a turn limit cannot be told apart. Project Sentinel never runs its `NEXT_SESSION_PROMPT.md`
+handoffs inside a subagent: Autopilot hands off the main conversation only. A `/clear` of the main
+session does not end background agents' work (Claude Code 2.1.319 fixed `/clear` killing
+background agents' commands), and does not reset the agent ledger (module memory outlives
+`/clear`).
+
+**Models.** With the Agent Model Policy on (Behavior → Models; off by default), a subagent runs on
+the model set for its kind of work, read from its spawn (its type, then the words of its
+description; no model is asked). The main conversation's model is never changed. See
+[CONFIGURATION.md](CONFIGURATION.md#agent-model-policy-agentmodels).
+
 Shown: the hierarchy (children under their parent, a workflow's agents under their run), name and
 type, model, status, elapsed time, current activity and when it last acted, calls, its plan, result
 or failure. Controls: **Stop** (Claude Code's `TaskStop`, which takes background agents and
-teammates by id) and **Message** (Claude Code's own `SendMessage` delivery, `$.session.send`, for
-agents that take messages), only where Claude Code accepts them; its refusal is shown as it words
-it. No percent complete made up from time or calls, no cost per agent (Claude Code reports none), no
+teammates by id), **Message** (Claude Code's own `SendMessage` delivery, `$.session.send`, for
+agents that take messages) and, since 1.8, **Resume** (the same delivery to a finished subagent,
+which Claude Code resumes from its transcript: offered for one this session saw end, never for a
+workflow's agent, a fork or a teammate), only where Claude Code accepts them; its refusal is shown
+as it words it. No percent complete made up from time or calls, no cost per agent (Claude Code reports none), no
 invented status. The view is in Activity's second row only while agents run or ran in the last ten
 minutes; Operations keeps one line leading to it, as do the agents chip, `/cr agents` and
 Guardrails. After a reload the ledger is kept (`$.state`) and the list read again; an agent first

@@ -9,7 +9,7 @@
  *   4. Context Autopilot handoff                               — suspends the guard
  *   5. Resource Governor                                       — how, not whether
  *   6. Subagent Control                                        — hard spawn limits
- *   7. Frontier Max                                            — vetoes economy downgrades
+ *   7. Frontier Max                                            — policy and effort; never the model
  *   8. No-Lazy-Exit Guard
  *   9. Agent Model Policy                                      — subagents only, never the main conversation
  *  10. Focus View                                              — presentation only
