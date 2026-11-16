@@ -81,7 +81,7 @@ export const LIMITS = {
 } as const
 
 /** The plugin's version, as in its manifest (kept in step on release). */
-export const VERSION = '1.7.0'
+export const VERSION = '1.8.0'
 
 /** Version floor this release was verified on (Desktop 2.1.289, CLI 2.1.292). */
 export const MIN_ENGINE = '2.1.289'

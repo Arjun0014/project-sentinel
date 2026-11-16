@@ -7,9 +7,8 @@ made. Written before implementation, kept current.
 
 Target platform: Claude Code function-hooks plugins ("mods"), verified on
 **2.1.289** (the minimum), **2.1.292**, **2.1.293**, **2.1.296** (the CLI on
-this machine for the 1.7.0 hardening pass) and **2.1.325** (for the 1.8
-hardening pass on branch `sentinel-hardening-1.8`, not released: the version is
-still 1.7.0). The mods API is early access; the
+this machine for the 1.7.0 hardening pass) and **2.1.325** (for the 1.8.0
+hardening pass). The mods API is early access; the
 generated declarations (`.claude-plugin/types/claude-code/index.d.ts`) are the
 authority.
 

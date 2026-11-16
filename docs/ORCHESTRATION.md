@@ -6,8 +6,8 @@
 > model (the changelog's *Verified live* lists what was proven, and how). **1.7.0**
 > moved the agents to a view of their own (Activity → Agents, and a band above the status bar while
 > they run), and gave the Mission Queue a third way in: a message typed while a written handoff
-> waits, which the person sends on to the fresh context. The **1.8** hardening pass (branch
-> `sentinel-hardening-1.8`, not released) carries the run across any number of contexts while each
+> waits, which the person sends on to the fresh context. The **1.8.0** hardening pass
+> carries the run across any number of contexts while each
 > context's usage stays its own, keeps background work as a dependency of the run across handoffs,
 > and follows agents through every channel Claude Code offers ([Across contexts](#across-contexts-18),
 > [Agents](#agents-activity--agents)).

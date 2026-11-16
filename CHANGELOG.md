@@ -6,10 +6,9 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and ver
 `plugins/project-sentinel/.claude-plugin/plugin.json` and in `.claude-plugin/marketplace.json` must
 match. `claude plugin tag plugins/project-sentinel` checks this when tagging a release.
 
-## [Unreleased]
+## [1.8.0] - 2026-11-16
 
-A second hardening pass for long runs across many contexts (branch `sentinel-hardening-1.8`; not released, the
-version is still 1.7.0). One long context now means one main model and one stable prompt cache: Project Sentinel
+A second hardening pass for long runs across many contexts. One long context now means one main model and one stable prompt cache: Project Sentinel
 no longer switches the main conversation's model, and guards every way a model or effort change can rebuild a large
 warm cache. Context usage belongs to the context it was measured in, while the run carries across any number of
 contexts; the handoff notes are judged in one place, wherever they really are. Agents are tracked through every
@@ -130,7 +129,7 @@ and Sonnet) checked the Desktop-style model switch, the Agent Model Policy and w
 
 ### Seen live (Claude Desktop app, Code tab, its Claude Code 2.1.325, 2026-11-16)
 
-- The installed copy was replaced with this branch's build under two open sessions. An idle session (Haiku 5.5)
+- The installed copy was replaced with this build, before its release, under two open sessions. An idle session (Haiku 5.5)
   picked it up in place, without a restart. Its Control Room (the person's screenshot) showed the Models card as
   built: *Main conversation*: chosen in Claude Code, never switched by Control Room; *Cache protection* On;
   *Agent models by kind of work* Off; *Advisor* Off, session-wide, inherited by subagents. The status bar's

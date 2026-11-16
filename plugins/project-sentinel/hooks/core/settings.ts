@@ -219,7 +219,7 @@ export function defaultSystems(): SystemSettings {
  */
 export const DEFAULTS_GENERATION = 3
 
-/** A fresh install's settings: Normal, the 1.7.0 defaults. */
+/** A fresh install's settings: Normal, the 1.8.0 defaults. */
 export function defaultSettings(): Settings {
   return {
     version: 1,
