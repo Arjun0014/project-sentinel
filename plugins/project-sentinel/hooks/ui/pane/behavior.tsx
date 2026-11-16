@@ -42,7 +42,8 @@ function advisorRow(k: Kit, a: PaneModel['models']['advisor']) {
         ? 'A stronger model Claude can consult at key moments. Session-wide: subagents inherit it'
         : [a.pairing !== null && !a.pairing.isPaired ? `Not used: it ${a.pairing.text}` : used === 0 ? 'Not consulted yet in this context' : `Consulted ${used}× in this context${a.agentUses > 0 ? ` (${a.agentUses} by subagents)` : ''}`, a.lastSet !== null && a.lastSet.outcome !== 'applied' ? `last change not applied: run /advisor ${a.lastSet.to}` : null].filter(Boolean).join(' · ')
   if (a.available === null) return row(k, { key: 'mo-advisor', label: 'Advisor', subtitle, value: a.configured ?? 'Not available', valueTone: 'muted' })
-  const options = [{ value: 'off', label: 'Off', hint: 'no advisor' }, ...a.available.map(m => ({ value: m, label: m.charAt(0).toUpperCase() + m.slice(1), hint: 'consulted at key moments' }))]
+  const hint = a.isConfirmed ? 'consulted at key moments' : 'if this account has it: Claude Code says if not'
+  const options = [{ value: 'off', label: 'Off', hint: 'no advisor' }, ...a.available.map(m => ({ value: m, label: m.charAt(0).toUpperCase() + m.slice(1), hint }))]
   return row(k, {
     key: 'mo-advisor',
     label: 'Advisor',

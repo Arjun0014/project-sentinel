@@ -600,6 +600,7 @@ export function paneOf(rt: Runtime): PaneModel {
       guard: rt.models.lastGuard,
       advisor: {
         available: rt.advisor.available,
+        isConfirmed: rt.advisor.isConfirmed,
         configured: rt.advisor.configured,
         line: advisorLine(rt.advisor, rt.sessionModel),
         pairing: rt.advisor.configured === null || rt.sessionModel === '' ? null : pairing(rt.advisor.configured, rt.sessionModel),

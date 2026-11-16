@@ -939,14 +939,18 @@ export class Runtime {
     const [commands, settings] = await Promise.all([host.listCommands().catch(() => null), host.settings().catch(() => null)])
     const command = commands?.find(c => c.name === 'advisor') as ({ argumentHint?: string } & { name: string }) | undefined
     const before = this.advisor
+    // Claude Code's list gives a plugin no argument hint (2.1.325): the models its reply named, else the documented ones, unconfirmed.
+    const hinted = command === undefined ? null : Advisor.modelsFromHint(command.argumentHint)
+    const confirmed = hinted ?? before.learned
     this.advisor = {
       ...before,
       isListed: commands !== null,
-      available: command === undefined ? null : (Advisor.modelsFromHint(command.argumentHint) ?? []),
+      available: command === undefined ? null : (confirmed ?? [...Advisor.DOCUMENTED_MODELS]),
+      isConfirmed: command !== undefined && confirmed !== null,
       configured: settings === null ? before.configured : Advisor.configuredOf(settings),
     }
     if (before.isListed === false || before.configured !== this.advisor.configured || JSON.stringify(before.available) !== JSON.stringify(this.advisor.available)) {
-      this.trace(`advisor: ${command === undefined ? 'Claude Code lists no /advisor here' : `/advisor offers ${(this.advisor.available ?? []).join(', ') || 'no model it names'}`}; advisorModel ${this.advisor.configured ?? 'off'}`)
+      this.trace(`advisor: ${command === undefined ? 'Claude Code lists no /advisor here' : `/advisor ${this.advisor.isConfirmed ? 'offers' : 'is listed (its models not named to plugins); offering the documented'} ${(this.advisor.available ?? []).join(', ')}`}; advisorModel ${this.advisor.configured ?? 'off'}`)
       this.publisher.mark('pane')
     }
   }
@@ -962,7 +966,7 @@ export class Runtime {
     const want = choice.trim().toLowerCase()
     const available = this.advisor.available
     if (available === null) return 'Claude Code offers no advisor in this session (its /advisor command is not listed here).'
-    if (want !== 'off' && !available.includes(want)) return `Claude Code’s /advisor offers ${[...available, 'off'].join(', ')} here.`
+    if (want !== 'off' && !available.includes(want)) return `Claude Code’s /advisor ${this.advisor.isConfirmed ? 'offers' : 'documents'} ${[...available, 'off'].join(', ')}${this.advisor.isConfirmed ? ' here' : ''}.`
     const at = this.clock()
     let detail = ''
     try {
@@ -975,6 +979,9 @@ export class Runtime {
       this.publisher.mark('pane')
       return `Claude Code did not run /advisor ${want} (${message}). Run /advisor ${want} yourself.`
     }
+    // Its reply may name the models this account has: learned, so the panel offers those from now.
+    const named = Advisor.modelsFromReply(detail)
+    if (named !== null) this.advisor = { ...this.advisor, learned: named }
     await this.refreshAdvisor()
     const isApplied = want === 'off' ? this.advisor.configured === null : this.advisor.configured?.toLowerCase() === want
     this.advisor = { ...this.advisor, lastSet: { at, to: want, outcome: isApplied ? 'applied' : 'not-applied', detail } }

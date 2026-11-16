@@ -392,7 +392,11 @@ export async function handleCommand(rt: Runtime, args: string): Promise<CommandR
         const f = rt.advisor
         const lines = [
           `Advisor: ${advisorLine(f, rt.sessionModel)}`,
-          f.available === null ? 'Claude Code lists no /advisor in this session (the account or engine does not offer it here).' : `Claude Code offers: ${[...f.available, 'off'].join(', ')}. Set: /cr advisor <model>|off (runs Claude Code’s own /advisor).`,
+          f.available === null
+            ? 'Claude Code lists no /advisor in this session (the account or engine does not offer it here).'
+            : f.isConfirmed
+              ? `Claude Code offers: ${[...f.available, 'off'].join(', ')}. Set: /cr advisor <model>|off (runs Claude Code’s own /advisor).`
+              : `Claude Code’s /advisor is here; it does not tell plugins which models this account has. Documented: ${[...f.available, 'off'].join(', ')}. Set: /cr advisor <model>|off (runs Claude Code’s own /advisor, which says if one is not available).`,
           'It is session-wide: subagents inherit it where Claude Code pairs it with their model. Changing it keeps the cached conversation.',
         ]
         return { text: lines.join('\n') }

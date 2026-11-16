@@ -602,8 +602,10 @@ export type PaneModel = {
     guard: { at: number; line: string } | null
     /** Claude Code's advisor (features/advisor.ts): offered models, the setting, its use in this context. */
     advisor: {
-      /** Models /advisor lists here; null when Claude Code offers no advisor in this session. */
+      /** Models offered here; null when Claude Code offers no advisor in this session. */
       available: string[] | null
+      /** True when Claude Code named them; false: the documented ones, which Claude Code may not all offer this account. */
+      isConfirmed: boolean
       configured: string | null
       line: string
       /** Whether the configured advisor pairs with the main model, in words; null when it cannot be told. */

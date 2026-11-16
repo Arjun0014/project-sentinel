@@ -5,7 +5,7 @@ import { modelsCommand } from '../hooks/app/commands'
 import * as Views from '../hooks/app/views'
 import { classicSettings } from '../hooks/core/settings'
 import { type AgentLedger, agentRows, bandOf, modelWord, noteCompaction, noteEnd, noteHookStart, noteHookStop, noteSpawn, noteStep, restoreLedger } from '../hooks/features/agents'
-import { advisorLine, configuredOf, modelsFromHint, noFacts, pairing } from '../hooks/features/advisor'
+import { DOCUMENTED_MODELS, advisorLine, configuredOf, modelsFromHint, modelsFromReply, noFacts, pairing } from '../hooks/features/advisor'
 import { emptyText } from '../hooks/ui/pane/agents'
 import { fakeHost } from './fixtures/fake-host'
 
@@ -156,6 +156,26 @@ describe('Advisor', () => {
     expect(pairing('sonnet', 'claude-opus-5-5')).toMatchObject({ isPaired: false })
     expect(pairing('gateway-x', 'claude-opus-5-5')).toBeNull()
     expect(advisorLine(noFacts(), '')).toBe('Not looked at yet')
+    expect(modelsFromReply('Advisor: off\nUsage: /advisor <fable|opus|sonnet|off>')).toEqual(['fable', 'opus', 'sonnet'])
+    expect(modelsFromReply('Advisor: opus')).toBeNull()
+  })
+
+  test('as Claude Code lists it (2.1.325, seen live): no hint for plugins: the documented models, unconfirmed, until /advisor’s reply names them', async () => {
+    const f = fakeHost()
+    f.live.commandList = [{ name: 'advisor', description: 'Let Claude consult a stronger model at key moments', source: 'builtin' as never }]
+    f.kept.store['settings.v1'] = classicSettings()
+    const rt = new Runtime()
+    rt.bind(f.host)
+    await rt.onSessionStart({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await f.advance(200)
+    expect(rt.advisor).toMatchObject({ available: [...DOCUMENTED_MODELS], isConfirmed: false })
+    expect((await rt.runCommand('advisor')).text).toContain('it does not tell plugins which models this account has')
+    // The reply to a choice names this account's models: confirmed from then on.
+    f.live.advisorTakes = false
+    f.host.runAdvisor = async () => ({ text: '/advisor isn’t available for that model.\nUsage: /advisor <opus|sonnet|off>' }) as never
+    expect(await rt.setAdvisor('fable')).toContain('Claude Code did not take /advisor fable here')
+    expect(rt.advisor).toMatchObject({ available: ['opus', 'sonnet'], isConfirmed: true })
+    expect(Views.paneOf(rt).models.advisor.isConfirmed).toBe(true)
   })
 
   test('read at load; set through Claude Code’s own /advisor and read back; consults counted per context', async () => {

@@ -3,8 +3,11 @@
  *
  * What Claude Code exposes (2.1.325, read from the engine and its docs, never assumed):
  *   - `/advisor <model|off>`: a built-in command (an interactive variant in the terminal; a non-interactive one
- *     in SDK hosts such as Desktop and `-p`). Its argument hint lists the models this account and engine
- *     support (`[fable|opus|sonnet|off]`); it is not listed at all where the advisor is not available.
+ *     in SDK hosts such as Desktop and `-p`), listed by `$.command.list()` only where the advisor is available.
+ *     The list gives plugins its name, description and source only (seen live on 2.1.325), not the models its
+ *     argument hint offers this account; its own reply names them ("Usage: /advisor <fable|opus|sonnet|off>").
+ *     So the documented models are offered as unconfirmed until that reply confirms them, and a choice counts
+ *     only once the setting reads it back.
  *   - `advisorModel`: the user setting the command saves (the `--advisor` flag sets it for one launch only,
  *     unseen by a settings read).
  *   - Activity: a request's `serverToolUses` named `advisor` (the API ran it inside the request).
@@ -23,6 +26,16 @@ export function modelsFromHint(hint: string | undefined | null): string[] | null
     .map(w => w.trim().toLowerCase())
     .filter(w => /^[a-z0-9][a-z0-9.\-[\]]*$/.test(w) && w !== 'off' && w !== 'model')
   return words.length === 0 ? null : [...new Set(words)]
+}
+
+/** The models Claude Code documents for the advisor: offered, unconfirmed, where it lists no hint of its own. */
+export const DOCUMENTED_MODELS: readonly string[] = ['fable', 'opus', 'sonnet']
+
+/** The models /advisor's own reply names ("Usage: /advisor <fable|opus|sonnet|off>"), or null. */
+export function modelsFromReply(text: string | null | undefined): string[] | null {
+  if (typeof text !== 'string') return null
+  const m = /\/advisor\s*([<[][^>\]]+[>\]])/.exec(text)
+  return m === null ? null : modelsFromHint(m[1])
 }
 
 /** `advisorModel` as stored: a model name, or null for off / unset / not a string. */
@@ -55,8 +68,12 @@ export function pairing(advisor: string, main: string): { isPaired: boolean; tex
 }
 
 export type AdvisorFacts = {
-  /** Models `/advisor` lists here, or null when Claude Code lists no advisor command (not available). */
+  /** Models offered here, or null when Claude Code lists no advisor command (not available). */
   available: string[] | null
+  /** True when Claude Code itself named those models (its hint, or /advisor's reply); false: the documented ones. */
+  isConfirmed: boolean
+  /** The models /advisor's own reply named, once seen this session. */
+  learned: string[] | null
   /** Whether the command list was read at all (false: not looked at yet, or the read failed). */
   isListed: boolean
   configured: string | null
@@ -68,7 +85,7 @@ export type AdvisorFacts = {
   lastSet: { at: number; to: string; outcome: 'applied' | 'not-applied' | 'failed'; detail: string } | null
 }
 
-export const noFacts = (): AdvisorFacts => ({ available: null, isListed: false, configured: null, uses: 0, agentUses: 0, lastUsedAt: null, lastSet: null })
+export const noFacts = (): AdvisorFacts => ({ available: null, isConfirmed: false, learned: null, isListed: false, configured: null, uses: 0, agentUses: 0, lastUsedAt: null, lastSet: null })
 
 /** The advisor in one line: off, which model, whether it was used in this context. */
 export function advisorLine(f: AdvisorFacts, mainModel: string): string {
