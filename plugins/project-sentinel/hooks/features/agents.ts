@@ -180,6 +180,10 @@ export function noteSpawn(
     missed: 0,
     missingSince: null,
     isTeammate: input.isTeammate === true || before?.isTeammate === true,
+    // A spawn seen makes the row the spawn's, even where Claude Code's SubagentStart came first (it does, inside the call).
+    source: 'spawn',
+    // Already running by SubagentStart's word: not back to starting.
+    ...(before !== undefined && before.status === 'running' && input.workflow == null ? { status: 'running' } : {}),
   })
   trim(ledger)
 }

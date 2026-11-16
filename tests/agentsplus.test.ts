@@ -38,6 +38,13 @@ describe('the agent ledger: more evidence', () => {
     expect(ledger.get('s1')?.source).toBe('spawn')
   })
 
+  test('as seen live on 2.1.325: SubagentStart comes inside the spawn, before its id is known; the spawn then owns the row, still running', () => {
+    const ledger: AgentLedger = new Map()
+    expect(noteHookStart(ledger, { agentId: 'a7', type: 'general-purpose', at: 1000 })).toBe(true)
+    noteSpawn(ledger, spawn('a7', { description: 'Review the README wording', at: 1001 }))
+    expect(agentRows(ledger, [], 1500)[0]).toMatchObject({ id: 'a7', source: 'spawn', status: 'running', description: 'Review the README wording', startedAt: 1000 })
+  })
+
   test('SubagentStop ends an agent whose end was not seen, with its last message; an end already seen stands', () => {
     const ledger: AgentLedger = new Map()
     noteSpawn(ledger, spawn('a1'))
@@ -120,8 +127,17 @@ describe('agents in the runtime: every channel', () => {
     const row = rt.ops.view().agents.find(a => a.id === 'h1')
     expect(row).toMatchObject({ model: 'claude-haiku-4-5-20251001', effort: 'low', compactions: 1, compactedTo: 25_000 })
     rt.ops.noteSubagentStop('h1', 'Explore', 'Three call sites.')
+    expect(kept.traces).toContain('agents: SubagentStop for h1 (Explore): ended with its last message')
     await advance(10)
     expect(rt.ops.view().agents.find(a => a.id === 'h1')).toMatchObject({ status: 'completed', result: 'Three call sites.', canResume: true })
+  })
+
+  test('a SubagentStart while a spawn is settling is that spawn: no "not seen" claim in the debug log', async () => {
+    const { rt, kept } = await started()
+    rt.agents.inFlight = 1
+    rt.ops.noteSubagentStart('a7', 'general-purpose')
+    expect(kept.traces).toContain('agents: SubagentStart for a7 (general-purpose) while its spawn settles: shown from now')
+    rt.agents.inFlight = 0
   })
 
   test('calls from a loop no record names are counted, never made into a row; the panel does not say “No subagents”', async () => {

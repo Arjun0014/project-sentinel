@@ -219,6 +219,11 @@ export class Runtime {
     poll: null as { cancel: () => void } | null,
     /** Spawns allowed whose start is not settled yet: they hold a slot, so spawns made at once never all pass a limit. */
     reserved: 0,
+    /**
+     * `agent.spawn` calls whose start has not resolved yet. Claude Code raises SubagentStart inside that call, before it
+     * resolves with the agent's id (seen live on 2.1.325): a SubagentStart then is the spawn under way, not an unseen one.
+     */
+    inFlight: 0,
   }
   permissionLog: PermissionLogEntry[] = []
   permissionCounts = { denied: 0, asked: 0 }

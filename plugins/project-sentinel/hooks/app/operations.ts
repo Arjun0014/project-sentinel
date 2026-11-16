@@ -1619,7 +1619,8 @@ export class Operations {
   /** Claude Code's SubagentStart: more evidence an agent runs (a row for one whose spawn was never seen). */
   noteSubagentStart(agentId: string, type: string): void {
     const isNew = noteHookStart(this.agentLedger, { agentId, type, at: this.now() })
-    if (isNew) this.rt.trace(`agents: SubagentStart for ${agentId} (${type}), whose spawn was not seen here: shown from the hook`)
+    // Claude Code raises SubagentStart before the spawn resolves with the id: with a spawn under way, that is its start.
+    if (isNew) this.rt.trace(this.rt.agents.inFlight > 0 ? `agents: SubagentStart for ${agentId} (${type}) while its spawn settles: shown from now` : `agents: SubagentStart for ${agentId} (${type}), whose spawn was not seen here: shown from the hook`)
     this.unnamed.delete(agentId)
     this.saveAgents(true)
     this.rt.publisher.mark('ops', 'hud', 'activity', 'pane')
@@ -1629,7 +1630,7 @@ export class Operations {
   /** Claude Code's SubagentStop: the agent's loop stopped (an end already seen stands). */
   noteSubagentStop(agentId: string, type: string, lastMessage: string): void {
     if (!noteHookStop(this.agentLedger, { agentId, type, lastMessage, at: this.now() })) return
-    this.rt.trace(`agents: SubagentStop ended ${agentId} (${type}), whose end was not otherwise seen`)
+    this.rt.trace(`agents: SubagentStop for ${agentId} (${type}): ended with its last message`)
     this.saveAgents(true)
     this.rt.publisher.mark('ops', 'hud', 'activity', 'pane')
   }

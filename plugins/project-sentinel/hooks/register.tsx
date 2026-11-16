@@ -452,10 +452,12 @@ export const register: Register = on => {
     // The agent shows from its spawn (its id, model, background, fork, parent, a workflow run's place);
     // its slot is released whatever the start's outcome.
     let answer: Awaited<ReturnType<typeof next>> | undefined
+    rt.agents.inFlight += 1
     try {
       answer = await next(decision.model === undefined ? e : { ...e, model: decision.model })
       return answer
     } finally {
+      rt.agents.inFlight = Math.max(0, rt.agents.inFlight - 1)
       rt.onAgentSpawned(e, answer, decision.isReserved === true, decision.model)
     }
   }).catch(($, e, next) =>
