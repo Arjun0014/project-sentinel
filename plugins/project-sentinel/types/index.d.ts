@@ -265,7 +265,7 @@ export type PlanUsageModel = {
  * `waiting`: a written handoff waits for background work (the Handoff Supervisor's ways out). `stuck`:
  * a handoff step that has not moved on (the supervisor found it stalled).
  */
-export type HudAlertKind = 'pending' | 'awaiting' | 'waiting' | 'stuck' | 'load' | 'watcher' | 'suggest' | 'budget' | 'held'
+export type HudAlertKind = 'pending' | 'awaiting' | 'waiting' | 'stuck' | 'load' | 'watcher' | 'suggest' | 'budget' | 'held' | 'loop' | 'window'
 
 export type HudAlert = {
   kind: HudAlertKind

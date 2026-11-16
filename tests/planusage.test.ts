@@ -8,6 +8,7 @@ import { type PlanUsage, emptyPlanUsage, isTicking, noteAnswered, noteRateLimite
 import { hudCells, hudSegments, planDetail, tiersOf } from '../hooks/ui/hud'
 import { fakeHost } from './fixtures/fake-host'
 import { SESSION, world } from './fixtures/world'
+import { bandProps } from './fixtures/band'
 
 // The status bar's 5H reading (1.7.0) replaces the run's cost there. Seen live on Claude Code 2.1.296: before
 // the session's first response `$.session.usage().rateLimits` is []; then [{five_hour 47%, resets 04:20Z},
@@ -252,13 +253,13 @@ describe('the 5H reading on the surfaces', () => {
     w.live.usage = { ...w.live.usage, rateLimits: rateLimits as never }
     await $.session.measure({ context: w.live.usage.context, rateLimits: rateLimits as never, cost: { usd: 1.25 }, changed: ['rateLimits'] })
     await w.clock.advance(300)
-    const terminal = await $.ui.mount({ plugin: 'project-sentinel', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 6, bodyColumns: 160, scroll: { offset: 0, bodyRows: 6 }, view: {} } })
+    const terminal = await $.ui.mount({ plugin: 'project-sentinel', surface: 'terminal', component: 'AbovePrompt', props: bandProps(160) })
     const text = JSON.stringify(await terminal.drawn())
     expect(text).toContain('63%')
     expect(text).toContain('2h14m')
     expect(text).not.toContain('$1.25')
     await terminal.unmount()
-    const desktop = await $.ui.mount({ plugin: 'project-sentinel', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 6, bodyColumns: 120, scroll: { offset: 0, bodyRows: 6 }, view: {} } })
+    const desktop = await $.ui.mount({ plugin: 'project-sentinel', surface: 'desktop', component: 'AbovePrompt', props: bandProps(120) })
     const plan = await desktop.find({ key: 'cell-plan' })
     expect(plan).toBeDefined()
     expect(JSON.stringify(plan)).toContain('Five-hour plan usage 63%, resets in 2h 14m')

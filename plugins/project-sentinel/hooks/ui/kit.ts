@@ -57,6 +57,13 @@ export type Actions = {
   stopAndHandoff: (taskId?: string) => void
   keepWaiting: () => void
   cancelHandoff: () => void
+  /** The circuit breaker's choices: watch again from the next request, or pause Autopilot for this session. */
+  loopRecheck: () => void
+  pauseAutopilot: () => void
+  /** A held window change: use Claude Code's limit, switch back to the model before, or pause Autopilot. */
+  windowAccept: () => void
+  windowRevert: () => void
+  windowPause: () => void
   stopTask: (taskId: string) => void
   selectFile: (path: string | null) => void
   clearChanges: () => void
@@ -137,8 +144,16 @@ export type Kit = {
   now: number
   /** The in-place picker drawn open, by key. */
   openPicker: string | null
-  /** Where a pane sits: docked beside the transcript, or a short frame above the prompt. */
-  placement?: 'dock' | 'inline'
+  /**
+   * Where a pane sits: docked beside the transcript, a short frame above the prompt, or (Desktop, Claude
+   * Code 2.1.325+) `widget`, the small form of a minimized pane, which draws a glance (clicks may not reach it).
+   */
+  placement?: 'dock' | 'inline' | 'widget'
+}
+
+/** A pane placement as the engine reports it, read as Kit's: an unknown seat is `dock`, as the engine asks. */
+export function placementOf(raw: unknown): Kit['placement'] {
+  return raw === 'inline' || raw === 'widget' || raw === 'dock' ? raw : raw === undefined ? undefined : 'dock'
 }
 
 /**

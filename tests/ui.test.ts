@@ -10,6 +10,7 @@ import { ACCENT, TIMELINE, meter } from '../hooks/ui/theme'
 import { desktopClientFault } from './fixtures/desktop'
 import { typeperfLine } from './fixtures/fake-host'
 import { SESSION, world } from './fixtures/world'
+import { bandProps } from './fixtures/band'
 
 const ENGINE_ROW = { type: 'Text' as const, props: {}, children: ['ENGINE ROW'] }
 
@@ -49,14 +50,6 @@ function cardsOf(tree: unknown): { title: string; labels: string[] }[] {
   return out
 }
 
-const bandProps = (bodyColumns: number) => ({
-  hasSurvey: false,
-  isWorking: false,
-  maxRows: 6,
-  bodyColumns,
-  scroll: { offset: 0, bodyRows: 6 },
-  view: {},
-})
 
 const paneProps = (bodyColumns: number, placement: 'dock' | 'inline' = 'dock') => ({
   title: 'Control Room',
@@ -163,7 +156,7 @@ describe('ui', () => {
     const w = world(on)
     on('ui.render', { component: 'AbovePrompt' }, () => ENGINE_ROW)
     await boot($, w)
-    const survey = await $.ui.mount({ plugin: 'project-sentinel', surface: 'terminal', component: 'AbovePrompt', props: { ...bandProps(100), hasSurvey: true } })
+    const survey = await $.ui.mount({ plugin: 'project-sentinel', surface: 'terminal', component: 'AbovePrompt', props: bandProps(100, { hasSurvey: true }) })
     expect(await survey.find({ text: /CONTEXT/ })).toBeUndefined()
     await survey.unmount()
     await $.command.run({ command: 'cr', args: 'hud status', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 100 } })

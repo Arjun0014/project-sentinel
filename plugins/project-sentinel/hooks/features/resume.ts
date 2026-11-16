@@ -26,6 +26,8 @@ export type ResumeInput = {
   /** The notes' path as shown, and its stat; null when missing, undefined when not looked at yet. */
   notesPath: string
   notes: { size: number; mtimeMs: number } | null | undefined
+  /** Why the notes could not be inspected (a lock, a permission): said so, never "missing". */
+  notesError?: string | null
   /** The last handoff's continuity check: its items' ids and states, and when the fresh context's first turn ended. */
   continuity: { items: readonly { id: string; state: 'ok' | 'missing' | 'none' }[]; at: number } | null
   /** The docs the last handoff updated, by name. */
@@ -48,6 +50,7 @@ export function resumeHealthOf(i: ResumeInput): ResumeHealth {
   const file = fileName(i.notesPath)
   if (i.tasks.length === 0) problems.push('No run state: Claude keeps no milestones for this run')
   if (i.notes === undefined) problems.push(`${file} has not been checked yet`)
+  else if (i.notes === null && i.notesError !== undefined && i.notesError !== null) problems.push(`The handoff notes could not be inspected: ${i.notesError}`)
   else if (i.notes === null) problems.push(`No handoff notes: ${file} is missing`)
   else if (i.notes.size < NOTES_MIN_BYTES) problems.push(`The handoff notes are nearly empty (${file})`)
   else if (i.planUpdatedAt !== null && i.notes.mtimeMs < i.planUpdatedAt - NOTES_GRACE_MS) problems.push(`${file} is older than the run's latest milestones`)
@@ -68,7 +71,10 @@ export function resumePreviewOf(i: ResumeInput): ResumeView {
   const notes = i.notes ?? null
   const reads: ResumeView['reads'] = [
     { label: i.tasks.length === 0 ? 'Run state: no milestones' : `Run state: ${done.length} of ${i.tasks.length} milestones`, isOk: i.tasks.length > 0 },
-    { label: notes === null ? `${file} (missing)` : `${file} (written ${clock(notes.mtimeMs)})`, isOk: notes !== null && notes.size >= NOTES_MIN_BYTES },
+    {
+      label: notes === null ? `${file} (${i.notesError !== undefined && i.notesError !== null ? 'could not be inspected' : 'missing'})` : `${file} (written ${clock(notes.mtimeMs)})`,
+      isOk: notes !== null && notes.size >= NOTES_MIN_BYTES,
+    },
     ...i.docs.slice(0, 4).map(d => ({ label: d, isOk: true })),
   ]
   const next =

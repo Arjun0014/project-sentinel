@@ -9,6 +9,7 @@ import type { Settings } from '../hooks/core/settings'
 import { hierarchyOf } from '../hooks/ui/pane/agents'
 import { fakeHost } from './fixtures/fake-host'
 import { SESSION, world } from './fixtures/world'
+import { bandProps } from './fixtures/band'
 
 // Agents as first-class citizens (1.7.0). The bugs, from the code and a live probe on Claude Code 2.1.296:
 // Sentinel looked at `$.agent.list()` only, before a spawn (the agent not started yet) and polled only once
@@ -316,7 +317,7 @@ describe('agents in the runtime', () => {
 
 describe('agents as Claude Code raises them', () => {
   const paneProps = { title: 'Control Room', isFocused: true, bodyColumns: 70, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 60 }, view: {} }
-  const bandProps = { hasSurvey: false, isWorking: true, maxRows: 6, bodyColumns: 120, scroll: { offset: 0, bodyRows: 6 }, view: {} }
+  const bandSite = bandProps(120, { isWorking: true })
   const full = (patch: Record<string, unknown> = {}) => ({ tool_use_id: 'tu-1', prompt: 'p', description: 'Scan the cache code', subagentType: 'Explore', provider: { plugin: 'engine', tier: 'core' as const }, parentModel: 'claude-opus-5-5', background: true, fork: false, ...patch })
 
   test('a foreground agent shows while its call runs; the band and Activity → Agents follow it; it ends while the panel is open', { timeoutMs: 30_000 }, async ($, on) => {
@@ -330,7 +331,7 @@ describe('agents as Claude Code raises them', () => {
     const spawned = await $.agent.spawn(full({ background: false }))
     expect(spawned.agentId).toBe('ag1')
     await w.clock.advance(300)
-    const band = await $.ui.mount({ plugin: 'project-sentinel', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
+    const band = await $.ui.mount({ plugin: 'project-sentinel', surface: 'terminal', component: 'AbovePrompt', props: bandSite })
     expect(await band.find({ text: /Scan the cache code · Starting/ })).toBeDefined()
     const pane = await $.ui.mount({ plugin: 'project-sentinel', surface: 'terminal', component: 'Pane', requestId: 'control-room', props: paneProps })
     // The band's line opens Activity → Agents.
@@ -371,7 +372,7 @@ describe('agents as Claude Code raises them', () => {
     ]
     await $.tool.call({ tool: 'Bash', command: 'node -e "setTimeout(()=>{},50000)"', tool_use_id: 'tu-b', agentId: 'ag1' } as never)
     await w.clock.advance(2500)
-    const band = await $.ui.mount({ plugin: 'project-sentinel', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
+    const band = await $.ui.mount({ plugin: 'project-sentinel', surface: 'desktop', component: 'AbovePrompt', props: bandSite })
     const drawn = await band.drawn()
     expect(await band.find({ text: /Count A · Running node/ })).toBeDefined()
     expect(await band.find({ text: /Count B ·/ })).toBeDefined()

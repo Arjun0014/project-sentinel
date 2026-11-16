@@ -132,7 +132,9 @@ describe('a handoff waiting for background work, as Claude Code raises it', () =
     expect(c.w.kept.logs).toContain('background: b22sjex6u ended (completed), as its notification says')
     expect(c.w.kept.logs).toContain('autopilot: turnComplete · handoff → waiting-background · checkNotes')
     expect(c.w.kept.logs).toContain('autopilot: turnComplete · waiting-background → verifying · verifyHandoff')
-    expect(c.w.kept.logs.some(l => l.startsWith('autopilot: notes') && l.includes(' written (') && l.includes('; updated after the background work ended'))).toBe(true)
+    // The notes' check says where it looked and what it found, then that they were written again after the work ended.
+    expect(c.w.kept.logs.some(l => l.startsWith('notes (before the clear): VALID') && l.includes('/work/NEXT_SESSION_PROMPT.md [configured]: file'))).toBe(true)
+    expect(c.w.kept.logs).toContain('notes: updated after the background work ended')
     // Claude was asked to record each result and end its turn, with the notification that brought it: the
     // render's while the waiter still ran, the waiter's (delivered into that turn) as the last one.
     expect(contextOf(c.w, report(RENDER))).toContain('the handoff is waiting for this background work')
@@ -297,9 +299,13 @@ describe('/cr handoff and /cr fresh while a handoff waits or is stuck', () => {
     // The notification's turn is interrupted: the handoff waits for the person.
     await $.turn.complete({ answer: '', durationMs: 1, isAborted: true, turnId: 'n1', reason: 'aborted' })
     await c.w.clock.advance(2000)
-    expect(await crText(c, 'fresh')).toBe('NEXT_SESSION_PROMPT.md has not been updated for this handoff, so the context was kept. Run /cr handoff to have Claude write it.')
+    // The reason names exactly where it looked and what it found (local clock times, so matched in parts).
+    const stale = await crText(c, 'fresh')
+    expect(stale.startsWith('NEXT_SESSION_PROMPT.md has not been updated for this handoff (/work/NEXT_SESSION_PROMPT.md was last modified ')).toBe(true)
+    expect(stale).toContain('before the handoff began')
+    expect(stale.endsWith('so the context was kept. Run /cr handoff to have Claude write it (or /cr fresh force to start from it as it is).')).toBe(true)
     c.w.live.isHandoffWritten = false
-    expect(await crText(c, 'fresh')).toBe('NEXT_SESSION_PROMPT.md was not found, so the context was kept. Run /cr handoff to have Claude write it.')
+    expect(await crText(c, 'fresh')).toBe('NEXT_SESSION_PROMPT.md was not found (NEXT_SESSION_PROMPT.md is not at /work/NEXT_SESSION_PROMPT.md), so the context was kept. Run /cr handoff to have Claude write it.')
     await c.w.clock.advance(5000)
     expect(c.clears.n).toBe(0)
     // Notes written now: the same command starts the fresh context, through the clear and the continuation.

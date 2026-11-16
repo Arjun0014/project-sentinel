@@ -62,6 +62,10 @@ export type Host = {
 
   sessionId(): Promise<string>
   sessionRoot(): Promise<string>
+  /** The session's working directory now (`$.session.cwd()`): a worktree session's, which may not be its root. */
+  sessionCwd(): Promise<string>
+  /** Claude Code's own /model command, for the person's "Switch back" (never on Project Sentinel's own initiative). */
+  switchModel(model: string): Promise<unknown>
   sessionModel(): Promise<string>
   usage(): Promise<SessionUsage>
   /** Usage with the local `summary` breakdown (auto-compact threshold); no network. */

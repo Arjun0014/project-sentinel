@@ -9,6 +9,7 @@ import type { Settings } from '../hooks/core/settings'
 import type { HandoffRecord } from '../hooks/features/handoff'
 import { fakeHost } from './fixtures/fake-host'
 import { SESSION, type World, world } from './fixtures/world'
+import { bandProps } from './fixtures/band'
 
 // The Handoff Supervisor, Keep warm and the person's ways out (1.7.0).
 //
@@ -366,7 +367,6 @@ async function waitingFor(c: Case, background: readonly Task[]): Promise<void> {
 const typed = (c: Case, text: string, turnId?: string) => c.$.prompt.submit({ text, wait: false, origin: { kind: 'composer' }, ...(turnId === undefined ? {} : { turnId }) })
 
 describe('the ways out on every surface', () => {
-  const bandProps = (bodyColumns: number) => ({ hasSurvey: false, isWorking: false, maxRows: 6, bodyColumns, scroll: { offset: 0, bodyRows: 6 }, view: {} })
   const paneProps = { title: 'Control Room', isFocused: true, bodyColumns: 66, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 60 }, view: {} }
 
   test('Context lists each task with what it is, and offers Hand off now, Stop & hand off, Keep waiting and Call off; the status bar line offers them too', LONG, async ($, on) => {

@@ -96,7 +96,37 @@ function page(kit: Kit, data: PaneData): RenderElement {
  */
 export const MAX_COLUMNS = 80
 
+/**
+ * Desktop's minimized pane (`widget`): a glance, never the panel. Clicks may not reach it, so it holds
+ * no controls: what needs the person, then the context and the handoff, then agents at work.
+ */
+export function widgetView(kit: Kit, data: PaneData): RenderElement {
+  const { Box, Text } = kit.ui
+  const hud = data.hud
+  const ctx = hud.ctx
+  const pct = ctx.pct === null ? (ctx.tokens === null ? 'new context' : `${Math.round(ctx.tokens / 1000)}k`) : `${ctx.pct}%`
+  const lines: { key: string; text: string; color?: string; dim?: boolean }[] = []
+  if (hud.alert !== null) lines.push({ key: 'w-alert', text: `${G.warn} ${hud.alert.text}`, color: hud.alert.tone === 'bad' ? 'error' : 'warning' })
+  lines.push({ key: 'w-ctx', text: `Context ${pct}${hud.autopilot.isOn ? ` · ${hud.autopilot.text}` : ''}` })
+  if (hud.work !== null) lines.push({ key: 'w-work', text: `Work ${hud.work.done}/${hud.work.total}${hud.work.current === null ? '' : ` · ${hud.work.current}`}`, dim: true })
+  if (hud.agents.running > 0) lines.push({ key: 'w-agents', text: `${hud.agents.running} agent${hud.agents.running === 1 ? '' : 's'} running`, dim: true })
+  return (
+    <Box key="widget" flexDirection="column" paddingX={1}>
+      <Text key="w-title" bold>
+        <Text color="claude">{G.brand}</Text>
+        {' Sentinel'}
+      </Text>
+      {lines.map(l => (
+        <Text key={l.key} wrap="truncate-end" {...(l.color === undefined ? {} : { color: l.color })} {...(l.dim === true ? { dimColor: true } : {})}>
+          {l.text}
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
 export function paneView(base: Kit, data: PaneData): RenderElement {
+  if (base.placement === 'widget') return widgetView(base, data)
   const inner = Math.max(24, base.columns - 2)
   const columns = Math.min(MAX_COLUMNS, inner)
   const kit: Kit = { ...base, openPicker: data.pane.openPicker, columns }

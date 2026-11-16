@@ -19,7 +19,7 @@ import { actionsOf } from './app/actions'
 import { Runtime } from './app/runtime'
 import * as Views from './app/views'
 import type { Host } from './host'
-import { type Kit, uiOf } from './ui/kit'
+import { type Kit, placementOf, uiOf } from './ui/kit'
 import { hudView } from './ui/hud'
 import { TAB_NEEDS, paneView } from './ui/pane/frame'
 import { collapseBar, compactToolRow, hiddenRow } from './ui/rows'
@@ -71,6 +71,8 @@ function hostOf($: EngineInterface): Host {
 
     sessionId: () => $.session.id(),
     sessionRoot: () => $.session.root(),
+    sessionCwd: () => $.session.cwd(),
+    switchModel: model => $.command.run({ command: 'model', args: model }),
     sessionModel: () => $.session.model(),
     usage: () => $.session.usage(),
     usageSummary: () => $.session.usage({ breakdown: 'summary' }),
@@ -525,7 +527,7 @@ export const register: Register = on => {
       permissions: needs.includes('permissions') ? await read($, permissionsAtom) : undefined,
       ops: needs.includes('ops') ? await read($, opsAtom) : undefined,
     }
-    return paneView(kitOf($.ui.resolve(e), e.props.bodyColumns, e.surface, e.props.placement), data)
+    return paneView(kitOf($.ui.resolve(e), e.props.bodyColumns, e.surface, placementOf((e.props as { placement?: unknown }).placement)), data)
   })
 
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {

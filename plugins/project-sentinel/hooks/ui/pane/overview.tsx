@@ -62,7 +62,16 @@ export function alertCallout(kit: Kit, data: PaneData): RenderElement | null {
   }
   if (alert.kind === 'load') return callout(kit, { key: 'alert', tone: 'bad', title: 'Machine under heavy load', text: alert.text })
   // The orchestration layer's: the status bar's line, with the same actions.
-  const title = { waiting: 'Handoff waiting for background work', stuck: 'Handoff needs a look', watcher: 'Watcher due', held: 'Your message was not sent', budget: 'Run budget reached', suggest: 'Watcher suggestion' }[alert.kind]
+  const title = {
+    waiting: 'Handoff waiting for background work',
+    stuck: 'Handoff needs a look',
+    watcher: 'Watcher due',
+    held: 'Your message was not sent',
+    budget: 'Run budget reached',
+    suggest: 'Watcher suggestion',
+    loop: 'Handoff loop prevented',
+    window: 'Model window changed unexpectedly',
+  }[alert.kind]
   return callout(kit, { key: 'alert', tone: alert.tone, title, text: alert.text, actions: alertActions(kit, alert).map(a => ({ ...a, key: `alert-${a.key}` })) })
 }
 

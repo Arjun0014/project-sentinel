@@ -874,7 +874,8 @@ describe('Cold Resume Guard', () => {
     expect(q.question).not.toContain('$')
     expect(q.options).toEqual([COLD.continue, COLD.compact, COLD.cancel])
     expect(f.rt.ops.coldLast).toMatchObject({ choice: COLD.continue })
-    expect(view(f.rt).cold).toMatchObject({ isOn: true, threshold: 100_000, isArmed: true, tokens: 300_000, usd: null })
+    // The context's size is its last request's own total (input and output: what the next request re-sends), as Claude Code counts context_tokens.
+    expect(view(f.rt).cold).toMatchObject({ isOn: true, threshold: 100_000, isArmed: true, tokens: 300_150, usd: null })
   })
 
   test('Claude Code’s own request while the conversation idles (its away summary, seen live) keeps the cache warm: not called cold until that lapses too', async () => {
@@ -917,7 +918,8 @@ describe('Cold Resume Guard', () => {
     // An estimate, and a floor: never a figure that reads as exact.
     expect(f.kept.asked[0]!.question).toContain("At Claude Code's cache-write price for opus-5-5 (list price")
     expect(f.kept.asked[0]!.question).toContain('that is at least ~$1.20.')
-    expect(view(f.rt).cold).toMatchObject({ usd: 1.2 })
+    // Claude Code's price per token, applied to the context's own size (300,150 tokens).
+    expect(Math.abs((view(f.rt).cold.usd ?? 0) - 1.2) < 0.01).toBe(true)
     // A default-tier estimate is no price.
     const g = await coldSession()
     g.rt.cache.noteWriteRate({ model: OPUS, ttl: '5m', usd: 4, tokens: 1_000_000, pricing: 'default' })

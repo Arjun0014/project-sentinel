@@ -3,6 +3,13 @@ import { describe, expect, test } from 'claude-code/testing'
 import { defaultSettings } from '../hooks/core/settings'
 import type { Settings } from '../hooks/core/settings'
 import { SESSION, world } from './fixtures/world'
+import { bandProps } from './fixtures/band'
+
+/**
+ * A `tool.check` Project Sentinel raised itself (`$.tool.check`), not the engine's own as a call runs (2.1.325), nor the
+ * one its own question raises (2.1.325 runs `$.ui.ask` as an AskUserQuestion call).
+ */
+const isOwnCheck = (next: unknown, e: { tool: string }): boolean => (next as { origin?: { plugin?: string } }).origin?.plugin === 'project-sentinel' && e.tool !== 'AskUserQuestion'
 
 const PRESENTATION = { isFullscreen: true, columns: 120 }
 const cmd = (command: string, args = '') => ({ command, args, origin: { kind: 'composer' as const }, presentation: PRESENTATION })
@@ -45,8 +52,9 @@ describe('register', () => {
     on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' as const }] }))
     on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'engine' as const, ref: 0 }))
     const checked: string[] = []
-    on('tool.check', ($, e) => {
-      checked.push(String((e.input as { command?: string }).command))
+    // Only Project Sentinel's own checks: Claude Code 2.1.325 raises tool.check itself as a call runs.
+    on('tool.check', ($, e, next) => {
+      if (isOwnCheck(next, e)) checked.push(String((e.input as { command?: string }).command))
       return { decision: 'allow' as const }
     })
     await $.session.start(SESSION)
@@ -64,7 +72,7 @@ describe('register', () => {
     // No policy section, no status bar, no run recorded, nothing carried over.
     const composed = await $.prompt.compose(COMPOSE)
     expect(composed.sections.map(s => s.id)).toEqual(['intro'])
-    const band = await $.ui.mount({ plugin: 'project-sentinel', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 6, bodyColumns: 120, scroll: { offset: 0, bodyRows: 6 }, view: {} } })
+    const band = await $.ui.mount({ plugin: 'project-sentinel', surface: 'desktop', component: 'AbovePrompt', props: bandProps(120) })
     expect(await band.find({ text: /Context|Work|Cache/ })).toBeUndefined()
     await band.unmount()
     await w.clock.advance(5000)
@@ -135,8 +143,8 @@ describe('register', () => {
     const w = world(on)
     let engine: 'allow' | 'ask' | 'deny' = 'allow'
     const checked: string[] = []
-    on('tool.check', ($, e) => {
-      checked.push(String((e.input as { command?: string }).command))
+    on('tool.check', ($, e, next) => {
+      if (isOwnCheck(next, e)) checked.push(String((e.input as { command?: string }).command))
       return { decision: engine, rule: 'Bash' }
     })
     await $.session.start(SESSION)

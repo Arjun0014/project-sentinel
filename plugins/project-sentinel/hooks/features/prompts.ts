@@ -276,6 +276,8 @@ export function pendingPromptReminder(): string {
  * decide; the prompt only says where each kind of knowledge belongs.
  */
 export function handoffPrompt(input: {
+  /** The absolute path Project Sentinel checks for the notes (the project root as the session reports it now). */
+  notesPath?: string
   tokens: number | undefined
   window: number | undefined
   handoffFile: string
@@ -308,7 +310,7 @@ export function handoffPrompt(input: {
     ...runState,
     "   - The project's own documentation (README, docs, changelog, plans it already keeps): update it where the work changed what it says, with important unfinished work and open decisions where the project records them.",
     '   - CLAUDE.md: only for durable instructions or invariants every future session must follow. Never use it as a progress log.',
-    `   - \`${input.handoffFile}\` at the project root: the prompt you would want to receive to continue this work effectively. You decide its contents from the project and its documentation.`,
+    `   - \`${input.handoffFile}\` at the project root${input.notesPath === undefined ? '' : ` (exactly \`${input.notesPath}\`: Project Sentinel checks that file before the clear)`}: the prompt you would want to receive to continue this work effectively. You decide its contents from the project and its documentation.`,
     '',
     ...(input.stale === undefined || input.stale === null ? [] : [`${input.stale} If you cannot rerun them in this turn, say in the notes that their verification is stale.`, '']),
     'Do not start new feature work in this turn. When the handoff is written, end your turn with a short summary.',
@@ -353,8 +355,23 @@ export function backgroundResultNote(input: { handoffFile: string; planTool: str
   return `Control Room · Context Autopilot: the handoff is waiting for this background work. Record its outcome where the fresh session will look (\`${input.handoffFile}\` at the project root${plan}), without starting new work, then end your turn. ${after}`
 }
 
-export function handoffRetryPrompt(handoffFile: string): string {
-  return `${OWN_PROMPT.retry} \`${handoffFile}\` at the project root. The context will be cleared next, so this file is the fresh session's only link to this work: create or update it now (at the project root), then end your turn.`
+/**
+ * The handoff turn's notes were not found current: Claude is asked once more, told exactly where Project
+ * Sentinel looked and what it found there, so a note written somewhere else (another root, a worktree) or not
+ * updated is put right. The opening words stay those `ownPromptKind` recognises.
+ */
+export function handoffRetryPrompt(handoffFile: string, found: { path?: string; state?: string | null; reason?: string | null } = {}): string {
+  const where = found.path === undefined ? 'at the project root' : `at \`${found.path}\``
+  const what =
+    found.state === 'stale'
+      ? ' It is there, but it was not changed after this handoff began.'
+      : found.state === 'empty'
+        ? ' It is there, but empty.'
+        : found.state === 'missing'
+          ? ' No file is there.'
+          : ''
+  const why = found.reason === undefined || found.reason === null || found.reason === '' ? '' : ` (${found.reason})`
+  return `${OWN_PROMPT.retry} \`${handoffFile}\` ${where}.${what}${why} The context will be cleared next, so this file is the fresh session's only link to this work: create or update it now at exactly that path (write the current state, even if you wrote it elsewhere), then end your turn.`
 }
 
 export function continuationContext(input: {

@@ -28,6 +28,8 @@ export function fakeHost(
     /** What `sysctl -n kern.memorystatus_level` writes on macOS ('63' by default: 37% in use). */
     memoryLevel?: string
     handoffMtime?: () => number | null
+    /** The working directory, when it is not the root (a worktree session); the root when not given. */
+    sessionCwd?: string
     /** The handoff notes' size in bytes (100 by default: too small to be healthy resume state). */
     handoffSize?: () => number
     files?: Record<string, string>
@@ -116,6 +118,8 @@ export function fakeHost(
      * modification time; null: deleted. Paths not here answer `stat` as before.
      */
     workspace: {} as Record<string, { content: string; mtimeMs: number } | null>,
+    /** Paths whose `stat` fails for another reason than a missing file (a lock, a permission): the error's message. */
+    statErrors: {} as Record<string, string>,
     /** What `git rev-parse HEAD` answers; null: not a repository. */
     head: 'c0ffee'.padEnd(40, '0') as string | null,
     /** `git hash-object` fails, as where Git is missing. */
@@ -153,6 +157,8 @@ export function fakeHost(
     every: (ms, fn) => schedule(ms, fn, ms),
     sessionId: async () => live.sessionId,
     sessionRoot: async () => options.cwd ?? '/work',
+    sessionCwd: async () => options.sessionCwd ?? options.cwd ?? '/work',
+    switchModel: async model => void kept.commands.push(`model ${model}`),
     sessionModel: async () => 'claude-opus-5-5',
     usage: async () => live.usage,
     usageSummary: async () => live.usage,
@@ -244,6 +250,8 @@ export function fakeHost(
     copy: async () => true,
     readText: async path => options.files?.[path] ?? '',
     stat: async path => {
+      const failure = live.statErrors[path]
+      if (failure !== undefined) throw new Error(failure)
       if (path in live.workspace) {
         const f = live.workspace[path]
         if (f === null || f === undefined) throw new Error('ENOENT')

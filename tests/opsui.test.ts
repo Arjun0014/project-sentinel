@@ -8,6 +8,7 @@ import type { Settings } from '../hooks/core/settings'
 import type { HudModel, OpsView, PaneModel } from '../types'
 import { desktopClientFault } from './fixtures/desktop'
 import { SESSION, world } from './fixtures/world'
+import { bandProps } from './fixtures/band'
 
 const MIN = 60_000
 const HOUR = 60 * MIN
@@ -40,7 +41,6 @@ const richButtons = (tree: unknown): string[] => {
   })
   return out
 }
-const bandProps = (bodyColumns: number) => ({ hasSurvey: false, isWorking: false, maxRows: 6, bodyColumns, scroll: { offset: 0, bodyRows: 6 }, view: {} })
 const paneProps = (bodyColumns: number, placement: 'dock' | 'inline' = 'dock') => ({ title: 'Control Room', isFocused: true, bodyColumns, placement, scroll: { offset: 0, bodyRows: 60 }, view: {} })
 
 const withSettings = (patch: (s: Settings) => void): Settings => {

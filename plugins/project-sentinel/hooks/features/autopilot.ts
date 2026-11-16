@@ -72,7 +72,12 @@ export type Autopilot = {
   isClamped: boolean
   triggeredTokens: number | null
   triggeredAt: number | null
-  /** When the handoff prompt was submitted: the handoff file must be newer. */
+  /**
+   * The handoff's freshness baseline: when its first turn began. The notes must have been written (or
+   * changed) since. Set once per handoff and kept through a retry or a restart (`/cr handoff` again
+   * after notes were missing), so asking again never makes notes already written read as stale;
+   * cleared only when the handoff is over (done, called off, snoozed, the context cleared).
+   */
   handoffSince: number | null
   /** The handoff turn's id (the first one, not a retry's), once it began. */
   handoffTurnId: string | null
@@ -112,6 +117,39 @@ export type Autopilot = {
   /** One human-readable line describing what the autopilot is doing. */
   note: string
   lastError: string | null
+  /**
+   * The circuit breaker tripped: a handoff it refused to start because the run was handing off in a
+   * loop (features/contextEpoch.ts keeps an old context's size from causing one; this is the second
+   * line of defence). Autopilot waits for the person until they choose.
+   */
+  loop: { at: number; reason: string } | null
+}
+
+/** `lastError` when the notes were not written (missing, empty, or not updated for this handoff). */
+export const NOTES_ERROR = 'handoff file not written'
+/** `lastError` when the notes could not be looked at (a permission, a locked file): not the same as missing. */
+export const NOTES_UNINSPECTABLE = 'handoff notes could not be inspected'
+/** `lastError` when the circuit breaker refused a handoff. */
+export const LOOP_ERROR = 'handoff loop prevented'
+/** `lastError` when a fresh context reached the handoff point before any work began. */
+export const TOO_LOW_ERROR = 'handoff point too low'
+
+/** The breaker's window: this many handoffs into fresh contexts within it, and the next one is refused. */
+export const LOOP_WINDOW_MS = 30 * 60_000
+export const LOOP_MAX_RECENT = 3
+/** A fresh context that reaches the handoff point within this many turns, without growing past its room, is a loop. */
+export const LOOP_FAST_TURNS = 2
+
+/** What the Runtime knows of this context as a reading crosses the handoff point (features/contextEpoch.ts). */
+export type EpochFacts = {
+  /** Main turns ended in this context. */
+  turns: number
+  /** Where this context started (its first proven reading), or null when unknown. */
+  baseline: number | null
+  /** This context was opened by Sentinel's own handoff or fresh start. */
+  isAfterHandoff: boolean
+  /** Contexts Sentinel's handoffs opened within LOOP_WINDOW_MS, this one included. */
+  recentHandoffs: number
 }
 
 /**
@@ -146,7 +184,8 @@ export type AutopilotConfig = {
 
 export type AutopilotEvent =
   | { kind: 'configure'; enabled: boolean; threshold: number | null; isClamped: boolean }
-  | { kind: 'context'; tokens: number; window: number | undefined; isInTurn: boolean; now: number }
+  /** A proven reading of this context's size (never a figure another context left: the Runtime holds those back). */
+  | { kind: 'context'; tokens: number; window: number | undefined; isInTurn: boolean; now: number; epoch?: EpochFacts }
   | {
       kind: 'turnComplete'
       reason: 'answer' | 'aborted' | 'refusal' | 'error'
@@ -163,7 +202,15 @@ export type AutopilotEvent =
   | { kind: 'notesSeen'; isWritten: boolean }
   /** The person started a turn of their own while the fresh context waited for the continuation. */
   | { kind: 'personTookOver'; now: number }
-  | { kind: 'handoffVerified'; isOk: boolean; now: number }
+  /**
+   * The notes as the verifier judged them (features/handoffArtifact.ts). `uninspectable`: the file could
+   * not be looked at (a permission, a lock): never read as missing, and Claude is not asked to rewrite it.
+   */
+  | { kind: 'handoffVerified'; isOk: boolean; now: number; state?: 'missing' | 'stale' | 'empty' | 'uninspectable'; reason?: string }
+  /** Notes found valid after the handoff gave up on them (Claude wrote them again): it goes on. */
+  | { kind: 'notesRevalidated'; now: number }
+  /** The circuit breaker's Recheck: Autopilot watches again, from the next proven reading. */
+  | { kind: 'loopRecheck' }
   | { kind: 'clearDone'; now: number }
   | { kind: 'clearFailed'; error: string }
   | { kind: 'compactDone'; now: number }
@@ -180,7 +227,7 @@ export type AutopilotEvent =
    * must wait for in flight (or the person chose not to wait), no turn running. `left`: what Claude
    * Code last listed running, which keeps running into the fresh context (it is told).
    */
-  | { kind: 'manualFresh'; now: number; left?: readonly BackgroundTask[] }
+  | { kind: 'manualFresh'; now: number; left?: readonly BackgroundTask[]; isFromNotesHere?: boolean }
   | { kind: 'snooze'; tokens: number; window: number | undefined }
   | { kind: 'externalClear' }
   /** A task's class changed (the isolated classifier, or the person): a wait held only by it may end. */
@@ -244,6 +291,7 @@ export function initialAutopilot(): Autopilot {
     completed: 0,
     note: 'Off',
     lastError: null,
+    loop: null,
   }
 }
 
@@ -400,6 +448,8 @@ export type AutopilotRecord = {
   skipWait?: boolean
   leftRunning?: BackgroundTask[]
   stateSince?: number | null
+  /** 1.8.0: the circuit breaker's verdict, while it holds. */
+  loop?: { at: number; reason: string } | null
 }
 
 const STATES: readonly AutopilotState[] = ['off', 'armed', 'pending', 'requested', 'handoff', 'waiting-background', 'verifying', 'clearing', 'compacting', 'resuming', 'awaiting']
@@ -431,6 +481,7 @@ export function recordOf(model: Autopilot, sessionId: string | null, now: number
     skipWait: model.skipWait,
     leftRunning: model.leftRunning,
     stateSince: model.stateSince,
+    loop: model.loop,
   }
 }
 
@@ -466,6 +517,29 @@ const recordedTasks = (value: unknown): BackgroundTask[] =>
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
 
+const loopOf = (v: unknown): Autopilot['loop'] => {
+  if (typeof v !== 'object' || v === null) return null
+  const r = v as Record<string, unknown>
+  const at = num(r.at)
+  return at === null || typeof r.reason !== 'string' ? null : { at, reason: r.reason.slice(0, 200) }
+}
+
+/**
+ * Why a handoff about to start would be a loop, or null. Two signs: a fresh context Sentinel opened that
+ * reached the handoff point within a turn or two without growing past the room it was given (its size
+ * came from somewhere else), and too many handoffs into fresh contexts in a short time (each new context
+ * fills almost at once: a window far smaller than the work, a threshold set too low).
+ */
+export function loopReason(model: Pick<Autopilot, 'threshold'>, tokens: number, epoch: EpochFacts | undefined): string | null {
+  if (epoch === undefined || model.threshold === null) return null
+  if (epoch.recentHandoffs >= LOOP_MAX_RECENT) return `${epoch.recentHandoffs} handoffs into fresh contexts in the last ${Math.round(LOOP_WINDOW_MS / 60_000)} minutes`
+  if (!epoch.isAfterHandoff || epoch.turns > LOOP_FAST_TURNS) return null
+  const room = roomOf(model.threshold)
+  if (epoch.baseline !== null && tokens - epoch.baseline >= room) return null
+  const grew = epoch.baseline === null ? 'with no proven starting size' : `growing ${kTokens(Math.max(0, tokens - epoch.baseline))} from ${kTokens(epoch.baseline)}`
+  return `the fresh context reached the handoff point after ${epoch.turns} turn${epoch.turns === 1 ? '' : 's'}, ${grew}`
+}
+
 /**
  * A fresh runtime after a reload picks the handoff up where the record left
  * it, and never starts a second one. Where the record cannot tell whether a
@@ -494,6 +568,7 @@ export function recover(model: Autopilot, record: AutopilotRecord, ctx: { sessio
     retries: record.retries,
     snoozeUntil: record.snoozeUntil,
     lastError: record.lastError,
+    loop: loopOf(record.loop),
   })
   switch (state) {
     case 'off':
@@ -560,11 +635,24 @@ export function step(model: Autopilot, event: AutopilotEvent, cfg: AutopilotConf
       if (model.isFreshContext) {
         // Past the handoff point and its room before any work began: handing off again would loop.
         return {
-          model: set(model, { state: 'awaiting', isFreshContext: false, freshStart: event.tokens, lastError: 'handoff point too low', note: 'The fresh context filled up before work began' }),
+          model: set(model, { state: 'awaiting', isFreshContext: false, freshStart: event.tokens, lastError: TOO_LOW_ERROR, note: 'The fresh context filled up before work began' }),
           effects: [
             {
               kind: 'notify',
               text: `This fresh context reached ${kTokens(event.tokens)} still reading itself in, past its ${kTokens(point)} handoff point, so Autopilot waits for you instead of handing off again. Raise the handoff point in Context.`,
+              level: 'error',
+            },
+          ],
+        }
+      }
+      const loop = loopReason(model, event.tokens, event.epoch)
+      if (loop !== null) {
+        return {
+          model: set(model, { state: 'awaiting', lastError: LOOP_ERROR, loop: { at: event.now, reason: loop }, handoffSince: null, note: 'Handoff loop prevented' }),
+          effects: [
+            {
+              kind: 'notify',
+              text: `Handoff loop prevented: ${loop}. Autopilot waits for you: recheck the context, carry on in this context, start fresh again, or turn Autopilot off.`,
               level: 'error',
             },
           ],
@@ -576,6 +664,9 @@ export function step(model: Autopilot, event: AutopilotEvent, cfg: AutopilotConf
         retries: 0,
         lastError: null,
         snoozeUntil: null,
+        loop: null,
+        // A new handoff: its notes must be written from here.
+        handoffSince: null,
       })
       if (event.isInTurn) {
         return {
@@ -713,7 +804,7 @@ export function step(model: Autopilot, event: AutopilotEvent, cfg: AutopilotConf
       if (!isCancellable) return { model, effects: none }
       const margin = event.window === undefined ? 50_000 : Math.round(event.window * 0.1)
       return {
-        model: set(model, { state: 'armed', snoozeUntil: event.tokens + margin, triggeredTokens: null, triggeredAt: null, handoffSince: null, ...noHandoff, note: 'Handoff called off. Watching the context' }),
+        model: set(model, { state: 'armed', snoozeUntil: event.tokens + margin, triggeredTokens: null, triggeredAt: null, handoffSince: null, loop: null, lastError: null, ...noHandoff, note: 'Handoff called off. Watching the context' }),
         effects: [{ kind: 'notify', text: 'Handoff called off: Claude carries on in this context. The notes stay on disk.', level: 'info' }],
       }
     }
@@ -746,7 +837,9 @@ export function step(model: Autopilot, event: AutopilotEvent, cfg: AutopilotConf
       // From awaiting too: a reload left the handoff waiting, then its prompt's turn began after all.
       if (model.state !== 'requested' && model.state !== 'awaiting') return { model, effects: none }
       return {
-        model: set(model, { state: 'handoff', handoffSince: event.now, ...noWait, skipWait: model.skipWait, leftRunning: [], handoffTurnId: event.turnId ?? null, lastError: null, note: 'Claude is writing the handoff' }),
+        // The freshness baseline is this handoff's first turn: a restart after missing notes keeps it, so notes
+        // written in the first attempt (or a retry) still count.
+        model: set(model, { state: 'handoff', handoffSince: model.handoffSince ?? event.now, ...noWait, skipWait: model.skipWait, leftRunning: [], handoffTurnId: event.turnId ?? null, lastError: null, loop: null, note: 'Claude is writing the handoff' }),
         effects: none,
       }
 
@@ -759,7 +852,15 @@ export function step(model: Autopilot, event: AutopilotEvent, cfg: AutopilotConf
 
     case 'handoffVerified': {
       if (model.state !== 'verifying') return { model, effects: none }
-      if (event.isOk) return proceedAfterHandoff(set(model, { retries: 0 }), cfg)
+      if (event.isOk) return proceedAfterHandoff(set(model, { retries: 0, lastError: null }), cfg)
+      if (event.state === 'uninspectable') {
+        // Not missing: the file could not be looked at. Claude cannot fix that by writing it again.
+        const why = event.reason === undefined ? '' : ` (${event.reason})`
+        return {
+          model: set(model, { state: 'awaiting', lastError: NOTES_UNINSPECTABLE, note: 'The handoff notes could not be checked' }),
+          effects: [{ kind: 'notify', text: `Project Sentinel could not inspect the handoff notes${why}, so the context was kept. /cr fresh force starts the fresh context anyway once you have checked them.`, level: 'error' }],
+        }
+      }
       if (model.retries < 1) {
         return {
           model: set(model, { state: 'handoff', retries: model.retries + 1, note: 'Notes missing. Asking Claude to write them' }),
@@ -769,18 +870,27 @@ export function step(model: Autopilot, event: AutopilotEvent, cfg: AutopilotConf
       return {
         model: set(model, {
           state: 'awaiting',
-          lastError: 'handoff file not written',
-          note: 'No handoff notes found, so the context was kept',
+          lastError: NOTES_ERROR,
+          note: event.state === 'stale' ? 'The handoff notes were not updated, so the context was kept' : event.state === 'empty' ? 'The handoff notes are empty, so the context was kept' : 'No handoff notes found, so the context was kept',
         }),
         effects: [{ kind: 'notify', text: 'No handoff notes were written, so the context was kept. Check the work and continue by hand.', level: 'error' }],
       }
     }
 
+    case 'notesRevalidated':
+      // Claude wrote the notes after the handoff gave up on them: checked again and valid, so it goes on.
+      if (model.state !== 'awaiting' || (model.lastError !== NOTES_ERROR && model.lastError !== NOTES_UNINSPECTABLE)) return { model, effects: none }
+      return proceedAfterHandoff(set(model, { retries: 0, lastError: null, note: 'Handoff notes found' }), cfg)
+
+    case 'loopRecheck':
+      if (model.loop === null && model.lastError !== LOOP_ERROR) return { model, effects: none }
+      return { model: set(model, { state: 'armed', loop: null, lastError: null, snoozeUntil: null, triggeredTokens: null, triggeredAt: null, handoffSince: null, ...noHandoff, note: 'Watching the context: rechecking from the next request' }), effects: none }
+
     case 'clearDone':
       if (model.state !== 'clearing') return { model, effects: none }
       if (!cfg.autoContinue) {
         return {
-          model: set(model, { state: 'armed', completed: model.completed + 1, triggeredTokens: null, ...noWait, ...fresh, note: 'Fresh context ready. Continue when you are' }),
+          model: set(model, { state: 'armed', completed: model.completed + 1, triggeredTokens: null, handoffSince: null, ...noWait, ...fresh, note: 'Fresh context ready. Continue when you are' }),
           effects: [{ kind: 'notify', text: 'Fresh context ready. Carry on by itself is off, so Claude waits for you.', level: 'info' }],
         }
       }
@@ -803,7 +913,7 @@ export function step(model: Autopilot, event: AutopilotEvent, cfg: AutopilotConf
       if (model.state !== 'compacting') return { model, effects: none }
       if (!cfg.autoContinue) {
         return {
-          model: set(model, { state: 'armed', completed: model.completed + 1, triggeredTokens: null, ...noWait, ...fresh, note: 'Context compacted. Continue when you are' }),
+          model: set(model, { state: 'armed', completed: model.completed + 1, triggeredTokens: null, handoffSince: null, ...noWait, ...fresh, note: 'Context compacted. Continue when you are' }),
           effects: none,
         }
       }
@@ -840,7 +950,7 @@ export function step(model: Autopilot, event: AutopilotEvent, cfg: AutopilotConf
 
     case 'engineCompacted':
       if (model.state === 'pending' || model.state === 'requested') {
-        return { model: set(model, { state: 'armed', note: 'Claude Code compacted first, so no handoff was needed' }), effects: none }
+        return { model: set(model, { state: 'armed', handoffSince: null, note: 'Claude Code compacted first, so no handoff was needed' }), effects: none }
       }
       return { model, effects: none }
 
@@ -848,16 +958,19 @@ export function step(model: Autopilot, event: AutopilotEvent, cfg: AutopilotConf
       // A handoff under way is never asked for twice; one whose turn ended unseen without notes is begun again.
       const isRestart = event.isRestart === true && (model.state === 'handoff' || model.state === 'waiting-background')
       if (BUSY.includes(model.state) && !isRestart) return { model, effects: none }
+      // The same handoff asked again (after missing notes, or one whose turn ended unseen) keeps its baseline;
+      // a new one starts its own. A loop the breaker stopped is the person's to restart: a manual handoff is theirs.
+      const isSameHandoff = isRestart || (model.state === 'awaiting' && model.lastError !== LOOP_ERROR && model.lastError !== TOO_LOW_ERROR)
       return {
-        model: set(model, { state: 'requested', triggeredAt: event.now, retries: 0, lastError: null, ...noWait, skipWait: event.skipWait === true, note: 'Handoff requested' }),
+        model: set(model, { state: 'requested', triggeredAt: event.now, retries: 0, lastError: null, loop: null, ...noWait, handoffSince: isSameHandoff ? model.handoffSince : null, skipWait: event.skipWait === true, note: 'Handoff requested' }),
         effects: [{ kind: 'submitHandoff' }],
       }
     }
 
     case 'manualFresh':
-      // Only a handoff the person may finish: one waiting for them, or one whose end Claude Code's events left unseen.
-      // freshVerdict decides whether that is safe (the notes written, nothing in flight, no turn running).
-      if (model.state !== 'awaiting' && model.state !== 'handoff' && model.state !== 'waiting-background') return { model, effects: none }
+      // Only a handoff the person may finish: one waiting for them, one whose end Claude Code's events left unseen, or
+      // (armed) notes written in this context. freshVerdict decides whether that is safe (the notes, nothing in flight, no turn).
+      if (model.state !== 'awaiting' && model.state !== 'handoff' && model.state !== 'waiting-background' && !(model.state === 'armed' && event.isFromNotesHere === true)) return { model, effects: none }
       {
         const left: BackgroundTask[] = []
         for (const t of [...model.leftRunning, ...model.background, ...(event.left ?? [])]) if (!left.some(l => l.id === t.id)) left.push(t)
@@ -871,7 +984,7 @@ export function step(model: Autopilot, event: AutopilotEvent, cfg: AutopilotConf
       const margin = event.window === undefined ? 50_000 : Math.round(event.window * 0.1)
       if (model.state !== 'pending' && model.state !== 'awaiting') return { model, effects: none }
       return {
-        model: set(model, { state: 'armed', snoozeUntil: event.tokens + margin, ...noWait, note: 'Snoozed until the context grows further' }),
+        model: set(model, { state: 'armed', snoozeUntil: event.tokens + margin, handoffSince: null, loop: null, lastError: null, ...noWait, note: 'Snoozed until the context grows further' }),
         effects: none,
       }
     }
@@ -885,6 +998,7 @@ export function step(model: Autopilot, event: AutopilotEvent, cfg: AutopilotConf
           handoffSince: null,
           snoozeUntil: null,
           retries: 0,
+          loop: null,
           ...noHandoff,
           ...fresh,
           note: 'Watching the context',
@@ -898,10 +1012,11 @@ export function step(model: Autopilot, event: AutopilotEvent, cfg: AutopilotConf
 // The person finishing a handoff: /cr handoff and /cr fresh
 
 /**
- * What a look at the notes found: written since this handoff began, present but written before it,
- * present but empty, absent; `present` where no handoff began in this context (nothing to compare).
+ * What a look at the notes found (features/handoffArtifact.ts, the one verdict every reader uses): written
+ * for this handoff, present but not updated for it, empty, absent, or not inspectable (a stat that failed
+ * for another reason than a missing file); `present` where no handoff began in this context.
  */
-export type NotesState = 'fresh' | 'stale' | 'empty' | 'missing' | 'present'
+export type NotesState = 'fresh' | 'stale' | 'empty' | 'missing' | 'present' | 'uninspectable'
 
 /** What the runtime knows when the person asks: everything a safe fresh start depends on. */
 export type HandoffFacts = {
@@ -919,6 +1034,20 @@ export type HandoffFacts = {
    * background work no longer holds the fresh context back; the notes still must be current.
    */
   isForced?: boolean
+  /**
+   * The person confirmed the notes themselves (`/cr fresh force`, after Sentinel said it could not verify
+   * them): the notes no longer hold the fresh context back. Never set by Sentinel on its own.
+   */
+  isNotesConfirmed?: boolean
+  /** Where the notes are, when found somewhere else than the configured place (the words name it). */
+  notesPath?: string | null
+  /** Why the notes are in their state, in words (features/handoffArtifact.ts). */
+  notesReason?: string | null
+  /**
+   * With no handoff under way: valid notes were written in THIS context (Claude's own write seen, or the file
+   * modified since the context began). A fresh start from them is then a handoff in all but name.
+   */
+  notesThisContext?: boolean
 }
 
 /**
@@ -960,19 +1089,23 @@ function blockerOf(model: Autopilot, facts: HandoffFacts): string | null {
     return `${runningWords(running)}. Fresh context was not started: the handoff finishes by itself when ${running.length === 1 ? 'it ends' : 'they end'}, or when its wait runs out (then ${running.length === 1 ? 'it keeps' : 'they keep'} running for the fresh context). /cr fresh now starts it at once and leaves ${it} running; /cr handoff stop stops ${it} first.`
   }
   const file = facts.handoffFile
+  if (facts.isNotesConfirmed === true) return null
+  const why = facts.notesReason === undefined || facts.notesReason === null ? '' : ` (${facts.notesReason})`
   switch (facts.notes) {
     case 'fresh':
       return null
+    case 'uninspectable':
+      return `Project Sentinel could not inspect ${file}${why}, so the context was kept. Check the notes yourself, then /cr fresh force starts the fresh context from them.`
     case 'present':
       // No handoff began in this context (a reload stopped one before its turn, a fresh context that filled up first):
       // only the last case has notes to start from, the ones the fresh context was handed.
-      return model.lastError === 'handoff point too low' ? null : `No handoff notes were written in this context, so it was kept. Run /cr handoff to have Claude write ${file}.`
+      return model.lastError === TOO_LOW_ERROR || model.lastError === LOOP_ERROR ? null : `No handoff notes were written in this context, so it was kept. Run /cr handoff to have Claude write ${file}.`
     case 'missing':
-      return `${file} was not found, so the context was kept. Run /cr handoff to have Claude write it.`
+      return `${file} was not found${why}, so the context was kept. Run /cr handoff to have Claude write it.`
     case 'empty':
       return `${file} is empty, so the context was kept. Run /cr handoff to have Claude write it.`
     case 'stale':
-      return `${file} has not been updated for this handoff, so the context was kept. Run /cr handoff to have Claude write it.`
+      return `${file} has not been updated for this handoff${why}, so the context was kept. Run /cr handoff to have Claude write it (or /cr fresh force to start from it as it is).`
   }
 }
 
@@ -983,7 +1116,10 @@ export function freshVerdict(model: Autopilot, facts: HandoffFacts): Verdict {
     case 'off':
       return none('Context Autopilot is off, so no handoff is waiting. Run /cr handoff (it turns Autopilot on, writes the notes, then continues fresh), or /clear to discard this context.')
     case 'armed':
-      return none('No handoff is under way. Run /cr handoff first (it writes the notes, then continues fresh), or /clear to discard this context.')
+      // Notes written in this context, and nothing under way: the same truth /cr handoff and the panel read.
+      if (facts.notesThisContext !== true) return none('No handoff is under way. Run /cr handoff first (it writes the notes, then continues fresh), or /clear to discard this context.')
+      if (facts.isTurnRunning) return none('A turn is running. Run /cr fresh again when it ends.')
+      break
     case 'pending':
       return none('A handoff is due: Claude finishes the current step, then writes the notes. Run /cr handoff to start it now.')
     case 'requested':
@@ -1006,10 +1142,15 @@ export function freshVerdict(model: Autopilot, facts: HandoffFacts): Verdict {
       if (facts.isTurnRunning) return none('A turn is running. Run /cr fresh again when it ends.')
       break
   }
-  const blocker = blockerOf(model, facts)
-  if (blocker !== null) return none(blocker)
   const running = inFlightOf(model, facts)
   const kept = leftWords(running)
+  if (model.state === 'armed') {
+    const blocking = blockingNow(model, facts)
+    if (blocking.length > 0) return none(`The notes were written in this context, but ${runningWords(blocking)}. /cr fresh now starts the fresh context anyway and leaves ${blocking.length === 1 ? 'it' : 'them'} running.`)
+    return { action: 'start-fresh', text: `Handoff notes written in this context are valid. Starting the fresh context.${kept}` }
+  }
+  const blocker = blockerOf(model, facts)
+  if (blocker !== null) return none(blocker)
   if (model.state === 'awaiting') return { action: 'start-fresh', text: `Handoff notes are valid. Starting the fresh context.${kept}` }
   if (model.state === 'handoff' && facts.inFlight === null) {
     return { action: 'start-fresh', text: 'Handoff notes are valid. Starting the fresh context (Sentinel has not seen Claude Code’s list of background work since it reloaded).' }

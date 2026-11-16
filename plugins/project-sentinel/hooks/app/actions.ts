@@ -46,6 +46,11 @@ export function actionsOf(rt: Runtime): Actions {
     stopAndHandoff: taskId => void rt.stopAndHandOff(taskId).then(text => rt.sayToPerson(text)),
     keepWaiting: () => void rt.keepWaiting().then(text => rt.sayToPerson(text)),
     cancelHandoff: () => rt.sayToPerson(rt.cancelHandoff()),
+    loopRecheck: () => rt.sayToPerson(rt.recheckLoop()),
+    pauseAutopilot: () => rt.sayToPerson(rt.pauseAutopilot('you paused it after a handoff loop was prevented')),
+    windowAccept: () => rt.sayToPerson(rt.resolveWindowHold('accept')),
+    windowRevert: () => void rt.revertWindowModel().then(text => rt.sayToPerson(text)),
+    windowPause: () => rt.sayToPerson(rt.resolveWindowHold('pause')),
     stopTask: taskId => void rt.stopBackgroundTask(taskId),
     selectFile: path => rt.selectChangedFile(path),
     clearChanges: () => {

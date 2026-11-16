@@ -975,20 +975,34 @@ export class Operations {
   // -------------------------------------------------------------------------
   // Resume state
 
-  /** The handoff notes' stat, looked at again after a turn (at most every 15 s) or when asked. */
+  /**
+   * The handoff notes as the canonical verifier finds them (Runtime.inspectNotes: every place they may be),
+   * looked at again after a turn (at most every 15 s) or when asked. Notes that could not be inspected are
+   * said so, never taken for missing.
+   */
   async refreshNotes(isNow = false): Promise<void> {
     const host = this.rt.host
     if (host === null) return
     const now = Date.now()
     if (!isNow && now - this.notesAt < 15_000) return
     this.notesAt = now
-    const stat = await host.stat(this.rt.handoffPath(), false).catch(() => null)
-    const next = stat === null || stat.kind !== 'file' ? null : { size: stat.size, mtimeMs: stat.mtimeMs }
-    if (JSON.stringify(next) !== JSON.stringify(this.notes)) {
+    const v = await this.rt.inspectNotes('Ready to resume', true).catch(() => null)
+    const isFile = v !== null && v.path !== null && v.mtimeMs !== null && v.size !== null && (v.state === 'valid' || v.state === 'present' || v.state === 'stale' || v.state === 'empty')
+    const next = isFile && v !== null ? { size: v.size ?? 0, mtimeMs: v.mtimeMs ?? 0 } : null
+    const error = v === null ? 'the check failed' : v.state === 'uninspectable' ? v.reason : null
+    const path = v !== null && isFile ? v.path : null
+    if (JSON.stringify([next, error, path]) !== JSON.stringify([this.notes, this.notesError, this.notesPath])) {
       this.notes = next
+      this.notesError = error
+      this.notesPath = path
       this.rt.publisher.mark('ops', 'hud')
     }
   }
+
+  /** Why the notes could not be inspected at the last look (never "missing"); null when they could. */
+  notesError: string | null = null
+  /** Where the notes were found at the last look (they may not be at the configured path). */
+  notesPath: string | null = null
 
   private resumeInput(): ResumeInput {
     const rt = this.rt
@@ -1001,8 +1015,9 @@ export class Operations {
       objective: rt.run?.objective ?? null,
       tasks: plan.tasks.map(t => ({ subject: t.subject, status: t.status, detail: t.detail, activeForm: t.activeForm })),
       planUpdatedAt: plan.updatedAt,
-      notesPath: rt.handoffPath(),
+      notesPath: this.notesPath ?? rt.notesPathForFresh(),
       notes: this.notes,
+      notesError: this.notesError,
       continuity: h === null || h.continuity === null ? null : { items: h.continuity, at: h.at },
       docs: docs === null ? [] : docs.split(/, | \+\d+$/).filter(Boolean),
       queued: ops.queue.filter(q => q.status === 'queued' || q.status === 'due').length,

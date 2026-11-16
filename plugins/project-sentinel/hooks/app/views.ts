@@ -43,6 +43,7 @@ import type { ActivityItem, FileChange } from '../features/activity'
 import { backgroundWords, blockingOf, classOf, handoffPoint, isHandoffActive } from '../features/autopilot'
 import { CLASS_WORDS, isBlocking } from '../features/background'
 import { bandOf } from '../features/agents'
+import { anomalyText } from '../features/contextEpoch'
 import * as Chain from '../features/chain'
 import { GROUP_LABEL, GROUP_ORDER, attentionOf, groupOf, isOpen, nowOf, turnSummaryOf } from '../features/digest'
 import { companionView, moodOf } from '../features/companion'
@@ -244,7 +245,10 @@ const nowLine = (rt: Runtime) => nowOf({ isTurnRunning: rt.turn.isRunning, runni
  */
 function alertOf(rt: Runtime, ops: HudOps | null): HudAlert | null {
   const s = rt.settings
+  const loop = rt.autopilot.loop
+  if (rt.autopilot.state === 'awaiting' && loop !== null) return { kind: 'loop', text: `Handoff loop prevented: ${loop.reason}`, tone: 'bad' }
   if (rt.autopilot.state === 'awaiting') return { kind: 'awaiting', text: rt.autopilot.note, tone: awaitingTone(rt) }
+  if (rt.windowHold !== null && s.autopilot.enabled) return { kind: 'window', text: `Model window changed unexpectedly: ${anomalyText(rt.windowHold)}. Autopilot holds its handoff`, tone: 'warn' }
   const handoff = handoffAlertOf(rt)
   if (handoff !== null) return handoff
   if (rt.monitor.pressure.level === 'critical' && s.resources.level !== 'off') return { kind: 'load', text: 'Your machine is under heavy load. Claude was asked to ease off.', tone: 'bad' }

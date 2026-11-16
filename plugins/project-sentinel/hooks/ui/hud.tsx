@@ -558,10 +558,25 @@ export function alertActions(kit: Kit, alert: NonNullable<HudModel['alert']>): A
       ]
     case 'load':
       return []
+    // The circuit breaker refused a handoff: watch again, carry on here, start fresh from the notes, or pause Autopilot.
+    case 'loop':
+      return [
+        { key: 'loop-recheck', label: 'Recheck', onPress: a.loopRecheck, isPrimary: true },
+        { key: 'loop-here', label: 'Continue here', onPress: a.snooze },
+        { key: 'loop-fresh', label: 'Start fresh', onPress: a.fresh },
+        { key: 'loop-off', label: 'Pause Autopilot', onPress: a.pauseAutopilot },
+      ]
+    // A window change no boundary explains: Claude Code's limit, the model before, or Autopilot paused.
+    case 'window':
+      return [
+        { key: 'window-accept', label: "Use Claude Code's limit", onPress: a.windowAccept, isPrimary: true },
+        { key: 'window-revert', label: 'Switch back', onPress: a.windowRevert },
+        { key: 'window-pause', label: 'Pause Autopilot', onPress: a.windowPause },
+      ]
   }
 }
 
-const ALERT_MARK: Record<NonNullable<HudModel['alert']>['kind'], string> = { pending: G.warn, awaiting: G.dot, waiting: G.wait, stuck: G.warn, load: G.warn, watcher: G.wait, held: G.warn, budget: G.warn, suggest: G.wait }
+const ALERT_MARK: Record<NonNullable<HudModel['alert']>['kind'], string> = { pending: G.warn, awaiting: G.dot, waiting: G.wait, stuck: G.warn, load: G.warn, watcher: G.wait, held: G.warn, budget: G.warn, suggest: G.wait, loop: G.warn, window: G.warn }
 
 /** What needs the person now, on a line of its own above, with its actions. */
 function alertLine(kit: Kit, alert: NonNullable<HudModel['alert']>): RenderElement {

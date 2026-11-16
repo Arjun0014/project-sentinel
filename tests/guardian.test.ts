@@ -112,7 +112,8 @@ describe('Cache Guardian', () => {
     const warm = { at: t0 + 50 * MIN, isProbe: false }
     // Every state whose next turn reads the old context again keeps it warm: the step that crossed the
     // threshold, the handoff turn, each notification's turn while it waits, the person's own message.
-    for (const state of ['armed', 'pending', 'requested', 'handoff', 'waiting-background', 'awaiting', 'compacting'] as const) {
+    // 1.8.0: checking the notes is not the clear either (a failed check asks Claude again, re-reading this context).
+    for (const state of ['armed', 'pending', 'requested', 'handoff', 'waiting-background', 'awaiting', 'compacting', 'verifying'] as const) {
       rt.autopilot = { ...rt.autopilot, state }
       rt.cache.schedule()
       expect(rt.cache.plan, state).toEqual(warm)
@@ -122,10 +123,10 @@ describe('Cache Guardian', () => {
     rt.usage = { ...rt.usage, tokens: 950_000 }
     rt.cache.schedule()
     expect(rt.cache.plan).toEqual(warm)
-    // About to be discarded: the notes checked before the clear, the clear, the fresh context resuming.
-    const verifying = { at: null, reason: 'The handoff notes are being checked before the clear, so this cache is about to be discarded' }
-    const discarding = { at: null, reason: 'A handoff is starting a fresh context, so this cache is about to be discarded' }
-    for (const [state, plan] of [['verifying', verifying], ['clearing', discarding], ['resuming', discarding]] as const) {
+    // About to be discarded: the clear itself, and the fresh context resuming (the old cache is read no more).
+    const clearing = { at: null, reason: 'A handoff is clearing this context for a fresh one, so this cache is about to be discarded' }
+    const resuming = { at: null, reason: 'The fresh context has started: the old cache is no longer read' }
+    for (const [state, plan] of [['clearing', clearing], ['resuming', resuming]] as const) {
       rt.autopilot = { ...rt.autopilot, state }
       rt.cache.schedule()
       expect(rt.cache.plan, state).toEqual(plan)

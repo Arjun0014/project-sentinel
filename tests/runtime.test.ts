@@ -386,6 +386,10 @@ describe('runtime', () => {
       s.autopilot.thresholdTokens = 100_000
     })
     rt.onTurnStart({ turnId: 't1', text: 'build it' })
+    // As the engine raises it: the step's request, then its answer (the context's size, proven).
+    const e1 = { turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 3 }
+    rt.stepRequest(e1)
+    rt.stepResponse(e1, {}, step(120_000, 'end_turn'))
     live.usage = { ...live.usage, context: { tokens: 120_000, window: 1_000_000, percent: 12 } }
     await rt.onTurnComplete({ agentId: undefined, reason: 'answer', answer: 'done' })
     await advance(300)
@@ -499,7 +503,12 @@ describe('runtime', () => {
       s.autopilot.thresholdMode = 'tokens'
       s.autopilot.thresholdTokens = 64_000
     })
-    const at = (turnId: string, index: number, tokens: number, stop: 'tool_use' | 'end_turn') => rt.stepResponse({ turnId, index, model: 'claude-opus-5-5', messageCount: 3 }, {}, { ...step(tokens, stop), turnId, index })
+    // As the engine raises a step: its request (stamped with the context it is made in), then its answer.
+    const at = (turnId: string, index: number, tokens: number, stop: 'tool_use' | 'end_turn') => {
+      const e = { turnId, index, model: 'claude-opus-5-5', messageCount: 3 }
+      rt.stepRequest(e)
+      rt.stepResponse(e, {}, { ...step(tokens, stop), turnId, index })
+    }
     rt.onTurnStart({ turnId: 't1', text: 'Work through the roadmap.' })
     at('t1', 0, 66_000, 'tool_use')
     await flush()

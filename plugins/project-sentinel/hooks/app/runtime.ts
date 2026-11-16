@@ -40,6 +40,8 @@ import { type HandoffIntent, INTENT_WORDS, handoffIntentOf } from '../features/i
 import * as Supervisor from '../features/supervisor'
 import * as Chain from '../features/chain'
 import * as Evidence from '../features/evidence'
+import * as Epoch from '../features/contextEpoch'
+import * as Artifact from '../features/handoffArtifact'
 import { type GitState, parseStatus } from '../features/git'
 import * as Handoff from '../features/handoff'
 import * as Ops from '../features/ops'
@@ -99,8 +101,6 @@ const EMPTY_EVIDENCE: Evidence.EvidenceStore = Evidence.emptyEvidence()
 
 /** While a cost limit is set, the session's cost is read mid-turn at most this often (`$.session.usage()` costs nothing). */
 const BUDGET_COST_EVERY_MS = 5_000
-/** The notes count as written for a handoff when modified no earlier than this before it began (clocks, file systems). */
-const NOTES_SLACK_MS = 5000
 /** Operations opened at a card or field: the first try this long after, each later one this much later again. */
 const OPS_DRAWN_MS = 300
 const OPS_SCROLL_TRIES = 3
@@ -273,6 +273,44 @@ export class Runtime {
   /** When the main conversation last showed any activity (a prompt, a turn's start or end, a step, a call). */
   private quietSince: number | null = null
 
+  /**
+   * The context this conversation is in now (features/contextEpoch.ts). Usage readings are this context's
+   * or set aside: an old context's size never reaches Autopilot in a new one.
+   */
+  ctx: Epoch.ContextEpoch = Epoch.firstEpoch('reload', Date.now())
+  /** Each main-loop request's context, stamped as it starts: an answer to a request made before a boundary is not this context's. */
+  private stepEpochs = new Map<string, number>()
+  /** True while the status bar's context figure is not proven to be this context's (after a reload). */
+  usageProvisional = false
+  /** The last rejection traced, so a stale figure re-reported every second does not flood the debug log. */
+  private lastRejectTraced = ''
+  /**
+   * A context-window discontinuity held for the person (features/contextEpoch.ts windowAnomaly): while it
+   * stands, Autopilot does not act on the threshold. Null when none.
+   */
+  windowHold: Epoch.WindowAnomaly | null = null
+  /** Model and window pairs the person accepted ("use Claude Code's limit"): not held again this session. */
+  private windowAccepted = new Set<string>()
+  /** The model the window was last reported for. */
+  private windowModel: string | null = null
+  /** Autopilot paused for this session only (the window alert's or the loop alert's choice); the settings are unchanged. */
+  autopilotPaused: string | null = null
+
+  /** The project root as first read at the load: one more place the notes may be. */
+  private loadRoot: string | null = null
+  /** Writes to the handoff notes Sentinel saw in this context (an editing tool's, or a shell command's hint). */
+  private notesWrites: Artifact.NotesWrite[] = []
+  /** The notes as they were when the handoff under way began, one entry per place looked at. */
+  private notesBaseline: Artifact.NotesBaseline[] | null = null
+  /** The canonical verdict on the notes as last checked (features/handoffArtifact.ts): what every reader shows. */
+  notesVerdict: Artifact.NotesVerdict | null = null
+  /** The last verdict traced in full, so a periodic look writes a line only when it changes. */
+  private notesTraced = ''
+  /** Where valid notes were found when not at the configured path: the fresh context is pointed there. */
+  private notesFoundAt: string | null = null
+  /** Claude wrote the notes after the handoff gave up on them: checked again at the turn's end (or now when idle). */
+  private notesRecheckOwed = false
+
   /** The background work in flight Claude Code last listed, with each task's class; null before any Stop. */
   inFlight(): Autopilot.BackgroundTask[] | null {
     return this.lastStop === null ? null : this.lastStop.background
@@ -363,8 +401,9 @@ export class Runtime {
     const a = this.settings.autopilot
     if (!a.enabled) return null
     const state = this.autopilot.state
-    if (state === 'clearing' || state === 'resuming') return 'A handoff is starting a fresh context, so this cache is about to be discarded'
-    if (state === 'verifying' && a.continuation === 'clear') return 'The handoff notes are being checked before the clear, so this cache is about to be discarded'
+    // The notes check is not the clear: it may fail (and the handoff asks again, re-reading this context), so the cache is kept.
+    if (state === 'clearing' && !this.isClearOwed) return 'A handoff is clearing this context for a fresh one, so this cache is about to be discarded'
+    if (state === 'resuming') return 'The fresh context has started: the old cache is no longer read'
     return null
   }
 
@@ -555,6 +594,7 @@ export class Runtime {
       host.panes().catch(() => []),
     ])
     this.root = root
+    this.loadRoot = this.loadRoot ?? root
     this.sessionId = id
     this.contextStartedAt = Date.now()
     // The supervisor's quiet counts from the load: a turn that began before it shows itself by its calls.
@@ -1125,6 +1165,9 @@ export class Runtime {
     await this.carryAtSessionStart(input.transcriptPath)
     if (input.source !== 'clear') {
       this.startSource = { source: input.source, sessionId: input.sessionId }
+      // A boundary: this context's usage is unknown until proven. A resumed transcript's size is Claude Code's own count of it.
+      const isResumed = input.source === 'resume' || input.source === 'fork'
+      this.openEpoch(input.source === 'compact' ? 'compact' : input.source === 'resume' ? 'resume' : input.source === 'fork' ? 'fork' : 'startup', isResumed ? { tokens: input.contextTokens ?? null, via: 'resume' } : {})
       if (input.source === 'compact') this.publisher.mark('chain', 'hud')
       if (input.source === 'resume' || input.source === 'fork') {
         this.ops.noteResumed({ secondsSince: input.secondsSince, tokens: input.contextTokens, isExpired: input.isCacheExpired, usd: input.usd, model: input.model })
@@ -1153,7 +1196,11 @@ export class Runtime {
       this.questForRunShape(now)
     }
     this.sessionId = input.sessionId
-    this.usage = { tokens: undefined, window: this.usage.window, pct: undefined, costUsd: 0 }
+    // A new context: its usage is unknown until a request made in it is answered (never the old context's size).
+    this.openEpoch(wasOurs ? (purpose !== null ? 'fresh' : 'handoff') : 'clear')
+    this.usage = { ...this.usage, costUsd: 0 }
+    this.notesWrites = []
+    this.notesBaseline = null
     this.cache.resetForContext()
     this.reads = []
     this.contextStartedAt = Date.now()
@@ -1186,7 +1233,7 @@ export class Runtime {
     const base = prompts.continuationContext({
       runNumber: this.run?.number ?? null,
       sessionNumber,
-      handoffPath: this.handoffPath(),
+      handoffPath: this.notesPathForFresh(),
       policies,
       milestones: this.plan().tasks.map(t => ({ subject: t.subject, status: t.status, detail: t.detail })).slice(-30),
       objective: this.run?.objectiveBy === 'claude' ? this.run.objective : null,
@@ -1371,20 +1418,191 @@ export class Runtime {
     }
   }
 
+  /**
+   * A session-level reading (`session.measure`, `$.session.usage()`). The window always counts; the token
+   * figure only as features/contextEpoch.ts judges it: never another context's size, never proof on its own.
+   */
   applyUsage(usage: Pick<SessionUsage, 'context' | 'cost'>): void {
-    const previousWindow = this.usage.window
-    this.usage = {
-      tokens: usage.context.tokens ?? this.usage.tokens,
-      window: usage.context.window,
-      pct: usage.context.percent ?? this.usage.pct,
-      costUsd: usage.cost?.usd ?? this.usage.costUsd,
-    }
+    const previousWindow = this.ctx.window
+    const rejected = this.ctx.rejected
+    const verdict = Epoch.sessionReading(this.ctx, { tokens: usage.context.tokens, window: usage.context.window, at: this.clock() })
+    this.ctx = verdict.epoch
+    if (this.ctx.rejected > rejected) this.traceReject(`context: set aside a session reading of ${usage.context.tokens ?? '?'} tokens: ${verdict.why} (${Epoch.epochLine(this.ctx)})`)
+    this.showUsage(usage.cost?.usd)
     if (this.run !== null) {
-      this.run = Chain.measure(this.run, { tokens: usage.context.tokens, window: usage.context.window, costUsd: usage.cost?.usd, model: this.sessionModel || undefined }, Date.now())
+      this.run = Chain.measure(this.run, { tokens: Epoch.trustedTokens(this.ctx) ?? undefined, window: usage.context.window, costUsd: usage.cost?.usd, model: this.sessionModel || undefined }, Date.now())
       this.persistRun()
     }
-    if (previousWindow !== this.usage.window) this.configureAutopilot()
+    if (previousWindow !== this.ctx.window) {
+      this.onWindowChanged(previousWindow)
+      this.configureAutopilot()
+    }
     this.publisher.mark('hud', 'pane', 'chain')
+  }
+
+  /** The status bar's figures from the epoch: this context's proven size (or, after a reload, its unproven one, marked). */
+  private showUsage(costUsd?: number): void {
+    const shown = Epoch.shownTokens(this.ctx)
+    const window = this.ctx.window ?? this.usage.window
+    this.usage = {
+      tokens: shown.tokens ?? undefined,
+      window,
+      pct: shown.tokens !== null && window !== undefined && window > 0 ? Math.round((100 * shown.tokens) / window) : undefined,
+      costUsd: costUsd ?? this.usage.costUsd,
+    }
+    this.usageProvisional = shown.isProvisional
+  }
+
+  /** A boundary: a new context, its usage unknown until proven (the engine's own count of it proves it at once). */
+  private openEpoch(source: Epoch.EpochSource, opts: { tokens?: number | null; via?: 'compaction' | 'resume' } = {}): void {
+    const now = this.clock()
+    // One compaction reported twice (its own hook, then the session's start): one boundary.
+    if (source === 'compact' && this.ctx.source === 'compact' && now - this.ctx.startedAt < 60_000 && opts.tokens === undefined) return
+    const before = this.ctx
+    this.ctx = Epoch.nextEpoch(before, source, now, opts)
+    this.epochEngineStart = this.engineTime()
+    this.showUsage()
+    this.trace(`context: opened ${Epoch.epochLine(this.ctx)}`)
+    this.publisher.mark('hud', 'pane', 'chain')
+  }
+
+  /** When this context began, on the engine's clock (the notes' times are compared with it). */
+  private epochEngineStart: number | null = null
+
+  /** One line per distinct rejection: a stale figure re-reported on every measurement is traced once. */
+  private traceReject(line: string): void {
+    const key = line.replace(/\d+ turns, \d+ requests/, '')
+    if (key === this.lastRejectTraced) return
+    this.lastRejectTraced = key
+    this.trace(line)
+  }
+
+  /**
+   * The window changed: a model switch, a host that read the model again. A discontinuity no boundary
+   * explains, that would make Autopilot act at once (a 1M model reported as 200k under a 700k context),
+   * is held for the person instead of handing off, and again, and again.
+   */
+  private onWindowChanged(before: number | null): void {
+    const after = this.ctx.window
+    if (after === null) return
+    const model = this.sessionModel || null
+    this.trace(`context: the window is ${after} tokens${model === null ? '' : ` for ${model}`} (was ${before ?? 'unknown'}${this.windowModel === null ? '' : `, ${this.windowModel}`})`)
+    const a = this.settings.autopilot
+    const { threshold } = Autopilot.resolveThreshold({ mode: a.thresholdMode, tokens: a.thresholdTokens, percent: a.thresholdPercent, window: after, autoCompactAt: undefined })
+    const tokens = Epoch.trustedTokens(this.ctx) ?? Epoch.shownTokens(this.ctx).tokens
+    const anomaly = Epoch.windowAnomaly({ before, after, modelBefore: this.windowModel, modelAfter: model, tokens, threshold, isNewContext: tokens === null, at: this.clock(), hostVersion: this.engineVersion })
+    this.windowModel = model
+    const hold = this.windowHold
+    if (hold !== null && anomaly === null) {
+      // Lifted only when the session is back on the model it had (switched back): a late reading taken before the
+      // switch carries the old window too, and is not the model's answer now.
+      const isBack = (hold.fromWindow === null || after >= hold.fromWindow) && (hold.fromModel === null || model === hold.fromModel)
+      if (!isBack) {
+        this.trace(`context: a reading with a ${after}-token window while ${model ?? 'the session model'} is in use: the hold stands`)
+        return
+      }
+      this.trace('context: the session is back on the model and window it had: the hold on Autopilot is lifted')
+      this.windowHold = null
+      this.publisher.mark('hud', 'pane')
+      return
+    }
+    if (anomaly === null || this.windowAccepted.has(`${model ?? ''}|${after}`)) return
+    this.windowHold = anomaly
+    this.trace(`context: window change held, Autopilot does not act on the threshold until you choose: ${Epoch.anomalyText(anomaly)} (Claude Code ${this.engineVersion ?? '?'})`)
+    if (this.settings.ui.toasts) this.host?.toast('Model window changed unexpectedly: Autopilot paused its handoff. Control Room → Context says why.', 8000)
+    this.publisher.mark('hud', 'pane')
+  }
+
+  /** The person's choice on a held window change: Claude Code's limit (accept), or Autopilot paused for the session. */
+  resolveWindowHold(choice: 'accept' | 'pause'): string {
+    const hold = this.windowHold
+    if (hold === null) return 'No window change is held.'
+    this.windowHold = null
+    if (choice === 'accept') {
+      this.windowAccepted.add(`${hold.toModel ?? ''}|${hold.toWindow}`)
+      this.trace(`context: the person accepted the ${hold.toWindow}-token window${hold.toModel === null ? '' : ` for ${hold.toModel}`}`)
+      this.configureAutopilot()
+      this.publisher.mark('hud', 'pane')
+      return `Using Claude Code's ${fmt.tokens(hold.toWindow)} window. Autopilot measures against it from now${Epoch.trustedTokens(this.ctx) !== null && (Autopilot.handoffPoint(this.autopilot) ?? Infinity) <= (Epoch.trustedTokens(this.ctx) ?? 0) ? ', so it hands off at the next step' : ''}.`
+    }
+    this.autopilotPaused = 'you paused Autopilot after the window changed'
+    this.trace('context: Autopilot paused for this session after a window change')
+    this.publisher.mark('hud', 'pane')
+    return 'Autopilot is paused for this session: no handoff starts by itself. /cr autopilot resume turns it back on.'
+  }
+
+  /** The circuit breaker's Recheck: Autopilot watches again; only this context's next proven reading decides. */
+  recheckLoop(): string {
+    if (this.autopilot.loop === null && this.autopilot.lastError !== Autopilot.LOOP_ERROR) return 'No handoff loop is held.'
+    this.stepAutopilot({ kind: 'loopRecheck' })
+    return 'Autopilot watches the context again: it hands off only if this context’s own next request is past the handoff point.'
+  }
+
+  /** "Switch back": Claude Code's own /model, to the model before the window changed. The person's choice only. */
+  async revertWindowModel(): Promise<string> {
+    const hold = this.windowHold
+    const host = this.host
+    if (hold === null || host === null) return 'No window change is held.'
+    if (hold.fromModel === null) return 'The model before the change is not known: switch back with /model.'
+    try {
+      await host.switchModel(hold.fromModel)
+      this.trace(`context: the person switched back to ${hold.fromModel} after the window changed`)
+      return `Switched back to ${hold.fromModel}. Autopilot holds until Claude Code reports its window again.`
+    } catch (error) {
+      return `Claude Code did not switch the model (${error instanceof Error ? clean(error.message, 80) : String(error)}): run /model ${hold.fromModel}.`
+    }
+  }
+
+  /** Autopilot paused for the session ends (the settings never changed). */
+  resumeAutopilot(): string {
+    if (this.autopilotPaused === null) return 'Autopilot is not paused.'
+    this.autopilotPaused = null
+    this.trace('autopilot: resumed for this session')
+    this.publisher.mark('hud', 'pane')
+    return 'Autopilot is watching the context again.'
+  }
+
+  /** Pause Autopilot for this session (the loop alert's Turn off): the saved settings are unchanged. */
+  pauseAutopilot(why: string): string {
+    this.autopilotPaused = why
+    if (this.autopilot.state === 'awaiting' && this.autopilot.lastError === Autopilot.LOOP_ERROR) this.stepAutopilot({ kind: 'loopRecheck' })
+    this.trace(`autopilot: paused for this session (${why})`)
+    this.publisher.mark('hud', 'pane')
+    return 'Autopilot is paused for this session: no handoff starts by itself. /cr autopilot resume turns it back on.'
+  }
+
+  /** What the circuit breaker and the fresh context's room are judged by: this context, and the handoffs that opened recent ones. */
+  private epochFacts(): Autopilot.EpochFacts {
+    const since = this.engineTime() - Autopilot.LOOP_WINDOW_MS
+    const recent = this.run === null ? 0 : this.run.sessions.filter(s => s.start === 'handoff' && s.startedAt >= since).length
+    // After a reload the epoch began at the reload: the run's record of this session says how the context itself began.
+    const session = this.run === null ? undefined : Chain.currentSession(this.run)
+    const isReload = this.ctx.source === 'reload'
+    return {
+      turns: isReload ? Math.max(this.ctx.turns, session?.turns ?? 0) : this.ctx.turns,
+      baseline: this.ctx.baseline,
+      isAfterHandoff: isReload ? session?.start === 'handoff' : Epoch.isAfterHandoff(this.ctx),
+      recentHandoffs: recent,
+    }
+  }
+
+  /** The last reason Autopilot's threshold was not evaluated, traced once. */
+  private heldTraced = ''
+
+  /**
+   * A proven reading of this context reaches Autopilot, with the circuit breaker's facts. Not while a
+   * window change is held or Autopilot is paused for the session (traced once).
+   */
+  private autopilotContext(tokens: number, isInTurn: boolean, now: number): void {
+    if (!this.settings.autopilot.enabled) return
+    const held = this.autopilotPaused !== null ? `paused (${this.autopilotPaused})` : this.windowHold !== null ? 'a window change is held for you' : ''
+    if (held !== '') {
+      if (held !== this.heldTraced) this.trace(`autopilot: the threshold is not evaluated: ${held}`)
+      this.heldTraced = held
+      return
+    }
+    this.heldTraced = ''
+    this.stepAutopilot({ kind: 'context', tokens, window: this.usage.window, isInTurn, now, epoch: this.epochFacts() })
   }
 
   /**
@@ -1449,8 +1667,9 @@ export class Runtime {
 
   /** A fresh context started working (or ended a turn read in): Autopilot gives it room from its size now. */
   noteWorkStarted(): void {
-    if (!this.autopilot.isFreshContext || this.usage.tokens === undefined) return
-    this.stepAutopilot({ kind: 'oriented', tokens: this.usage.tokens })
+    const tokens = Epoch.trustedTokens(this.ctx)
+    if (!this.autopilot.isFreshContext || tokens === null) return
+    this.stepAutopilot({ kind: 'oriented', tokens })
   }
 
   /** Context Autopilot's configuration as the machine reads it (features/autopilot.ts AutopilotConfig). */
@@ -1502,6 +1721,10 @@ export class Runtime {
 
   private applyAutopilot(result: Autopilot.Step): void {
     const before = this.autopilot.state
+    const next = result.model.state
+    // A handoff begins: the notes as they are now are what a change is measured against. Over: forgotten.
+    if ((next === 'pending' || next === 'requested') && this.notesBaseline === null) void this.snapshotNotes()
+    if ((next === 'armed' || next === 'off') && result.model.handoffSince === null) this.notesBaseline = null
     // How long a step has stood is the supervisor's first fact (stamped by stepAutopilot; a reload keeps the record's).
     this.autopilot = result.model.stateSince === null && result.model.state !== 'off' ? { ...result.model, stateSince: this.lastEngineAt ?? this.clock() } : result.model
     this.saveAutopilotRecord()
@@ -1675,8 +1898,9 @@ export class Runtime {
       case 'submitRetry': {
         const text =
           effect.kind === 'submitRetry'
-            ? prompts.handoffRetryPrompt(this.settings.autopilot.handoffFile)
+            ? prompts.handoffRetryPrompt(this.settings.autopilot.handoffFile, { path: this.handoffPath(), state: this.notesVerdict?.state ?? null, reason: this.notesVerdict?.reason ?? null })
             : prompts.handoffPrompt({
+                notesPath: this.handoffPath(),
                 tokens: this.usage.tokens,
                 window: this.usage.window,
                 handoffFile: this.settings.autopilot.handoffFile,
@@ -1694,14 +1918,16 @@ export class Runtime {
         // What the handoff leaves: its milestones' evidence as it stands now (Handoff Health, the fresh context's block).
         await this.checkEvidence('handoff')
         const notes = await this.verifyHandoff()
-        if (notes.isOk) this.questEvent('handoff', 'Clean handoff: notes verified')
-        this.recordHandoffHealth(notes.isOk, notes.mtimeMs)
-        this.stepAutopilot({ kind: 'handoffVerified', isOk: notes.isOk, now: await this.engineNow() })
+        const isOk = notes.state === 'valid' || notes.state === 'present'
+        if (isOk) this.questEvent('handoff', 'Clean handoff: notes verified')
+        this.recordHandoffHealth(isOk, notes.mtimeMs)
+        const failed = notes.state === 'missing' || notes.state === 'stale' || notes.state === 'empty' || notes.state === 'uninspectable' ? notes.state : 'missing'
+        this.stepAutopilot({ kind: 'handoffVerified', isOk, now: await this.engineNow(), ...(isOk ? {} : { state: failed, reason: notes.reason }) })
         return
       }
       case 'checkNotes': {
-        const state = await this.notesState(this.autopilot.handoffSince)
-        this.stepAutopilot({ kind: 'notesSeen', isWritten: state === 'fresh' })
+        const notes = await this.inspectNotes('while the handoff waits', true)
+        this.stepAutopilot({ kind: 'notesSeen', isWritten: notes.state === 'valid' })
         return
       }
       case 'clear':
@@ -1712,7 +1938,7 @@ export class Runtime {
         return
       case 'submitContinuation': {
         const text = prompts.continuationPrompt({
-          handoffPath: this.handoffPath(),
+          handoffPath: this.notesPathForFresh(),
           sessionNumber: this.run === null ? 1 : (Chain.currentSession(this.run)?.index ?? 1),
         })
         host.after(400, () => void this.submitOwn(text, 'continuation'))
@@ -1842,40 +2068,182 @@ export class Runtime {
     if (this.settings.ui.toasts) this.host?.toast(Handoff.continuityToast(continuity), 6000)
   }
 
-  private async verifyHandoff(): Promise<{ isOk: boolean; mtimeMs: number | null }> {
+  /**
+   * The handoff's own check before the clear: the canonical verdict (inspectNotes). A file that could not
+   * be inspected is looked at once more a moment later (a lock an editor or a scanner held) before it is
+   * reported as such; it is never reported as missing.
+   */
+  private async verifyHandoff(): Promise<Artifact.NotesVerdict> {
+    let notes = await this.inspectNotes('before the clear')
     const host = this.host
-    if (host === null) return { isOk: false, mtimeMs: null }
+    if (notes.state === 'uninspectable' && host !== null) {
+      await new Promise<void>(resolve => host.after(1500, resolve))
+      notes = await this.inspectNotes('again, after it could not be inspected')
+    }
     const ap = this.autopilot
-    const since = ap.handoffSince ?? 0
-    try {
-      const stat = await host.stat(this.handoffPath(), false)
-      const isOk = stat.kind === 'file' && stat.size > 0 && stat.mtimeMs >= since - NOTES_SLACK_MS
-      // After a wait for background work: were the notes written again once it ended (its result recorded)?
-      const after = ap.backgroundEndedAt === null ? '' : `; ${stat.mtimeMs >= ap.backgroundEndedAt - 1000 ? 'updated' : 'not updated'} after the background work ended`
-      this.trace(`autopilot: notes ${this.handoffPath()} ${isOk ? 'written' : 'not fresh'} (${stat.size} bytes, modified ${Math.round((stat.mtimeMs - since) / 1000)} s after the handoff began${after})`)
-      return { isOk, mtimeMs: stat.mtimeMs }
-    } catch {
-      this.trace(`autopilot: notes ${this.handoffPath()} not found`)
-      return { isOk: false, mtimeMs: null }
+    if (ap.backgroundEndedAt !== null && notes.mtimeMs !== null) {
+      this.trace(`notes: ${notes.mtimeMs >= ap.backgroundEndedAt - 1000 ? 'updated' : 'not updated'} after the background work ended`)
     }
+    if (notes.state === 'valid' && notes.path !== null && notes.path !== this.handoffPath()) {
+      this.notesFoundAt = notes.path
+      this.trace(`notes: valid at ${notes.path} (${notes.via}), not at the configured ${this.handoffPath()}: the fresh context is pointed there`)
+    }
+    return notes
   }
 
-  /** The notes as a look at the disk finds them, against the handoff that began at `since` (null: none began in this context), and when they were last written. */
-  private async lookAtNotes(since: number | null): Promise<{ state: Autopilot.NotesState; mtimeMs: number | null }> {
+  /** Whether paths compare without case here (Windows, macOS): the root's spelling says. */
+  private isCaseInsensitive(): boolean {
+    return /^[a-z]:[\\/]/i.test(this.root) || /^\/(Users|Volumes|private)\//.test(this.root)
+  }
+
+  /**
+   * Every place the notes may be: the configured one (the session's root as it is NOW: a worktree move or
+   * /cd moves it), the working directory (a worktree session), the repository's top level, the root at the
+   * load, and wherever Claude's editing tools wrote a file of that name.
+   */
+  private async notesCandidates(): Promise<Artifact.NotesCandidate[]> {
     const host = this.host
-    if (host === null) return { state: 'missing', mtimeMs: null }
-    try {
-      const stat = await host.stat(this.handoffPath(), false)
-      if (stat.kind !== 'file') return { state: 'missing', mtimeMs: null }
-      const state: Autopilot.NotesState = stat.size <= 0 ? 'empty' : since === null ? 'present' : stat.mtimeMs >= since - NOTES_SLACK_MS ? 'fresh' : 'stale'
-      return { state, mtimeMs: stat.mtimeMs }
-    } catch {
-      return { state: 'missing', mtimeMs: null }
+    if (host === null) return []
+    const [rootNow, cwd, repo] = await Promise.all([host.sessionRoot().catch(() => null), host.sessionCwd().catch(() => null), host.repoRoot().catch(() => null)])
+    if (rootNow !== null && rootNow !== '' && rootNow !== this.root) {
+      this.trace(`notes: the session's root moved: ${this.root || '(none)'} → ${rootNow}`)
+      this.root = rootNow
+      this.rootReal = null
+    }
+    return Artifact.candidatesOf({
+      file: this.settings.autopilot.handoffFile,
+      roots: [
+        { path: this.root, via: 'configured' },
+        { path: cwd, via: 'working directory' },
+        { path: repo, via: 'repository root' },
+        { path: this.loadRoot, via: 'root at load' },
+      ],
+      writes: this.notesWrites,
+      isCaseInsensitive: this.isCaseInsensitive(),
+    })
+  }
+
+  private async probeNotes(candidates: readonly Artifact.NotesCandidate[]): Promise<Artifact.NotesProbe[]> {
+    const host = this.host
+    if (host === null) return []
+    return Promise.all(
+      candidates.map(async (c): Promise<Artifact.NotesProbe> => {
+        try {
+          const st = await host.stat(c.path, true)
+          return { path: c.path, via: c.via, ok: true, kind: st.kind, size: st.size, mtimeMs: st.mtimeMs, realPath: st.realPath ?? null }
+        } catch (error) {
+          return { path: c.path, via: c.via, ok: false, isMissing: Artifact.isMissingError(error), error: clean(error instanceof Error ? error.message : String(error), 120) }
+        }
+      }),
+    )
+  }
+
+  /** Git's blob ids for files the handoff's snapshot saw with the same size and time (only then can content alone tell). */
+  private async notesBlobs(probes: readonly Artifact.NotesProbe[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>()
+    const host = this.host
+    const base = this.notesBaseline
+    if (host === null || base === null) return out
+    const ci = this.isCaseInsensitive()
+    const same = probes.filter((p): p is Extract<Artifact.NotesProbe, { ok: true }> => {
+      if (!p.ok || p.kind !== 'file') return false
+      const b = base.find(x => Artifact.normPath(x.path, ci) === Artifact.normPath(p.path, ci))
+      return b !== undefined && b.blob !== null && b.size === p.size && b.mtimeMs === p.mtimeMs
+    })
+    if (same.length === 0) return out
+    const result = await host.hashFiles(same.map(p => p.path)).catch(() => null)
+    if (result === null || result.exitCode !== 0) return out
+    const ids = result.stdout.split(/\r?\n/).map(l => l.trim()).filter(l => l !== '')
+    same.forEach((p, i) => {
+      const id = ids[i]
+      if (id !== undefined && /^[0-9a-f]{40,64}$/.test(id)) out.set(Artifact.normPath(p.path, ci), id)
+    })
+    return out
+  }
+
+  /**
+   * The canonical look at the handoff notes (features/handoffArtifact.ts): the handoff's check, /cr handoff,
+   * /cr fresh, the supervisor, Ready to resume and the panel all read this verdict. Every candidate place,
+   * what it found there and why, goes to the debug log (a periodic look only when the verdict changed).
+   */
+  async inspectNotes(why: string, isQuietWhenSame = false): Promise<Artifact.NotesVerdict> {
+    const since = this.autopilot.handoffSince
+    const probes = await this.probeNotes(await this.notesCandidates())
+    const blobs = await this.notesBlobs(probes)
+    const verdict = Artifact.judge({ file: this.settings.autopilot.handoffFile, probes, writes: this.notesWrites, since, baseline: this.notesBaseline, blobs, isCaseInsensitive: this.isCaseInsensitive(), now: this.engineTime() })
+    this.notesVerdict = verdict
+    const key = `${verdict.state}|${verdict.path}|${verdict.mtimeMs}|${verdict.reason}`
+    if (!isQuietWhenSame || key !== this.notesTraced) {
+      this.notesTraced = key
+      const base = since === null ? 'no handoff under way' : `handoff baseline ${Artifact.iso(since)}`
+      this.trace([`notes (${why}): ${verdict.state.toUpperCase()}: ${verdict.reason} [${base}; ${this.notesWrites.length} write${this.notesWrites.length === 1 ? '' : 's'} seen]`, ...Artifact.probeLines(verdict, since)].join('\n'))
+    }
+    this.publisher.mark('pane', 'hud')
+    return verdict
+  }
+
+  /** The notes' path for the fresh context: where valid notes were found, else the configured path. */
+  notesPathForFresh(): string {
+    return this.notesFoundAt ?? this.handoffPath()
+  }
+
+  /** A handoff began: the notes as they are now, the baseline a later change is compared with. */
+  private async snapshotNotes(): Promise<void> {
+    const host = this.host
+    if (host === null) return
+    this.notesFoundAt = null
+    const probes = await this.probeNotes(await this.notesCandidates())
+    const files = probes.filter((p): p is Extract<Artifact.NotesProbe, { ok: true }> => p.ok && p.kind === 'file')
+    const ids = files.length === 0 ? null : await host.hashFiles(files.map(p => p.path)).catch(() => null)
+    const blobs = ids === null || ids.exitCode !== 0 ? [] : ids.stdout.split(/\r?\n/).map(l => l.trim()).filter(l => l !== '')
+    const at = this.engineTime()
+    this.notesBaseline = probes.map(p => {
+      const i = p.ok && p.kind === 'file' ? files.indexOf(p) : -1
+      const blob = i >= 0 && blobs.length === files.length && /^[0-9a-f]{40,64}$/.test(blobs[i] ?? '') ? (blobs[i] ?? null) : null
+      return p.ok && p.kind === 'file' ? { path: p.path, exists: true, size: p.size, mtimeMs: p.mtimeMs, blob, at } : { path: p.path, exists: false, size: null, mtimeMs: null, blob: null, at }
+    })
+    this.trace(`notes: the handoff began; baseline: ${this.notesBaseline.map(b => `${b.path} ${b.exists ? `${b.size} B` : 'absent'}`).join('; ') || 'nowhere to look'}`)
+  }
+
+  /** Claude's editing tool wrote the notes (or a shell command seems to): a proof for the verdict, and a place to look. */
+  private noteNotesWrite(tool: string, input: Record<string, unknown>): void {
+    const file = this.settings.autopilot.handoffFile
+    const ci = this.isCaseInsensitive()
+    let write: Artifact.NotesWrite | null = null
+    if (isEditTool(tool)) {
+      const path = editPathOf(input)
+      if (path !== null && Artifact.isNotesPath(path, file, ci)) write = { path: this.absPath(path), at: this.engineTime(), tool, isCertain: true }
+    } else if (isShellTool(tool)) {
+      const command = typeof input.command === 'string' ? input.command : ''
+      if (Artifact.shellWritesNotes(command, file)) write = { path: this.handoffPath(), at: this.engineTime(), tool, isCertain: false }
+    }
+    if (write === null) return
+    this.notesWrites = [...this.notesWrites, write].slice(-20)
+    this.trace(`notes: ${write.isCertain ? `${tool} wrote ${write.path}` : `a ${tool} command seems to write ${file} (not taken as proof)`}`)
+    const ap = this.autopilot
+    if (ap.state === 'awaiting' && (ap.lastError === Autopilot.NOTES_ERROR || ap.lastError === Autopilot.NOTES_UNINSPECTABLE)) {
+      // The handoff gave up on the notes and Claude wrote them again: checked again as soon as its turn ends.
+      this.notesRecheckOwed = true
+      if (!this.turn.isRunning) this.host?.after(300, () => void this.recheckNotes())
     }
   }
 
-  private async notesState(since: number | null): Promise<Autopilot.NotesState> {
-    return (await this.lookAtNotes(since)).state
+  /** The notes written again after the handoff gave up on them: valid now, the handoff goes on by itself. */
+  private async recheckNotes(): Promise<void> {
+    this.notesRecheckOwed = false
+    const ap = this.autopilot
+    if (ap.state !== 'awaiting' || (ap.lastError !== Autopilot.NOTES_ERROR && ap.lastError !== Autopilot.NOTES_UNINSPECTABLE)) return
+    if (this.turn.isRunning) {
+      this.notesRecheckOwed = true
+      return
+    }
+    const notes = await this.verifyHandoff()
+    if (notes.state !== 'valid' && notes.state !== 'present') {
+      this.trace(`notes: checked again after Claude wrote them: still ${notes.state}`)
+      return
+    }
+    this.recordHandoffHealth(true, notes.mtimeMs)
+    this.stepAutopilot({ kind: 'notesRevalidated', now: await this.engineNow() })
   }
 
   /**
@@ -2327,6 +2695,9 @@ export class Runtime {
       this.frontier.lastEffort = e.effort
     }
     if (isMain) {
+      // The context this request is made in: its answer counts for this context only.
+      this.stepEpochs.set(`${e.turnId}:${e.index}`, this.ctx.id)
+      if (this.stepEpochs.size > 64) this.stepEpochs.delete(this.stepEpochs.keys().next().value as string)
       const effort = out.effort ?? e.effort
       const effortWord = typeof effort === 'string' ? effort : typeof effort === 'number' ? String(effort) : null
       this.cache.stepStarted(`${e.turnId}:${e.index}`, effortWord)
@@ -2372,14 +2743,26 @@ export class Runtime {
     }
     if (result.usage === null) return
     const u = result.usage
-    this.cache.stepAnswered(`${e.turnId}:${e.index}`, u)
+    const key = `${e.turnId}:${e.index}`
+    const stamped = this.stepEpochs.get(key)
+    this.stepEpochs.delete(key)
+    const tokens = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens + u.output_tokens
+    const wasResolved = this.ctx.isResolved
+    const reading = Epoch.stepReading(this.ctx, { epochId: stamped ?? null, tokens, at: this.clock() })
+    this.ctx = reading.epoch
+    if (!reading.accepted) {
+      // A request made before a boundary, answered after it: not this context's size, nor its cache.
+      this.trace(`context: set aside a ${tokens}-token answer: ${reading.why} (${Epoch.epochLine(this.ctx)})`)
+      return
+    }
+    if (!wasResolved) this.trace(`context: proven by a request: ${Epoch.epochLine(this.ctx)}`)
+    this.cache.stepAnswered(key, u)
     // The plan's rate-limit windows arrive with the first response: with the lifetime unknown, look once a minute at most.
     if (this.cache.state.ttl === null && !this.cache.isPlan && Date.now() - this.planCheckedAt > 60_000) {
       this.planCheckedAt = Date.now()
       void this.refreshUsage()
     }
-    const tokens = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens + u.output_tokens
-    this.usage = { ...this.usage, tokens, pct: this.usage.window ? Math.round((100 * tokens) / this.usage.window) : this.usage.pct }
+    this.showUsage()
     if (this.run !== null) this.run = Chain.measure(this.run, { tokens, window: this.usage.window, costUsd: undefined }, Date.now())
     this.publisher.mark('hud')
     // A cost limit is checked as Claude works: Claude Code measures the session's cost after the turn, not
@@ -2388,9 +2771,7 @@ export class Runtime {
       this.budgetCostAt = this.clock()
       void this.refreshUsage().then(() => this.ops.checkBudget())
     }
-    if (result.stopReason === 'tool_use' && this.settings.autopilot.enabled) {
-      this.stepAutopilot({ kind: 'context', tokens, window: this.usage.window, isInTurn: true, now: Date.now() })
-    }
+    if (result.stopReason === 'tool_use') this.autopilotContext(tokens, true, Date.now())
   }
 
   async onTurnComplete(input: { agentId: string | undefined; reason: 'answer' | 'aborted' | 'refusal' | 'error'; answer: string }): Promise<void> {
@@ -2400,6 +2781,7 @@ export class Runtime {
       return
     }
     this.turn = { ...this.turn, isRunning: false }
+    this.ctx = Epoch.turnEnded(this.ctx)
     this.noteActivity()
     this.activity.turnEnded()
     if (this.run !== null) this.run = Chain.countTurn(this.run, Date.now())
@@ -2422,9 +2804,11 @@ export class Runtime {
       this.isClearOwed = false
       host?.after(LIMITS.clearDelayMs, () => void this.runClear())
     }
-    if (this.autopilot.state === 'armed' && input.reason !== 'aborted' && this.usage.tokens !== undefined) {
-      this.stepAutopilot({ kind: 'context', tokens: this.usage.tokens, window: this.usage.window, isInTurn: false, now })
-    }
+    // Only this context's proven size: never one a session-level reading carried over from the context before.
+    const trusted = Epoch.trustedTokens(this.ctx)
+    if (this.autopilot.state === 'armed' && input.reason !== 'aborted' && trusted !== null) this.autopilotContext(trusted, false, now)
+    // Notes Claude wrote after the handoff gave up on them: checked now that its turn ended.
+    if (this.notesRecheckOwed) void this.recheckNotes()
     this.cache.turnEnded(this.clock())
     this.checkContinuity()
     if (Date.now() - this.evidenceCheckedAt >= Evidence.EVIDENCE_CHECK_EVERY_MS) void this.checkEvidence('turn end')
@@ -2476,7 +2860,8 @@ export class Runtime {
     this.compose.deliveredFallback = false
     // The system prompt is composed afresh after a compaction: a note about the held section means nothing now.
     this.notesBox.drop('policies')
-    this.usage = { ...this.usage, tokens: result.tokensAfter ?? undefined }
+    // A new context: the compacted one, its size Claude Code's own count (or unknown until a request is answered).
+    this.openEpoch('compact', { tokens: result.tokensAfter ?? null, via: 'compaction' })
     this.cache.noteCompact(this.clock())
     this.publisher.mark('hud', 'chain')
   }
@@ -2558,8 +2943,9 @@ export class Runtime {
       return null
     }
     const threshold = Autopilot.handoffPoint(this.autopilot)
-    if (this.settings.autopilot.enabled && threshold !== null && (this.usage.tokens ?? 0) >= threshold) {
-      this.trace(`guard: stands down, the context is past the handoff point (${Math.round((this.usage.tokens ?? 0) / 1000)}k of ${Math.round(threshold / 1000)}k): the handoff comes first`)
+    const proven = Epoch.trustedTokens(this.ctx) ?? 0
+    if (this.settings.autopilot.enabled && threshold !== null && proven >= threshold) {
+      this.trace(`guard: stands down, the context is past the handoff point (${Math.round(proven / 1000)}k of ${Math.round(threshold / 1000)}k): the handoff comes first`)
       return null
     }
     const g = this.settings.guard
@@ -2720,6 +3106,8 @@ export class Runtime {
     const changed = this.activity.finished({ id, status, result: result?.result, text: result?.deny ?? result?.text, now })
     // Milestone evidence: the files this call changed belong to the milestone under way (an agent's work serves it too).
     if (status === 'ok' && changed.length > 0) this.noteEvidenceEdits(changed.map(c => c.path), now)
+    // The handoff notes written: proof for the notes' verdict (features/handoffArtifact.ts).
+    if (status === 'ok' && agentId === undefined) this.noteNotesWrite(tool, input)
     // A subagent's own task list is its plan (Activity → Agents shows it as its track).
     if (status === 'ok' && agentId !== undefined && Plan.isPlanTool(tool)) this.ops.noteAgentPlan(agentId, { tool, input, result: result?.result, now })
     // Claude's own task list is the run's plan.
@@ -3157,13 +3545,22 @@ export class Runtime {
    * as Claude Code last reported it, and the notes on disk against this handoff.
    */
   async handoffFacts(): Promise<Autopilot.HandoffFacts & { notesAt: number | null }> {
-    const notes = await this.lookAtNotes(this.autopilot.handoffSince)
+    const notes = await this.inspectNotes('for /cr handoff and /cr fresh')
+    // With no handoff under way: were the notes written in THIS context (a write seen, or modified since it began)?
+    const start = this.epochEngineStart
+    const isThisContext =
+      this.autopilot.handoffSince === null &&
+      (notes.state === 'present' || notes.state === 'valid') &&
+      (this.notesWrites.some(w => w.isCertain) || (start !== null && notes.mtimeMs !== null && notes.mtimeMs >= start - Artifact.TIME_SLACK_MS))
     return {
+      notesThisContext: isThisContext,
       isTurnRunning: this.turn.isRunning,
       inFlight: this.lastStop === null ? null : this.lastStop.background,
-      notes: notes.state,
+      notes: notes.state === 'valid' ? 'fresh' : notes.state,
       notesAt: notes.mtimeMs,
       handoffFile: this.settings.autopilot.handoffFile,
+      notesPath: notes.path !== null && notes.path !== this.handoffPath() ? notes.path : null,
+      notesReason: notes.reason,
     }
   }
 
@@ -3216,13 +3613,13 @@ export class Runtime {
    */
   private startFreshNow(now: number, notesAt: number | null): void {
     const state = this.autopilot.state
-    if (state !== 'awaiting' && state !== 'handoff' && state !== 'waiting-background') return
+    if (state !== 'awaiting' && state !== 'handoff' && state !== 'waiting-background' && state !== 'armed') return
     const left = state === 'waiting-background' ? this.autopilot.background : (this.inFlight() ?? [])
     if (state !== 'awaiting') {
       this.questEvent('handoff', 'Clean handoff: notes verified')
       this.recordHandoffHealth(true, notesAt, left)
     }
-    this.stepAutopilot({ kind: 'manualFresh', now, left })
+    this.stepAutopilot({ kind: 'manualFresh', now, left, ...(state === 'armed' ? { isFromNotesHere: true } : {}) })
   }
 
   /**

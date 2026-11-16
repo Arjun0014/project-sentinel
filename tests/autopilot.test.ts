@@ -675,7 +675,7 @@ describe('/cr handoff and /cr fresh say what really happens', () => {
     })
     expect(freshVerdict(handing(), facts({ inFlight: [RENDER, WAITER] })).text).toMatch(/^2 background tasks are still running \(Render the full-resolution 16:9 picture; Wait until/)
     // Notes stale, empty or missing: kept, and said why.
-    expect(freshVerdict(finished(), facts({ notes: 'stale' })).text).toBe('NEXT_SESSION_PROMPT.md has not been updated for this handoff, so the context was kept. Run /cr handoff to have Claude write it.')
+    expect(freshVerdict(finished(), facts({ notes: 'stale' })).text).toBe('NEXT_SESSION_PROMPT.md has not been updated for this handoff, so the context was kept. Run /cr handoff to have Claude write it (or /cr fresh force to start from it as it is).')
     expect(freshVerdict(handing(), facts({ notes: 'missing' })).text).toBe('NEXT_SESSION_PROMPT.md was not found, so the context was kept. Run /cr handoff to have Claude write it.')
     expect(freshVerdict(handing(), facts({ notes: 'empty' })).action).toBe('none')
     // A turn running in the handoff: it finishes by itself.
