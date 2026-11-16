@@ -248,7 +248,6 @@ export function behaviorPage(kit: Kit, pane: PaneModel): RenderElement {
         key: 'models',
         title: 'Models',
         accent,
-        aside: pane.models.session === '' ? undefined : shortModel(pane.models.session),
         footer: 'A prompt cache belongs to one model: switching the main conversation re-sends its whole context uncached. A subagent starts a fresh context of its own, so its model costs the main cache nothing.',
         rows: k => {
           const p = s.agentModels

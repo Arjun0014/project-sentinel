@@ -128,6 +128,17 @@ describe('preview', () => {
       await w.clock.advance(300)
       console.log(`PREVIEW\tpane-${tab}\tdesktop\t${PANE}\t${JSON.stringify(await ui.drawn())}`)
     }
+    // Keep warm on, idle ten minutes: its two clocks (1.8.0); Guardrails under the Guarded profile.
+    await $.command.run(cmd('cache keep on'))
+    await w.clock.advance(10 * 60_000)
+    await ui.press({ key: 'tab-context' })
+    await w.clock.advance(300)
+    console.log(`PREVIEW\tpane-context-keepwarm\tdesktop\t${PANE}\t${JSON.stringify(await ui.drawn())}`)
+    await $.command.run(cmd('profile guarded'))
+    await w.clock.advance(300)
+    await ui.press({ key: 'tab-guardrails' })
+    await w.clock.advance(300)
+    console.log(`PREVIEW\tpane-guardrails-guarded\tdesktop\t${PANE}\t${JSON.stringify(await ui.drawn())}`)
     // Operations: work queued for the fresh context, a decision Claude left, a budget; then the run asleep.
     await $.command.run(cmd('companion off'))
     await $.command.run(cmd('queue --handoff Carry the cache findings into the README'))

@@ -88,7 +88,7 @@ export function guardrailsPage(kit: Kit, pane: PaneModel, permissions: Permissio
                     ? `e.g. ${CATEGORY_INFO[c].examples}`
                     : p[c] === 'default'
                       ? 'Claude Code decides (its permission mode and rules)'
-                      : `${STATE[p[c]].sentence} · Project Sentinel adds this on top of Claude Code`,
+                      : `${STATE[p[c]].sentence} · on top of Claude Code`,
                 // A stricter choice is the person's (or a profile's), not a problem: quiet, never amber.
                 subtitleTone: undefined,
                 control: picker(k, {

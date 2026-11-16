@@ -199,11 +199,11 @@ describe('first-run clarity on the surfaces', () => {
     await ui.press({ key: 'tab-guardrails' })
     await w.clock.advance(300)
     const row = async (c: string) => JSON.stringify(await ui.find({ key: `row-perm-${c}` }))
-    expect(await row('dangerous')).toContain('Never runs · Project Sentinel adds this on top of Claude Code')
-    expect(await row('push')).toContain('Asks you first · Project Sentinel adds this on top of Claude Code')
+    expect(await row('dangerous')).toContain('Never runs · on top of Claude Code')
+    expect(await row('push')).toContain('Asks you first · on top of Claude Code')
     expect(await row('edit')).toContain('Claude Code decides (its permission mode and rules)')
     // Release/QA asks before commits: a stricter choice is the profile's, not a problem, so never amber.
-    expect(await row('commit')).toContain('Asks you first · Project Sentinel adds this on top of Claude Code')
+    expect(await row('commit')).toContain('Asks you first · on top of Claude Code')
     expect(await row('commit')).not.toContain('"color":"warning"')
     // Both sets are one press away.
     expect(await ui.find({ key: 'perm-reset' })).toBeDefined()

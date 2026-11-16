@@ -3420,7 +3420,7 @@ export class Runtime {
   /**
    * `agent.spawn`, before the agent starts: Subagent Control decides (a limit counts the agents alive now,
    * as the rows reconcile them, plus spawns allowed and not settled yet, so spawns made at once never all
-   * pass it), and the router may pick its model. A workflow's agents are not counted against a limit.
+   * pass it), and the Agent Model Policy (when on) may pick its model. A workflow's agents are not counted against a limit.
    */
   async onAgentSpawn(e: AgentSpawnInput): Promise<{ deny?: string; model?: string; isReserved?: boolean }> {
     await this.ensureLoaded()

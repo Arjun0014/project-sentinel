@@ -94,7 +94,8 @@ export function keepWarmTimingLines(t: CacheView['keepWarm']['timing'], now: num
   const inWords = (ms: number) => (ms <= now ? 'now' : `in ${left(ms - now)}`)
   const lines: { key: string; left: string; right?: string; tone?: Tone }[] = []
   if (t.phase === 'off') return lines
-  lines.push({ key: 'kw-headline', left: t.headline, tone: t.phase === 'stopped' ? 'warn' : t.phase === 'idle' ? 'info' : 'muted' })
+  // While idle the lines below say it all (idle for, left, stops); the headline says what they cannot: ready, or stopped.
+  if (t.phase !== 'idle') lines.push({ key: 'kw-headline', left: t.headline, tone: t.phase === 'stopped' ? 'warn' : 'muted' })
   if (t.phase === 'idle' || t.phase === 'stopped') {
     lines.push({ key: 'kw-idle', left: `Idle for ${gone(t.idleForMs ?? 0)}`, right: t.phase === 'idle' ? `Keep warm left ${left(t.leftMs ?? 0)}` : 'Keep warm stopped' })
     if (t.idleSince !== null && t.stopsAt !== null) lines.push({ key: 'kw-window', left: `Started ${at(t.idleSince)}`, right: `${t.phase === 'idle' ? 'Stops' : 'Stopped'} ${at(Math.min(t.stopsAt, t.phase === 'stopped' ? now : t.stopsAt))}` })
