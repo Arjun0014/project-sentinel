@@ -91,6 +91,8 @@ export type Host = {
    * compacts only inside a turn (headless and SDK sessions). The engine's compaction follows.
    */
   compactCommand(instructions: string): Promise<CommandRunResult>
+  /** Claude Code's own /advisor (`<model>` or `off`): only on the person's choice in Control Room. */
+  runAdvisor(args: string): Promise<CommandRunResult>
   registerCommand(spec: CommandSpec): Promise<unknown>
   listCommands(): Promise<CommandInfo[]>
 

@@ -61,6 +61,7 @@ import { type Pressure, gateHeavy, isOver } from '../features/resources/pressure
 import { heavyKinds, heavyLabel } from '../features/resources/heavy'
 import { type Family, decideAgentModel, familyOf } from '../features/agentModels'
 import * as ModelGuard from '../features/modelGuard'
+import * as Advisor from '../features/advisor'
 import { decideSpawn, isOffered } from '../features/subagents'
 import { aliveRows, limitCount } from '../features/agents'
 import { doingOf } from '../features/digest'
@@ -207,6 +208,8 @@ export class Runtime {
     /** The switch guard's last word, for Context → Cache and the trace. */
     lastGuard: null as { at: number; line: string } | null,
   }
+  /** Claude Code's advisor as observed: what /advisor lists, the advisorModel setting, its calls in this context. */
+  advisor: Advisor.AdvisorFacts = Advisor.noFacts()
   agents = {
     list: [] as AgentInfo[],
     spawned: 0,
@@ -680,6 +683,7 @@ export class Runtime {
     }
 
     await this.registerCommands()
+    await this.refreshAdvisor()
     await this.offerMilestones()
     await this.offerDecisions()
     // Managed settings seat Anthropic's sec-default guard, which continues prompt.compose past
@@ -910,6 +914,61 @@ export class Runtime {
         // The alias is a convenience only.
       }
     }
+  }
+
+  /**
+   * The advisor as Claude Code has it now: whether /advisor is offered here and which models its hint lists, and
+   * the advisorModel setting. Read at load, when the panel asks, and after a change.
+   */
+  async refreshAdvisor(): Promise<void> {
+    const host = this.host
+    if (host === null) return
+    const [commands, settings] = await Promise.all([host.listCommands().catch(() => null), host.settings().catch(() => null)])
+    const command = commands?.find(c => c.name === 'advisor') as ({ argumentHint?: string } & { name: string }) | undefined
+    const before = this.advisor
+    this.advisor = {
+      ...before,
+      isListed: commands !== null,
+      available: command === undefined ? null : (Advisor.modelsFromHint(command.argumentHint) ?? []),
+      configured: settings === null ? before.configured : Advisor.configuredOf(settings),
+    }
+    if (before.isListed === false || before.configured !== this.advisor.configured || JSON.stringify(before.available) !== JSON.stringify(this.advisor.available)) {
+      this.trace(`advisor: ${command === undefined ? 'Claude Code lists no /advisor here' : `/advisor offers ${(this.advisor.available ?? []).join(', ') || 'no model it names'}`}; advisorModel ${this.advisor.configured ?? 'off'}`)
+      this.publisher.mark('pane')
+    }
+  }
+
+  /**
+   * The person chose an advisor in Control Room: Claude Code's own /advisor sets it (it saves advisorModel in the
+   * user settings), then the setting is read again: what it says is what is shown, never what was asked.
+   */
+  async setAdvisor(choice: string): Promise<string> {
+    const host = this.host
+    if (host === null) return 'Not connected to Claude Code.'
+    await this.refreshAdvisor()
+    const want = choice.trim().toLowerCase()
+    const available = this.advisor.available
+    if (available === null) return 'Claude Code offers no advisor in this session (its /advisor command is not listed here).'
+    if (want !== 'off' && !available.includes(want)) return `Claude Code’s /advisor offers ${[...available, 'off'].join(', ')} here.`
+    const at = this.clock()
+    let detail = ''
+    try {
+      const result = (await host.runAdvisor(want)) as { text?: string } | undefined
+      detail = typeof result?.text === 'string' ? result.text.trim() : ''
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.advisor = { ...this.advisor, lastSet: { at, to: want, outcome: 'failed', detail: message } }
+      this.trace(`advisor: /advisor ${want} failed: ${message}`)
+      this.publisher.mark('pane')
+      return `Claude Code did not run /advisor ${want} (${message}). Run /advisor ${want} yourself.`
+    }
+    await this.refreshAdvisor()
+    const isApplied = want === 'off' ? this.advisor.configured === null : this.advisor.configured?.toLowerCase() === want
+    this.advisor = { ...this.advisor, lastSet: { at, to: want, outcome: isApplied ? 'applied' : 'not-applied', detail } }
+    this.trace(`advisor: /advisor ${want} ${isApplied ? 'applied' : 'did not change advisorModel'}${detail === '' ? '' : ` (${detail})`}`)
+    this.publisher.mark('pane')
+    if (!isApplied) return `Claude Code did not take /advisor ${want} here${detail === '' ? '' : ` (${detail})`}. Run /advisor ${want} yourself.`
+    return want === 'off' ? 'Advisor off.' : `Advisor: ${want}. Claude consults it at key moments; subagents inherit it where Claude Code pairs it with their model.`
   }
 
   isOwnCommand(command: string): boolean {
@@ -1322,6 +1381,7 @@ export class Runtime {
     this.memoText = null
     // A fresh context has no cache to protect: the next request is compared with nothing.
     this.models.lastMain = null
+    this.advisor = { ...this.advisor, uses: 0, agentUses: 0, lastUsedAt: null }
     this.models.confirmedSwitch = null
     this.publisher.forgetPublished()
     this.publisher.markAll()
@@ -2815,7 +2875,6 @@ export class Runtime {
   stepRequest(e: TurnStepInput): { model?: string; effort?: TurnStepInput['effort'] } {
     this.composeObserved = true
     if (e.agentId === undefined) this.noteActivity()
-    else this.ops.noteAgentStep(e.agentId)
     // The main conversation's model is never set here: it is Claude Code's (and the person's) to choose.
     const out: { model?: string; effort?: TurnStepInput['effort'] } = {}
     const eff = this.effective()
@@ -2851,12 +2910,24 @@ export class Runtime {
         effort: effortWord,
         effortAsked: eff.frontier.effort,
       })
+    } else if (e.agentId !== undefined) {
+      // An agent's own request: its model and the effort it goes with (Activity → Agents shows both).
+      const effort = out.effort ?? e.effort
+      this.ops.noteAgentStep(e.agentId, e.model, typeof effort === 'string' ? effort : typeof effort === 'number' ? String(effort) : null)
     }
     return out
   }
 
   /** turn.step, after the response: live context, model learning, mid-turn autopilot. */
   stepResponse(e: TurnStepInput, _sent: { model?: string }, result: TurnStepResult): void {
+    // The advisor at work: the API ran its tool inside this request (read through a cast: an older engine has no field).
+    const server = (result as { serverToolUses?: readonly { name: string }[] }).serverToolUses
+    const advised = server?.filter(u => u.name === 'advisor').length ?? 0
+    if (advised > 0) {
+      this.advisor = { ...this.advisor, ...(e.agentId === undefined ? { uses: this.advisor.uses + advised } : { agentUses: this.advisor.agentUses + advised }), lastUsedAt: this.clock() }
+      this.trace(`advisor: consulted ${advised}× in ${e.agentId === undefined ? 'the main conversation' : `agent ${e.agentId}`}`)
+      this.publisher.mark('pane')
+    }
     if (result.usage !== null) {
       const family = familyOf(result.usage.model)
       if (family !== null && this.models.known.get(family) !== result.usage.model) {

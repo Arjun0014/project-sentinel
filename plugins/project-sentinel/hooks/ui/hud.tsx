@@ -633,7 +633,7 @@ function agentBand(kit: Kit, hud: HudModel): RenderElement | null {
   const rows =
     band.summary !== null
       ? [lineOf('all', `${band.summary} ${G.chevron}`, false)]
-      : band.lines.map(l => lineOf(l.id, [l.name, l.doing, l.plan === null ? null : `plan ${l.plan}`, l.elapsedMs === null ? null : fmt.duration(l.elapsedMs)].filter((p): p is string => p !== null && p !== '').join(' · '), l.status === 'starting' || l.status === 'pending'))
+      : band.lines.map(l => lineOf(l.id, [l.name, l.model, l.doing, l.plan === null ? null : `plan ${l.plan}`, l.elapsedMs === null ? null : fmt.duration(l.elapsedMs)].filter((p): p is string => p !== null && p !== '').join(' · '), l.status === 'starting' || l.status === 'pending'))
   return (
     <Box key="hud-agents" flexDirection="column">
       {rows}

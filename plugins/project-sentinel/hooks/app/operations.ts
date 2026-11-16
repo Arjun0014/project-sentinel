@@ -21,7 +21,7 @@ import type { ColdResumeView, ForeignOpsView, HudOps, OpsView, QueueTarget, Tone
 import * as fmt from '../core/format'
 import { clean } from '../core/text'
 import type { AgentRowView } from '../../types'
-import { type AgentLedger, agentRows, aliveRows, noteCall, noteEnd, noteModel, notePlan, noteSpawn, noteStep, noteWorkflowEnd, reconcile, restoreLedger } from '../features/agents'
+import { type AgentLedger, agentRows, aliveRows, isAlive, noteCall, noteCompaction, noteEnd, noteHookStart, noteHookStop, noteModel, notePlan, noteSpawn, noteStep, noteWorkflowEnd, reconcile, restoreLedger } from '../features/agents'
 import * as Cache from '../features/cache'
 import * as Chain from '../features/chain'
 import * as Evidence from '../features/evidence'
@@ -1581,14 +1581,63 @@ export class Operations {
     if (noteModel(this.agentLedger, agentId, model)) this.saveAgents()
   }
 
-  /** A request in an agent's loop: it is active now. */
-  noteAgentStep(agentId: string): void {
-    if (noteStep(this.agentLedger, agentId, this.now())) this.rt.publisher.mark('ops', 'hud')
+  /** A request in an agent's loop: it is active now, on this model, at this effort. */
+  noteAgentStep(agentId: string, model?: string, effort?: string | null): void {
+    if (noteStep(this.agentLedger, agentId, this.now(), model, effort)) this.rt.publisher.mark('ops', 'hud')
   }
 
-  /** A call in an agent's loop: what it is doing now. An id the ledger does not know (an engine fork) is left out. */
+  /**
+   * Loops whose calls Claude Code reported that no agent record names, by id: when each was last seen. Counted
+   * in Activity → Agents ("No subagents" is never said while one acts), never made into rows (an engine fork's
+   * calls carry an id too).
+   */
+  private unnamed = new Map<string, number>()
+
+  /** A call in an agent's loop: what it is doing now. An id the ledger does not know (an engine fork) is only counted. */
   noteAgentCall(agentId: string, doing: string): void {
-    if (!noteCall(this.agentLedger, agentId, doing, this.now())) return
+    if (!noteCall(this.agentLedger, agentId, doing, this.now())) {
+      const isNew = !this.unnamed.has(agentId)
+      this.unnamed.set(agentId, this.now())
+      if (this.unnamed.size > 32) this.unnamed.delete(this.unnamed.keys().next().value as string)
+      if (isNew) {
+        this.rt.trace(`agents: a call from loop ${agentId}, which no spawn, list or SubagentStart named (an engine fork, or an agent from before a reload)`)
+        this.rt.publisher.mark('ops')
+      }
+      return
+    }
+    this.unnamed.delete(agentId)
+    this.saveAgents()
+    this.rt.publisher.mark('ops', 'hud')
+  }
+
+  /** Loops seen acting in the last few minutes that no agent record names. */
+  unnamedLoops(): number {
+    const since = this.now() - 3 * 60_000
+    return [...this.unnamed.entries()].filter(([id, at]) => at >= since && !this.agentLedger.has(id)).length
+  }
+
+  /** Claude Code's SubagentStart: more evidence an agent runs (a row for one whose spawn was never seen). */
+  noteSubagentStart(agentId: string, type: string): void {
+    const isNew = noteHookStart(this.agentLedger, { agentId, type, at: this.now() })
+    if (isNew) this.rt.trace(`agents: SubagentStart for ${agentId} (${type}), whose spawn was not seen here: shown from the hook`)
+    this.unnamed.delete(agentId)
+    this.saveAgents(true)
+    this.rt.publisher.mark('ops', 'hud', 'activity', 'pane')
+    void this.rt.refreshAgents()
+  }
+
+  /** Claude Code's SubagentStop: the agent's loop stopped (an end already seen stands). */
+  noteSubagentStop(agentId: string, type: string, lastMessage: string): void {
+    if (!noteHookStop(this.agentLedger, { agentId, type, lastMessage, at: this.now() })) return
+    this.rt.trace(`agents: SubagentStop ended ${agentId} (${type}), whose end was not otherwise seen`)
+    this.saveAgents(true)
+    this.rt.publisher.mark('ops', 'hud', 'activity', 'pane')
+  }
+
+  /** An agent compacted its own context (subagents compact natively, in their own window). */
+  noteAgentCompaction(agentId: string, tokensAfter: number | undefined): void {
+    if (!noteCompaction(this.agentLedger, agentId, { at: this.now(), ...(tokensAfter === undefined ? {} : { tokensAfter }) })) return
+    this.rt.trace(`agents: ${agentId} compacted its own context${tokensAfter === undefined ? '' : ` to ${tokensAfter} tokens`}`)
     this.saveAgents()
     this.rt.publisher.mark('ops', 'hud')
   }
@@ -1703,10 +1752,17 @@ export class Operations {
     const host = this.rt.host
     const t = text.trim()
     if (host === null || t === '') return
+    // A finished subagent: Claude Code resumes it from its transcript with the message (as SendMessage does).
+    const before = this.agentLedger.get(id)
+    const isResume = before !== undefined && !isAlive(before.status)
     const result = await host.sendToAgent(id, t).catch(error => ({ isDelivered: false, reason: error instanceof Error ? error.message : String(error) }))
-    this.log(result.isDelivered ? `Message sent to agent ${id}` : `Message to agent ${id} not delivered: ${clean(result.reason ?? 'refused', 100)}`)
+    const verb = isResume ? 'Resumed agent' : 'Message sent to agent'
+    this.log(result.isDelivered ? `${verb} ${id}` : `Message to agent ${id} not delivered: ${clean(result.reason ?? 'refused', 100)}`)
     if (!result.isDelivered) this.toast(`Not delivered: ${clean(result.reason ?? 'refused', 100)}`)
-    else this.tellAgents(`sent the agent "${this.agentName(id)}" (${id}) this message: "${clean(t, 300)}"`)
+    else {
+      this.tellAgents(`${isResume ? 'resumed' : 'sent'} the agent "${this.agentName(id)}" (${id}) ${isResume ? 'with' : ''} this message: "${clean(t, 300)}"`.replace('  ', ' '))
+      await this.rt.refreshAgents()
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1763,6 +1819,7 @@ export class Operations {
       watchersDone: ops.watchers.filter(w => !Ops.isWatcherOpen(w)).slice(-4).reverse().map(wView),
       externalWakes: wakes,
       agents: this.agentRowsNow(),
+      unnamedLoops: this.unnamedLoops(),
       main: { state: headline.state, text: headline.text },
       budget: {
         isSet: b !== null,

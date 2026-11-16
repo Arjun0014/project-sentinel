@@ -135,6 +135,8 @@ export type Actions = {
   agentStop: (id: string) => void
   editMessage: (id: string | null) => void
   agentMessage: (id: string, text: string) => void
+  /** Claude Code's /advisor, on the person's choice (`off` or a model it lists). */
+  setAdvisor: (choice: string) => void
 }
 
 export type Kit = {

@@ -17,6 +17,7 @@ import * as fmt from '../core/format'
 import { sentenceCase } from '../core/text'
 import { howWords } from '../features/ops'
 import { parseDuration, splitWatchArgs, untilWords, clockAhead } from '../features/when'
+import { emptyText } from '../ui/pane/agents'
 import type { Runtime } from './runtime'
 
 /** The field Operations focuses after `/cr queue` with nothing to add. */
@@ -231,15 +232,15 @@ async function decideCommand(rt: Runtime, args: string, words: readonly string[]
 function agentLine(a: AgentRowView, now: number): string {
   const elapsed = a.startedAt === null ? null : fmt.duration((a.endedAt ?? now) - a.startedAt)
   const name = a.name ?? (a.description || a.type)
-  const parts = [`${a.status}${elapsed === null ? '' : ` ${elapsed}`}`, a.type, a.model?.replace(/^claude-/, '') ?? null, a.activity ?? a.result]
-  return `${name} · ${parts.filter((p): p is string => p !== null && p !== '').join(' · ')}${a.canStop ? ` · stop: Operations (${a.id})` : ''}`
+  const parts = [`${a.status}${elapsed === null ? '' : ` ${elapsed}`}`, a.type, a.model?.replace(/^claude-/, '') ?? null, a.effort === null ? null : `${a.effort} effort`, a.compactions > 0 ? `compacted ${a.compactions}×` : null, a.activity ?? a.result]
+  return `${name} · ${parts.filter((p): p is string => p !== null && p !== '').join(' · ')}${a.canStop ? ` · stop: Operations (${a.id})` : a.canResume ? ` · resume: Activity → Agents (${a.id})` : ''}`
 }
 
 export function agentsText(ops: OpsView, now: number): string {
   const active = ops.agents.filter(a => ['running', 'pending', 'waiting', 'idle'].includes(a.status)).length
   const lines = [`◆ Agents · ${active === 0 ? 'none running' : `${active} active`}`, `  Claude (main) · ${ops.main.text}`]
   for (const a of ops.agents) lines.push(`  ${agentLine(a, now)}`)
-  if (ops.agents.length === 0) lines.push('  No subagents in this context.')
+  if (ops.agents.length === 0) lines.push(`  ${emptyText(ops, 0)}`)
   lines.push('As Claude Code reports them. Stop and Message are in Activity → Agents, where Claude Code accepts them. What Claude may start: /cr agents unlimited|off|ask|<n>.')
   return lines.join('\n')
 }

@@ -28,6 +28,29 @@ const AGENT_MODEL_OPTIONS: readonly { value: AgentModelChoice; label: string; hi
 
 const asChoice = (v: string): AgentModelChoice => AGENT_MODEL_OPTIONS.find(m => m.value === v)?.value ?? 'agent'
 
+/**
+ * The session's advisor: Claude Code's server-side advisor tool, a stronger model Claude consults at key moments.
+ * One per session (subagents inherit it where Claude Code pairs it with their model); set with Claude Code's own
+ * /advisor, and shown as the setting reads back, with its calls in this context.
+ */
+function advisorRow(k: Kit, a: PaneModel['models']['advisor']) {
+  const used = a.uses + a.agentUses
+  const subtitle =
+    a.available === null
+      ? 'Claude Code offers no advisor in this session'
+      : a.configured === null
+        ? 'A stronger model Claude can consult at key moments. Session-wide: subagents inherit it'
+        : [a.pairing !== null && !a.pairing.isPaired ? `Not used: it ${a.pairing.text}` : used === 0 ? 'Not consulted yet in this context' : `Consulted ${used}× in this context${a.agentUses > 0 ? ` (${a.agentUses} by subagents)` : ''}`, a.lastSet !== null && a.lastSet.outcome !== 'applied' ? `last change not applied: run /advisor ${a.lastSet.to}` : null].filter(Boolean).join(' · ')
+  if (a.available === null) return row(k, { key: 'mo-advisor', label: 'Advisor', subtitle, value: a.configured ?? 'Not available', valueTone: 'muted' })
+  const options = [{ value: 'off', label: 'Off', hint: 'no advisor' }, ...a.available.map(m => ({ value: m, label: m.charAt(0).toUpperCase() + m.slice(1), hint: 'consulted at key moments' }))]
+  return row(k, {
+    key: 'mo-advisor',
+    label: 'Advisor',
+    subtitle,
+    control: picker(k, { key: 'mo-advisor', value: a.configured ?? 'off', options, onSelect: v => k.actions.setAdvisor(v) }),
+  })
+}
+
 /** `claude-opus-5-5[1m]` → `opus-5-5`. */
 const shortModel = (id: string): string => id.replace(/^claude-/, '').replace(/\[1m\]$/i, '').replace(/-\d{8}$/, '')
 
@@ -271,6 +294,7 @@ export function behaviorPage(kit: Kit, pane: PaneModel): RenderElement {
               : []),
             p.enabled && p.overrides.length > 0 && row(k, { key: 'mo-overrides', label: 'Per agent', subtitle: p.overrides.map(o => `${o.type} → ${o.model}`).join(' · ') }),
             p.enabled && last !== undefined && row(k, { key: 'mo-last', label: 'Latest agent', subtitle: last.agent, value: last.model === null ? 'its own model' : shortModel(last.model), valueTone: 'muted' }),
+            advisorRow(k, pane.models.advisor),
           ]
         },
       })}

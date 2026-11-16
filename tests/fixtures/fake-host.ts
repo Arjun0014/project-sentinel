@@ -146,6 +146,12 @@ export function fakeHost(
     model: 'claude-opus-5-5',
     /** The surfaces drawing the session (`$.session.surfaces()`); Desktop attaches as `desktop`. */
     surfaces: ['terminal'] as import('claude-code').RenderSurface[],
+    /** Claude Code's command list (`$.command.list()`), with an argument hint where a command has one. */
+    commandList: [] as (import('claude-code').CommandInfo & { argumentHint?: string })[],
+    /** The settings `$.settings.read()` answers (the advisorModel among them). */
+    userSettings: {} as Record<string, unknown>,
+    /** Whether `/advisor <model>` takes effect (it saves advisorModel), as where the account has the advisor. */
+    advisorTakes: true,
   }
   const schedule = (ms: number, fn: () => void, every: number | null) => {
     const t = { id: ++seq, at: time + ms, every, fn, isCancelled: false }
@@ -212,7 +218,12 @@ export function fakeHost(
       return {}
     },
     registerCommand: async () => undefined,
-    listCommands: async () => [],
+    listCommands: async () => live.commandList,
+    runAdvisor: async args => {
+      kept.commands.push(`advisor ${args}`)
+      if (live.advisorTakes) live.userSettings = { ...live.userSettings, advisorModel: args === 'off' ? undefined : args }
+      return { text: live.advisorTakes ? `Advisor: ${args}` : '/advisor isn’t available in this environment.' }
+    },
     listAgents: async () => live.agents,
     listTools: async () => live.tools.map(name => ({ name, description: '', mcp: false })),
     registerTool: async spec => {
@@ -276,7 +287,7 @@ export function fakeHost(
     storeGet: async key => kept.store[key],
     storeSet: async (key, value) => void (kept.store[key] = JSON.parse(JSON.stringify(value))),
     storeDelete: async key => void delete kept.store[key],
-    settings: async () => ({}),
+    settings: async () => live.userSettings,
     cacheTtlConfig: async () => options.ttlConfig ?? {},
     configEnv: async () => options.configEnv ?? { claudeConfigDir: undefined, userProfile: undefined, home: undefined },
     formerHud: async () => options.formerHud,

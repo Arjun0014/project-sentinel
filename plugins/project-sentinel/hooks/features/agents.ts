@@ -10,6 +10,13 @@
  *                      call), how many calls, when it last did anything, its model; a task list or
  *                      milestones it keeps in its own loop, as its plan
  *   `turn.complete`    its end: the first line of its answer, or why it stopped
+ *   SubagentStart/Stop Claude Code's classic hooks, as more evidence: an agent whose spawn this runtime
+ *                      never saw (it began before a reload, or another plugin's hook frame started it) gets
+ *                      a row from SubagentStart, and SubagentStop ends one whose end was not seen. The
+ *                      engine's own forks (compaction, memory) carry agent ids with no SubagentStart, so a
+ *                      row is never made from an unknown id's calls alone.
+ *   `session.compact`  with an `agentId`: the agent compacted its own context (subagents compact natively,
+ *                      in their own window; Claude Code reports no per-agent context usage, so none is shown)
  *
  * A workflow's agents are tracked from their spawn and their own loop's events, grouped by the run's id;
  * the list never names them. No percent complete is ever made up from time or calls: an agent's own plan
@@ -67,6 +74,14 @@ export type AgentDetail = {
   plan: Plan | null
   /** A teammate: each of its turns ends (its turn.complete) and it goes idle, never ended by that. */
   isTeammate: boolean
+  /** The effort its own latest request was sent with (its loop's `turn.step`), when the model takes one. */
+  effort: string | null
+  /** Its own compactions (`session.compact` with its id): how many, the latest's time and the size it left. */
+  compactions: number
+  compactedAt: number | null
+  compactedTo: number | null
+  /** How this runtime first knew of it: its spawn, Claude Code's list, or a SubagentStart hook. */
+  source: 'spawn' | 'list' | 'hook'
 }
 
 export type AgentLedger = Map<string, AgentDetail>
@@ -111,6 +126,11 @@ const blank = (id: string, at: number | null): AgentDetail => ({
   activeAt: null,
   plan: null,
   isTeammate: false,
+  effort: null,
+  compactions: 0,
+  compactedAt: null,
+  compactedTo: null,
+  source: 'spawn',
 })
 
 function trim(ledger: AgentLedger): void {
@@ -177,7 +197,7 @@ export function reconcile(ledger: AgentLedger, listed: readonly ListedAgent[], n
     seen.add(l.id)
     const isNew = !ledger.has(l.id)
     // A row first seen in the list (spawned before a reload): when it began is not known.
-    const a = ledger.get(l.id) ?? blank(l.id, null)
+    const a = ledger.get(l.id) ?? { ...blank(l.id, null), source: 'list' as const }
     // Listed alive after an end this runtime saw: a list a moment behind (the end stands), unless the
     // agent's loop has acted since (a message resumed it under the same id).
     const isStale = isAlive(l.status) && a.endedAt !== null && a.status !== 'gone' && !a.isTeammate && (a.activeAt === null || a.activeAt <= a.endedAt)
@@ -224,11 +244,46 @@ export function noteCall(ledger: AgentLedger, agentId: string, doing: string, at
 const revived = (a: AgentDetail, at: number): Partial<AgentDetail> =>
   !isAlive(a.status) && a.status !== 'gone' && a.endedAt !== null && at > a.endedAt ? { status: 'running', endedAt: null, result: null, isFailed: false } : {}
 
-/** A request in the agent's loop (its `turn.step`): it is active, on this model. */
-export function noteStep(ledger: AgentLedger, agentId: string, at: number, model?: string): boolean {
+/** A request in the agent's loop (its `turn.step`): it is active, on this model, at this effort. */
+export function noteStep(ledger: AgentLedger, agentId: string, at: number, model?: string, effort?: string | null): boolean {
   const a = ledger.get(agentId)
   if (a === undefined) return false
-  ledger.set(agentId, { ...a, ...revived(a, at), activeAt: at, ...(model === undefined ? {} : { model }) })
+  ledger.set(agentId, { ...a, ...revived(a, at), activeAt: at, ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) })
+  return true
+}
+
+/**
+ * Claude Code's SubagentStart: the agent runs. One this runtime never saw spawn gets its row here (its type is
+ * all the hook says); a known one still starting is running from now. True when a row was made.
+ */
+export function noteHookStart(ledger: AgentLedger, input: { agentId: string; type: string; at: number }): boolean {
+  const a = ledger.get(input.agentId)
+  if (a !== undefined) {
+    if (a.status === 'starting') ledger.set(a.id, { ...a, status: 'running', activeAt: a.activeAt ?? input.at })
+    return false
+  }
+  ledger.set(input.agentId, { ...blank(input.agentId, input.at), type: clean(input.type, 40), status: 'running', activeAt: input.at, source: 'hook' })
+  trim(ledger)
+  return true
+}
+
+/**
+ * Claude Code's SubagentStop: the agent's loop stopped. An end already seen (its turn.complete) stands; else it
+ * ends here with its last message. A teammate goes idle instead. An agent never seen gets an ended row.
+ */
+export function noteHookStop(ledger: AgentLedger, input: { agentId: string; type: string; lastMessage: string; at: number }): boolean {
+  const a = ledger.get(input.agentId)
+  if (a !== undefined && (a.endedAt !== null || (!isAlive(a.status) && a.status !== 'gone'))) return false
+  if (a === undefined) ledger.set(input.agentId, { ...blank(input.agentId, input.at), type: clean(input.type, 40), status: 'running', source: 'hook' })
+  noteEnd(ledger, input.agentId, { at: input.at, reason: 'answer', answer: input.lastMessage })
+  return true
+}
+
+/** The agent compacted its own context (`session.compact` with its id). An id the ledger does not know (an engine fork) is left out. */
+export function noteCompaction(ledger: AgentLedger, agentId: string, input: { at: number; tokensAfter?: number }): boolean {
+  const a = ledger.get(agentId)
+  if (a === undefined) return false
+  ledger.set(agentId, { ...a, compactions: a.compactions + 1, compactedAt: input.at, compactedTo: input.tokensAfter ?? null, activeAt: input.at })
   return true
 }
 
@@ -324,6 +379,11 @@ export function restoreLedger(ledger: AgentLedger, raw: unknown): number {
       activeAt: time(x.activeAt),
       plan: x.plan === undefined || x.plan === null ? null : planOf(x.plan),
       isTeammate: x.isTeammate === true,
+      effort: str(x.effort, 12),
+      compactions: typeof x.compactions === 'number' && Number.isFinite(x.compactions) ? Math.max(0, Math.round(x.compactions)) : 0,
+      compactedAt: time(x.compactedAt),
+      compactedTo: typeof x.compactedTo === 'number' && Number.isFinite(x.compactedTo) ? x.compactedTo : null,
+      source: x.source === 'list' || x.source === 'hook' ? x.source : 'spawn',
     })
     n += 1
   }
@@ -368,11 +428,19 @@ function rowOf(d: AgentDetail, l: ListedAgent | undefined, activity: { label: st
     isFailed: status === 'failed' || status === 'killed' || (!alive && d.isFailed),
     canStop: alive && isAddressable,
     canMessage: alive && isAddressable,
+    // Claude Code resumes a finished subagent from its transcript when it is sent a message (`$.session.send`
+    // with its id, as SendMessage does): one this session saw end, never a workflow's agent, a fork or a teammate.
+    canResume: !alive && status !== 'gone' && d.workflow === null && !d.isFork && !isTeammate && d.endedAt !== null,
     isTeammate,
     workflow: d.workflow,
     activeAt: d.activeAt,
     plan: planView(d.plan),
     isListed: l !== undefined,
+    effort: d.effort,
+    compactions: d.compactions,
+    compactedAt: d.compactedAt,
+    compactedTo: d.compactedTo,
+    source: d.source,
     note: alive && l === undefined && d.workflow === null ? (d.status === 'starting' ? 'Starting: not listed by Claude Code yet' : `Not in Claude Code's list for ${d.missed} look${d.missed === 1 ? '' : 's'}`) : null,
   }
 }
@@ -429,7 +497,15 @@ export function doingWord(r: Pick<AgentRowView, 'status' | 'activity'>): string 
  * The agent band: while agents run, one line per agent (up to BAND_LINES), or, past that, one line counting
  * them by what they are doing ("5 agents · 2 reading · 2 editing · 1 checking"). Null when none runs.
  */
-export function bandOf(rows: readonly AgentRowView[], now: number): { lines: { id: string; name: string; status: string; doing: string; elapsedMs: number | null; plan: string | null }[]; summary: string | null } | null {
+/** A model as the band names it: its family (`Sonnet`), or the id's own short form for one it cannot name. */
+export function modelWord(model: string | null): string | null {
+  if (model === null || model === '') return null
+  const m = model.toLowerCase()
+  for (const f of ['haiku', 'sonnet', 'opus', 'fable']) if (m.includes(f)) return f.charAt(0).toUpperCase() + f.slice(1)
+  return clean(model.replace(/^claude-/, ''), 20)
+}
+
+export function bandOf(rows: readonly AgentRowView[], now: number): { lines: { id: string; name: string; status: string; doing: string; elapsedMs: number | null; plan: string | null; model: string | null }[]; summary: string | null } | null {
   const alive = aliveRows(rows)
   if (alive.length === 0) return null
   if (alive.length > BAND_LINES) {
@@ -446,6 +522,7 @@ export function bandOf(rows: readonly AgentRowView[], now: number): { lines: { i
       doing: r.activity ?? (r.status === 'starting' || r.status === 'pending' ? 'Starting' : r.status === 'waiting' ? 'Waiting' : r.status === 'idle' ? 'Idle' : 'Thinking'),
       elapsedMs: r.startedAt === null ? null : Math.max(0, now - r.startedAt),
       plan: r.plan === null ? null : `${r.plan.done}/${r.plan.total}`,
+      model: modelWord(r.model),
     })),
     summary: null,
   }

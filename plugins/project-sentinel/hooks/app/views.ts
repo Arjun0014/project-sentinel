@@ -44,6 +44,7 @@ import { backgroundWords, blockingOf, classOf, handoffPoint, isHandoffActive } f
 import { CLASS_WORDS, isBlocking } from '../features/background'
 import { bandOf } from '../features/agents'
 import { anomalyText } from '../features/contextEpoch'
+import { advisorLine, pairing } from '../features/advisor'
 import { runningOf } from '../features/dependencies'
 import * as Chain from '../features/chain'
 import { GROUP_LABEL, GROUP_ORDER, attentionOf, groupOf, isOpen, nowOf, turnSummaryOf } from '../features/digest'
@@ -597,6 +598,15 @@ export function paneOf(rt: Runtime): PaneModel {
       resolved: [...rt.models.known.entries()].map(([alias, id]) => ({ alias, id })),
       unavailable: [...rt.models.unavailable],
       guard: rt.models.lastGuard,
+      advisor: {
+        available: rt.advisor.available,
+        configured: rt.advisor.configured,
+        line: advisorLine(rt.advisor, rt.sessionModel),
+        pairing: rt.advisor.configured === null || rt.sessionModel === '' ? null : pairing(rt.advisor.configured, rt.sessionModel),
+        uses: rt.advisor.uses,
+        agentUses: rt.advisor.agentUses,
+        lastSet: rt.advisor.lastSet,
+      },
     },
     guard: {
       turn: rt.guard.turnBlocks,

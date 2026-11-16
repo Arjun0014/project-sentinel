@@ -5,9 +5,11 @@
  *                 their parent; a workflow's agents under their run), name and type, status, how long,
  *                 what it is doing (its latest call) and when it last did anything, its calls and model,
  *                 its own plan as a track when it keeps one, Stop and Message where Claude Code takes them
- *   Earlier       agents that ended in the last few minutes: their result, or why they stopped
+ *   Earlier       agents that ended in the last few minutes: their result, or why they stopped, and
+ *                 Resume where Claude Code resumes a finished subagent (a message to its id)
  *
- * Nothing made up: no percent from time or calls, no cost per agent (Claude Code reports none).
+ * Nothing made up: no percent from time or calls, no cost or context usage per agent (Claude Code reports
+ * neither); an agent's own compactions are shown as they happen.
  */
 
 import type { RenderElement } from 'claude-code'
@@ -56,6 +58,8 @@ function agentBlock(k: Kit, ops: OpsView, a: AgentRowView, depth: number): Rende
   const gap = isNative(k) ? 1 : 0
   // What it is doing now, when it last did anything, and how much: observed, never estimated.
   const now = alive ? spaced(k, [a.activity ?? (a.calls === 0 ? 'No calls yet' : null), agoText(a.activeAt, k.now) === null ? null : `last call ${agoText(a.activeAt, k.now)}`, fmt.plural(a.calls, 'call')]) : (a.result ?? null)
+  // Its own context: Claude Code reports no usage per agent, only its compactions (a subagent compacts natively when its window fills).
+  const compacted = a.compactions === 0 ? null : `Compacted its own context ${a.compactions === 1 ? 'once' : `${a.compactions}×`}${a.compactedAt === null ? '' : `, last ${agoText(a.compactedAt, k.now) ?? ''}`}${a.compactedTo === null ? '' : ` (to ${fmt.tokens(a.compactedTo)} tokens)`}`
   return (
     <Box key={`agent-${a.id}`} flexDirection="column" rowGap={gap} marginLeft={Math.min(3, depth) * 2}>
       {listItem(k, {
@@ -73,21 +77,29 @@ function agentBlock(k: Kit, ops: OpsView, a: AgentRowView, depth: number): Rende
           {workTrack(k, { key: `agent-${a.id}-track`, done: a.plan.done, total: a.plan.total, hasCurrent: a.plan.current !== null, max: 12, caption: `${a.plan.done} of ${a.plan.total}${a.plan.current === null ? '' : ` · ${a.plan.current}`}` })}
         </Box>
       )}
-      {a.note === null ? null : (
-        <Box key={`agent-${a.id}-note`} marginLeft={3}>
-          <Text dimColor wrap="truncate-end">
-            {a.note}
-          </Text>
+      {a.note === null && compacted === null ? null : (
+        <Box key={`agent-${a.id}-note`} marginLeft={3} flexDirection="column">
+          {a.note === null ? null : (
+            <Text dimColor wrap="truncate-end">
+              {a.note}
+            </Text>
+          )}
+          {compacted === null ? null : (
+            <Text dimColor wrap="truncate-end">
+              {compacted}
+            </Text>
+          )}
         </Box>
       )}
       {isOpen(ops, a.id) ? (
         <Box key={`agent-${a.id}-details`} marginLeft={3} flexDirection="column">
-          <Text dimColor wrap="wrap">{spaced(k, [a.type, a.model === null ? 'model not known' : a.model, a.isBackground === null ? null : a.isBackground ? 'background' : 'foreground', a.isFork ? 'fork' : null, a.isTeammate ? 'teammate' : null])}</Text>
+          <Text dimColor wrap="wrap">{spaced(k, [a.type, a.model === null ? 'model not known' : a.model, a.effort === null ? null : `${a.effort} effort`, a.isBackground === null ? null : a.isBackground ? 'background' : 'foreground', a.isFork ? 'fork' : null, a.isTeammate ? 'teammate' : null])}</Text>
           <Text dimColor wrap="wrap">
             {spaced(k, [
               a.workflow !== null ? `workflow ${a.workflow.runId}, agent ${a.workflow.index}` : a.parentId === null ? 'started by the main conversation' : `started by ${a.parentId}`,
               a.startedAt === null ? 'started before a reload' : `started ${fmt.clock(a.startedAt)}`,
               a.isListed ? 'listed by Claude Code' : a.workflow !== null ? "a workflow's agents are not in Claude Code's list" : null,
+              a.source === 'hook' ? 'known from Claude Code’s SubagentStart (its spawn was not seen here)' : null,
             ])}
           </Text>
           {a.result === null ? null : <Text wrap="wrap">{a.result}</Text>}
@@ -96,7 +108,7 @@ function agentBlock(k: Kit, ops: OpsView, a: AgentRowView, depth: number): Rende
       ) : null}
       {isMessaging && Input !== undefined ? (
         <Box key={`agent-${a.id}-msg`} marginLeft={3} flexDirection="column" rowGap={gap}>
-          <Input key={`agent-${a.id}-text`} value="" placeholder="Stop after this file" submitLabel={isNative(k) ? 'Send' : 'send'} onSubmit={text => k.actions.agentMessage(a.id, text)} />
+          <Input key={`agent-${a.id}-text`} value="" placeholder={alive ? 'Stop after this file' : 'Pick up where you stopped and finish the review'} submitLabel={isNative(k) ? (alive ? 'Send' : 'Resume') : alive ? 'send' : 'resume'} onSubmit={text => k.actions.agentMessage(a.id, text)} />
           {buttons(k, [{ key: `agent-${a.id}-msg-cancel`, label: 'Cancel', onPress: () => k.actions.editMessage(null) }], `agent-${a.id}-msg-acts`, true)}
         </Box>
       ) : (
@@ -106,6 +118,7 @@ function agentBlock(k: Kit, ops: OpsView, a: AgentRowView, depth: number): Rende
             [
               { key: `agent-${a.id}-stop`, label: 'Stop', onPress: () => k.actions.agentStop(a.id), isHidden: !a.canStop },
               { key: `agent-${a.id}-message`, label: 'Message', onPress: () => k.actions.editMessage(a.id), isHidden: !a.canMessage || Input === undefined },
+              { key: `agent-${a.id}-resume`, label: 'Resume', onPress: () => k.actions.editMessage(a.id), isHidden: !a.canResume || Input === undefined },
             ],
             `agent-${a.id}-buttons`,
             true,
@@ -204,7 +217,7 @@ export function agentsPage(kit: Kit, ops: OpsView | undefined): RenderElement {
         rows: k => [
           listItem(k, { key: 'agent-main', glyph: G.dot, tone: ops.isTurnRunning ? 'info' : 'muted', text: 'Claude', right: 'Main conversation', detail: ops.main.text }),
           ...entries(k, ops, hierarchyOf(alive)),
-          alive.length === 0 ? note(k, ended.length === 0 ? 'No subagents in this context.' : 'No subagent is running now.', 'agents-none') : null,
+          alive.length === 0 ? note(k, emptyText(ops, ended.length), 'agents-none') : null,
         ],
       })}
       {ended.length === 0
@@ -216,9 +229,19 @@ export function agentsPage(kit: Kit, ops: OpsView | undefined): RenderElement {
             aside: 'last 10 minutes',
             rows: k => entries(k, ops, hierarchyOf(ended)),
           })}
-      {note(kit, 'As Claude Code reports them: status from its agent list, activity from each agent’s own calls. Stop and Message are its TaskStop and SendMessage, offered where it takes them. No progress is estimated and no cost per agent is reported.', 'agents-footer')}
+      {note(kit, 'As Claude Code reports them: status from its agent list and its SubagentStart/Stop hooks, activity from each agent’s own calls. Stop, Message and Resume are its TaskStop and SendMessage, offered where it takes them. Each subagent has its own context and compacts it itself; Claude Code reports no usage per agent, so none is shown. No progress is estimated and no cost per agent is reported.', 'agents-footer')}
     </Box>
   )
+}
+
+/**
+ * What Running now says with no agent alive. "No subagents" only when nothing at all was seen: no record, and no
+ * loop acting that no record names (seen live: Claude Code ran agents while the panel said there were none).
+ */
+export function emptyText(ops: Pick<OpsView, 'unnamedLoops'>, ended: number): string {
+  if (ended > 0) return 'No subagent is running now.'
+  if (ops.unnamedLoops > 0) return `No subagent Control Room has a record of, but Claude Code reported calls from ${fmt.plural(ops.unnamedLoops, 'loop')} it cannot name (an engine fork, or an agent started before a reload): it shows here once Claude Code lists it.`
+  return 'No subagents in this context.'
 }
 
 /** Operations' one line about agents, leading to their own view; nothing while there are none. */

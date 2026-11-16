@@ -149,7 +149,7 @@ describe('the agent ledger', () => {
     expect(bandOf(agentRows(ledger, [], 0), 0)).toBeNull()
     noteSpawn(ledger, spawn('a1', { description: 'Explore the cache' }))
     noteCall(ledger, 'a1', 'Reading src/cache.ts', 1500)
-    expect(bandOf(agentRows(ledger, [], 61_000), 61_000)).toEqual({ lines: [{ id: 'a1', name: 'Explore the cache', status: 'starting', doing: 'Reading src/cache.ts', elapsedMs: 60_000, plan: null }], summary: null })
+    expect(bandOf(agentRows(ledger, [], 61_000), 61_000)).toEqual({ lines: [{ id: 'a1', name: 'Explore the cache', status: 'starting', doing: 'Reading src/cache.ts', elapsedMs: 60_000, plan: null, model: 'Sonnet' }], summary: null })
     for (const [id, doing] of [['a2', 'Reading src/b.ts'], ['a3', 'Editing src/c.ts'], ['a4', 'Running tests']] as const) {
       noteSpawn(ledger, spawn(id))
       noteCall(ledger, id, doing, 1500)
@@ -332,7 +332,7 @@ describe('agents as Claude Code raises them', () => {
     expect(spawned.agentId).toBe('ag1')
     await w.clock.advance(300)
     const band = await $.ui.mount({ plugin: 'project-sentinel', surface: 'terminal', component: 'AbovePrompt', props: bandSite })
-    expect(await band.find({ text: /Scan the cache code · Starting/ })).toBeDefined()
+    expect(await band.find({ text: /Scan the cache code · Sonnet · Starting/ })).toBeDefined()
     const pane = await $.ui.mount({ plugin: 'project-sentinel', surface: 'terminal', component: 'Pane', requestId: 'control-room', props: paneProps })
     // The band's line opens Activity → Agents.
     await band.press({ key: 'band-ag1-open' })
@@ -374,7 +374,7 @@ describe('agents as Claude Code raises them', () => {
     await w.clock.advance(2500)
     const band = await $.ui.mount({ plugin: 'project-sentinel', surface: 'desktop', component: 'AbovePrompt', props: bandSite })
     const drawn = await band.drawn()
-    expect(await band.find({ text: /Count A · Running node/ })).toBeDefined()
+    expect(await band.find({ text: /Count A · Haiku · Running node/ })).toBeDefined()
     expect(await band.find({ text: /Count B ·/ })).toBeDefined()
     expect(desktopKeys(drawn)).toEqual(expect.arrayContaining(['band-ag1-open', 'band-ag2-open']))
     // What the app's page refuses: a Button with anything but one string inside, a text it would draw as a table.

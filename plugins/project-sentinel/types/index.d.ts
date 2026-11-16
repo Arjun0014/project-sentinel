@@ -228,7 +228,7 @@ export type HudModel = {
    * for how long, its own plan's count when it keeps one), or past three one line counting them by what
    * they do. Null when none runs: the band is gone.
    */
-  agentBand: { lines: { id: string; name: string; status: string; doing: string; elapsedMs: number | null; plan: string | null }[]; summary: string | null } | null
+  agentBand: { lines: { id: string; name: string; status: string; doing: string; elapsedMs: number | null; plan: string | null; model: string | null }[]; summary: string | null } | null
   /**
    * The plan's usage windows as Claude Code reports them (`$.session.usage().rateLimits`): the status
    * bar's 5H reading, in place of the run's cost (which Overview, Context → Run and the Run Budget keep).
@@ -573,6 +573,18 @@ export type PaneModel = {
     unavailable: string[]
     /** The model / effort guard's latest word ("before the request: effort high → low on …"), or null. */
     guard: { at: number; line: string } | null
+    /** Claude Code's advisor (features/advisor.ts): offered models, the setting, its use in this context. */
+    advisor: {
+      /** Models /advisor lists here; null when Claude Code offers no advisor in this session. */
+      available: string[] | null
+      configured: string | null
+      line: string
+      /** Whether the configured advisor pairs with the main model, in words; null when it cannot be told. */
+      pairing: { isPaired: boolean; text: string } | null
+      uses: number
+      agentUses: number
+      lastSet: { at: number; to: string; outcome: 'applied' | 'not-applied' | 'failed'; detail: string } | null
+    }
   }
   guard: { turn: number; session: number; last: { verdict: string; score: number; reasons: string[]; at: number } | null; isActive: boolean; reason: string | null }
   frontier: { lastEffort: string | null; isEffortSupported: boolean | null; isComposeReached: boolean | null; delivery: FrontierDeliveryView }
@@ -960,6 +972,8 @@ export type AgentRowView = {
   isFailed: boolean
   canStop: boolean
   canMessage: boolean
+  /** A finished subagent Claude Code resumes from its transcript when sent a message. */
+  canResume: boolean
   /** A teammate of the session's team (it goes idle between turns). */
   isTeammate: boolean
   /** A workflow run's agent (Claude Code never lists these): the run's id and its place in it. */
@@ -972,6 +986,14 @@ export type AgentRowView = {
   isListed: boolean
   /** Why an alive agent is not in Claude Code's list right now (starting, omitted for a look or two). */
   note: string | null
+  /** The effort its latest request was sent with; null when not seen or the model takes none. */
+  effort: string | null
+  /** Its own compactions (it compacts its own context natively): how many, the latest's time, the size left. */
+  compactions: number
+  compactedAt: number | null
+  compactedTo: number | null
+  /** How it was first known: its spawn, Claude Code's list, or Claude Code's SubagentStart hook. */
+  source: 'spawn' | 'list' | 'hook'
 }
 
 export type BudgetMetricView = { used: number | null; limit: number | null; tone: Tone; isPartial?: boolean }
@@ -1044,6 +1066,11 @@ export type OpsView = {
   watchersDone: WatcherView[]
   externalWakes: ExternalWakeView[]
   agents: AgentRowView[]
+  /**
+   * Loops Claude Code reported tool calls from in the last few minutes that no agent record names (an engine
+   * fork, or an agent started before a reload that its list does not name yet): counted, never made into rows.
+   */
+  unnamedLoops: number
   /** The main conversation, as the first row of Agents. */
   main: { state: HudState; text: string }
   budget: BudgetView

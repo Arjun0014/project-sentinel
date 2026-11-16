@@ -415,6 +415,9 @@ describe('ui', () => {
     await ui.press({ key: 'mo-explore:sonnet' })
     await w.clock.advance(2000)
     expect(saved(w).agentModels).toMatchObject({ enabled: true, explore: 'sonnet', debugging: 'opus', implementation: 'session' })
+    // The Models card: the main conversation's model (never switched) and the session's advisor.
+    expect(await ui.find({ text: /Control Room never switches it/ })).toBeDefined()
+    expect(await ui.find({ text: /^Advisor$/ })).toBeDefined()
   })
 
   test('Focus View draws a compact tool row that expands in place', { timeoutMs: 30_000 }, async ($, on) => {

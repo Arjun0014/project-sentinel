@@ -11,6 +11,7 @@ import * as fmt from '../core/format'
 import { listProfiles } from '../core/profiles'
 import { AGENT_CATEGORIES, AGENT_MODEL_CHOICES, ANSWER_STYLES, type AgentCategory, type AgentModelChoice, type AnswerStyle, defaultSettings } from '../core/settings'
 import { CATEGORY_LABEL, SUGGESTED } from '../features/agentModels'
+import { advisorLine } from '../features/advisor'
 import type { CacheView } from '../../types'
 import { VERSION } from '../constants'
 import * as Chain from '../features/chain'
@@ -38,6 +39,7 @@ const HELP = [
   '  /cr agents                what is running (Activity → Agents) · /cr agents unlimited|off|ask|<n>: what Claude may start',
   '  /cr models                the main conversation’s model (never switched) and the Agent Model Policy',
   '  /cr models on|off · <kind> agent|session|haiku|sonnet|opus|fable · type <agent-type> <model>|clear',
+  '  /cr advisor [model|off]   Claude Code’s advisor: what it is set to, whether it was consulted; sets it with /advisor',
   '  /cr style standard|brief|ste|mission|quest   how Claude writes to you',
   '  /cr cache                 the prompt cache: lifetime, Keep warm, recent rebuilds',
   '  /cr cache keep on|off · idle 2h · stable on|off · guard on|off',
@@ -383,6 +385,19 @@ export async function handleCommand(rt: Runtime, args: string): Promise<CommandR
     case 'models':
     case 'model':
       return { text: modelsCommand(rt, words.slice(1)) }
+    case 'advisor': {
+      await rt.refreshAdvisor()
+      if (a1 === undefined) {
+        const f = rt.advisor
+        const lines = [
+          `Advisor: ${advisorLine(f, rt.sessionModel)}`,
+          f.available === null ? 'Claude Code lists no /advisor in this session (the account or engine does not offer it here).' : `Claude Code offers: ${[...f.available, 'off'].join(', ')}. Set: /cr advisor <model>|off (runs Claude Code’s own /advisor).`,
+          'It is session-wide: subagents inherit it where Claude Code pairs it with their model. Changing it keeps the cached conversation.',
+        ]
+        return { text: lines.join('\n') }
+      }
+      return { text: await rt.setAdvisor(a1) }
+    }
     case 'style':
     case 'answers': {
       const aliases: Record<string, AnswerStyle> = { standard: 'standard', default: 'standard', normal: 'standard', brief: 'brief', short: 'brief', ste: 'ste', plain: 'ste', simplified: 'ste', mission: 'mission', quest: 'quest', game: 'quest' }

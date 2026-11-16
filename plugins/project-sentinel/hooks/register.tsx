@@ -86,6 +86,7 @@ function hostOf($: EngineInterface): Host {
     readPrompt: () => $.prompt.read().then(r => ({ text: r.text })),
     clearContext: () => $.command.run({ command: 'clear', args: '' }),
     compactCommand: instructions => $.command.run({ command: 'compact', args: instructions }),
+    runAdvisor: args => $.command.run({ command: 'advisor', args }),
     registerCommand: spec => $.command.register(spec),
     listCommands: () => $.command.list(),
 
@@ -248,6 +249,21 @@ export const register: Register = on => {
     if (rt.isStandby) return next(e)
     const answer = await next(e)
     if (e.agentId === undefined) rt.onCompacted(e.trigger, answer)
+    // A subagent compacting its own context (natively, in its own window): noted on its row.
+    else if (answer.skip === undefined) rt.ops.noteAgentCompaction(e.agentId, answer.tokensAfter)
+    return answer
+  }).catch(($, e, next) => next(e))
+
+  // Claude Code's own word that a subagent started and stopped: more evidence for Activity → Agents (a row for
+  // an agent whose spawn this runtime never saw; an end its turn.complete did not report).
+  on('classic.SubagentStart', ($, e, next) => {
+    if (!rt.isStandby && e.agent_id !== '') rt.ops.noteSubagentStart(e.agent_id, e.agent_type)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('classic.SubagentStop', async ($, e, next) => {
+    const answer = await next(e)
+    if (!rt.isStandby && e.agent_id !== '' && answer.block === undefined && answer.preventContinuation !== true) rt.ops.noteSubagentStop(e.agent_id, e.agent_type, e.last_assistant_message ?? '')
     return answer
   }).catch(($, e, next) => next(e))
 
@@ -448,6 +464,13 @@ export const register: Register = on => {
 
   // -------------------------------------------------------------------------
   // Commands
+
+  // The person ran /advisor themself: what it set is read back (the panel shows the setting, never a guess).
+  on('command.run', { command: 'advisor' }, async ($, e, next) => {
+    const answer = await next(e)
+    if (!rt.isStandby && rt.host !== null) void rt.refreshAdvisor()
+    return answer
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: ['control-room', 'cr'] }, async ($, e, next) => {
     if (rt.isStandby) return next(e)

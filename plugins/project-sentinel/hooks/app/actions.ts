@@ -234,5 +234,9 @@ export function actionsOf(rt: Runtime): Actions {
       rt.ui.ops.messaging = null
       rt.publisher.mark('ops')
     },
+    setAdvisor: choice =>
+      void rt.setAdvisor(choice).then(text => {
+        if (rt.settings.ui.toasts) rt.host?.toast(text, 6000)
+      }),
   }
 }
