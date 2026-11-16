@@ -284,13 +284,6 @@ export class CacheGuardian {
     this.ctx.changed()
   }
 
-  /** The model router sends this turn to another model: a miss after it is the router's doing, not the person's. */
-  noteRouted(from: string, to: string, why: string): void {
-    if (from === to) return
-    this.state = Cache.noteChange(this.state, { cause: 'model', at: this.ctx.now(), detail: `Model router: ${Cache.shortModel(from)} → ${Cache.shortModel(to)} (${why})`, by: 'router' })
-    this.ctx.changed()
-  }
-
   /** The cache lifetime as the engine reported it before a model switch. */
   noteTtl(ttl: '5m' | '1h'): void {
     this.state = Cache.withTtl(this.state, ttl, 'engine')

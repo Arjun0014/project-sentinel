@@ -326,7 +326,7 @@ export function overviewPage(kit: Kit, data: PaneData): RenderElement {
           toggle(k, 'sys-frontier', 'Frontier Max', s.frontier.enabled, () => u(d => void (d.frontier.enabled = !d.frontier.enabled)), st.frontier),
           toggle(k, 'sys-guard', 'Lazy-exit guard', s.guard.enabled, () => u(d => void (d.guard.enabled = !d.guard.enabled)), st.guard),
           toggle(k, 'sys-qa', 'Release check', s.qa.enabled, () => u(d => void (d.qa.enabled = !d.qa.enabled)), st.qa),
-          row(k, { key: 'sys-router', label: 'Model router', control: link(k, { key: 'sys-router', label: st.router.text, onPress: () => kit.actions.setTab('behavior') }) }),
+          row(k, { key: 'sys-models', label: 'Agent models', control: link(k, { key: 'sys-models', label: st.agentModels.text, onPress: () => kit.actions.setTab('behavior') }) }),
           row(k, { key: 'sys-answers', label: 'Answer style', control: link(k, { key: 'sys-answers', label: st.answers.text, onPress: () => kit.actions.setTab('behavior') }) }),
         ],
       })}

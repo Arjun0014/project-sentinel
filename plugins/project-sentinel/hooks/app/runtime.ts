@@ -59,7 +59,8 @@ import type { Decision } from '../features/permissions/categories'
 import * as prompts from '../features/prompts'
 import { type Pressure, gateHeavy, isOver } from '../features/resources/pressure'
 import { heavyKinds, heavyLabel } from '../features/resources/heavy'
-import { type Family, classifyTask, familyOf, routeMain, routeSubagent } from '../features/router'
+import { type Family, decideAgentModel, familyOf } from '../features/agentModels'
+import * as ModelGuard from '../features/modelGuard'
 import { decideSpawn, isOffered } from '../features/subagents'
 import { aliveRows, limitCount } from '../features/agents'
 import { doingOf } from '../features/digest'
@@ -183,15 +184,28 @@ export class Runtime {
 
   turn: TurnState = { id: null, isRunning: false, kind: 'other', request: '', toolCount: 0, editCount: 0 }
   guard = { turnBlocks: 0, sessionBlocks: 0, lastBlockedAnswer: '', last: null as (GuardAssessment & { at: number }) | null }
-  router = {
-    turnModel: null as string | null,
-    lastDecision: null as string | null,
-    /** Model ids the engine reported answering this session, by family: the only ids a request is routed to. */
+  /**
+   * Models in this session. The main conversation's is Claude Code's: Project Sentinel never switches it (a prompt
+   * cache belongs to one model, and a long run holds one large cache). Subagents' models follow the Agent Model
+   * Policy, when it is on.
+   */
+  models = {
+    /** Model ids the engine reported answering this session, by family: how the policy names a model no alias covers. */
     known: new Map<Family, string>(),
-    /** Families whose routed model the engine refused this session. */
+    /** Families whose model the engine refused for an agent the policy set it on, this session. */
     unavailable: new Set<string>(),
-    /** True when the router sent the last turn to another model than the session's. */
-    wasRouted: false,
+    /** The policy's latest decisions, newest last (Behavior → Models, Activity → Agents, the trace). */
+    decisions: [] as { at: number; agent: string; why: string; model: string | null }[],
+    /** Agents the policy set a model on, by id: a refusal there teaches that the family is unavailable. */
+    byPolicy: new Map<string, string>(),
+    /** The main conversation's last request, as sent (model and effort): what the next one is compared with. */
+    lastMain: null as { model: string; effort: string | null; at: number } | null,
+    /** A model switch the person already confirmed (Claude Code's own dialog, or "Send anyway"): not asked again. */
+    confirmedSwitch: null as { from: string; to: string } | null,
+    /** A switch Control Room asked about in Claude Code's dialog: confirmed once Claude Code reports it made. */
+    pendingAsk: null as { from: string; to: string; at: number } | null,
+    /** The switch guard's last word, for Context → Cache and the trace. */
+    lastGuard: null as { at: number; line: string } | null,
   }
   agents = {
     list: [] as AgentInfo[],
@@ -486,8 +500,20 @@ export class Runtime {
     // Claude Code's own price for re-caching on the model switched to: the Cold Resume Guard's figure.
     this.cache.noteWriteRate({ model: e.to_model, ttl: e.cache_ttl === '5m' || e.cache_ttl === '1h' ? e.cache_ttl : null, usd: e.estimated_cache_write_usd, tokens: e.context_tokens, pricing: e.pricing })
     const s = this.settings.cache
-    if (!s.guardModelSwitch || !e.prompt_cache_warm || e.from_model === e.to_model || e.context_tokens < LIMITS.guardSwitchTokens) return null
-    if (e.source !== 'command' && e.source !== 'picker') return null
+    const what = `${e.from_model || '?'} → ${e.to_model || '?'} (source ${e.source}, ${e.context_tokens} tokens, cache ${e.prompt_cache_warm ? 'warm' : 'not warm'})`
+    const skip = (why: string): null => {
+      this.trace(`model guard: PreModelSwitch ${what}: not asked: ${why}`)
+      return null
+    }
+    if (!s.guardModelSwitch) return skip('the model switch guard is off')
+    if (e.from_model === e.to_model) return skip('the same model')
+    if (!e.prompt_cache_warm) return skip('Claude Code says the cache is not warm')
+    if (e.context_tokens < LIMITS.guardSwitchTokens) return skip(`under ${fmt.tokens(LIMITS.guardSwitchTokens)} tokens`)
+    // A set_model switch (Desktop's picker, Remote Control, an IDE) has no confirmation dialog Claude Code documents:
+    // the switch goes ahead, and the next message the person sends is checked against the cache's model instead.
+    if (e.source !== 'command' && e.source !== 'picker') return skip(`a ${e.source} switch has no documented dialog; the next message is checked instead`)
+    this.models.pendingAsk = { from: e.from_model, to: e.to_model, at: this.clock() }
+    this.trace(`model guard: PreModelSwitch ${what}: asked in Claude Code's dialog`)
     // Claude Code shows the reason on one line, cut at the terminal's width: the figure first, the model in its own button.
     const cost = Number.isFinite(e.estimated_cache_write_usd) && e.estimated_cache_write_usd > 0 ? ` (about ${fmt.cost(e.estimated_cache_write_usd)})` : ''
     return `Control Room: this re-sends ${fmt.tokens(e.context_tokens)} cached tokens uncached${cost}. A fresh context avoids it.`
@@ -495,6 +521,13 @@ export class Runtime {
 
   onPostModelSwitch(e: { from_model: string; to_model: string; cache_ttl: '5m' | '1h'; source: string; context_tokens?: number; estimated_cache_write_usd?: number; pricing?: string }): void {
     const by = e.source === 'auto' || e.source === 'resume' ? 'engine' : 'person'
+    // A switch Control Room asked about in Claude Code's dialog, now made: the person confirmed it there, so the
+    // next message is not asked about it again.
+    const asked = this.models.pendingAsk
+    this.models.pendingAsk = null
+    const isConfirmed = asked !== null && ModelGuard.sameModel(asked.from, e.from_model) && ModelGuard.sameModel(asked.to, e.to_model) && this.clock() - asked.at < 30 * 60_000
+    if (isConfirmed) this.models.confirmedSwitch = { from: e.from_model, to: e.to_model }
+    this.trace(`model guard: Claude Code switched ${e.from_model || '?'} → ${e.to_model || '?'} (source ${e.source}${isConfirmed ? ', confirmed in its dialog' : ''})`)
     if (e.estimated_cache_write_usd !== undefined && e.context_tokens !== undefined) {
       this.cache.noteWriteRate({ model: e.to_model, ttl: e.cache_ttl === '5m' || e.cache_ttl === '1h' ? e.cache_ttl : null, usd: e.estimated_cache_write_usd, tokens: e.context_tokens, pricing: e.pricing })
     }
@@ -1287,7 +1320,9 @@ export class Runtime {
     this.lastFrontierDelivered = null
     this.pressureTold = 'ok'
     this.memoText = null
-    this.router.turnModel = null
+    // A fresh context has no cache to protect: the next request is compared with nothing.
+    this.models.lastMain = null
+    this.models.confirmedSwitch = null
     this.publisher.forgetPublished()
     this.publisher.markAll()
     if (!wasOurs) {
@@ -2570,7 +2605,6 @@ export class Runtime {
       this.turn.request = text
       this.noteObjective(text)
       if (this.autopilot.state === 'pending') context.push(prompts.pendingPromptReminder())
-      this.planRoute(text)
     }
     const now = this.clock()
     for (const note of this.notesBox.take('prompt', now)) context.push(this.delivered(note.kind, note.text, 'prompt'))
@@ -2700,28 +2734,6 @@ export class Runtime {
     return Plan.progressOf(this.plan())
   }
 
-  private planRoute(text: string): void {
-    const eff = this.effective()
-    if (!eff.router.isMainLoop) {
-      this.router.turnModel = null
-      return
-    }
-    const { cls } = classifyTask(text)
-    const decision = routeMain({
-      router: this.settings.router,
-      cls,
-      sessionModel: this.sessionModel,
-      contextTokens: this.usage.tokens ?? 0,
-      isFrontier: eff.frontier.isActive,
-      unavailable: this.router.unavailable,
-      known: this.router.known,
-      cache: { isWarm: CacheModel.warmthOf(this.cache.state, this.clock()) === 'warm', cachedTokens: this.cache.state.lastPrefix },
-    })
-    this.router.turnModel = decision.model
-    this.router.lastDecision = decision.why
-    this.publisher.mark('pane', 'hud')
-  }
-
   /**
    * A background task ended, as Claude Code reported it: its notification, or a TaskStop that stopped
    * it. The list of work in flight (the last Stop's) drops it, and a handoff waiting for it hears.
@@ -2780,7 +2792,6 @@ export class Runtime {
       toolCount: 0,
       editCount: 0,
     }
-    if (kind !== 'person') this.router.turnModel = null
     this.cache.turnStarted()
     const host = this.host
     if (host !== null) void host.listTools().then(tools => this.cache.noteTools(tools.map(t => t.name))).catch(() => undefined)
@@ -2805,21 +2816,10 @@ export class Runtime {
     this.composeObserved = true
     if (e.agentId === undefined) this.noteActivity()
     else this.ops.noteAgentStep(e.agentId)
+    // The main conversation's model is never set here: it is Claude Code's (and the person's) to choose.
     const out: { model?: string; effort?: TurnStepInput['effort'] } = {}
     const eff = this.effective()
     const isMain = e.agentId === undefined
-    if (isMain && this.router.turnModel !== null && eff.router.isMainLoop && this.router.turnModel !== e.model) {
-      out.model = this.router.turnModel
-    }
-    if (isMain && e.index === 0) {
-      // A turn the router sends to another model than the last one (or back from one) rebuilds the cache: the router's doing.
-      const sending = out.model ?? e.model
-      const last = this.cache.state.model
-      if (last !== null && sending !== last && (out.model !== undefined || this.router.wasRouted)) {
-        this.cache.noteRouted(last, sending, out.model !== undefined ? (this.router.lastDecision ?? 'routed') : 'back to the session model')
-      }
-      this.router.wasRouted = out.model !== undefined
-    }
     const wantsEffort = eff.frontier.effort !== null && (isMain || this.settings.frontier.subagentEffort)
     if (wantsEffort) {
       if (e.effort === undefined) {
@@ -2840,6 +2840,7 @@ export class Runtime {
       if (this.stepEpochs.size > 64) this.stepEpochs.delete(this.stepEpochs.keys().next().value as string)
       const effort = out.effort ?? e.effort
       const effortWord = typeof effort === 'string' ? effort : typeof effort === 'number' ? String(effort) : null
+      this.observeMainRequest(e.model, effortWord)
       this.cache.stepStarted(`${e.turnId}:${e.index}`, effortWord)
       this.ledger.stepStarted({
         key: `${e.turnId}:${e.index}`,
@@ -2855,16 +2856,17 @@ export class Runtime {
   }
 
   /** turn.step, after the response: live context, model learning, mid-turn autopilot. */
-  stepResponse(e: TurnStepInput, sent: { model?: string }, result: TurnStepResult): void {
+  stepResponse(e: TurnStepInput, _sent: { model?: string }, result: TurnStepResult): void {
     if (result.usage !== null) {
       const family = familyOf(result.usage.model)
-      if (family !== null && this.router.known.get(family) !== result.usage.model) {
-        this.router.known.set(family, result.usage.model)
+      if (family !== null && this.models.known.get(family) !== result.usage.model) {
+        this.models.known.set(family, result.usage.model)
         this.publisher.mark('pane')
       }
     }
     if (e.agentId !== undefined) {
       if (result.usage !== null) this.ops.noteAgentModel(e.agentId, result.usage.model)
+      else if (result.stopReason === null) this.noteAgentModelRefused(e.agentId)
       return
     }
     const record = this.ledger.stepEnded(`${e.turnId}:${e.index}`, { sessionId: this.sessionId, frontierOn: this.settings.frontier.enabled })
@@ -2872,14 +2874,6 @@ export class Runtime {
       this.trace(`policy: ${recordLine(record)}`)
       if (record.n === 1 || record.frontierDelivered !== this.lastFrontierDelivered) this.publisher.mark('pane')
       this.lastFrontierDelivered = record.frontierDelivered
-    }
-    if (sent.model !== undefined && result.usage === null && result.stopReason === null) {
-      const family = familyOf(sent.model)
-      this.router.unavailable.add(family ?? sent.model)
-      if (family !== null) this.router.known.delete(family)
-      this.router.turnModel = null
-      this.router.lastDecision = `${sent.model} was refused — the session model is kept`
-      this.publisher.mark('pane', 'hud')
     }
     if (result.usage === null) return
     const u = result.usage
@@ -3374,24 +3368,70 @@ export class Runtime {
       }
     }
     this.agents.spawned += 1
-    const eff = this.effective()
-    if (eff.router.isSubagents && !isWorkflowAgent) {
-      const route = routeSubagent({
-        router: this.settings.router,
-        subagentType: e.subagentType,
-        requested: e.model,
-        isFork: e.fork,
-        isTeammate: e.isTeammate === true,
-        isFrontier: eff.frontier.isActive,
-        sessionModel: this.sessionModel,
-        unavailable: this.router.unavailable,
-        known: this.router.known,
-      })
-      this.router.lastDecision = `subagent: ${route.why}`
-      if (route.model !== null) return { model: route.model, isReserved }
+    // The Agent Model Policy: a subagent's model by its kind of work (never the main conversation's).
+    const choice = decideAgentModel({
+      policy: this.settings.agentModels,
+      subagentType: e.subagentType,
+      description: e.description,
+      requested: e.model,
+      isFork: e.fork,
+      isWorkflow: isWorkflowAgent,
+      parentModel: e.parentModel || this.sessionModel,
+      unavailable: this.models.unavailable,
+      known: this.models.known,
+    })
+    if (this.settings.agentModels.enabled) {
+      const agent = `${clean(e.subagentType, 40)}: ${clean(e.description, 50)}`
+      this.models.decisions = [...this.models.decisions, { at: this.clock(), agent, why: choice.why, model: choice.model }].slice(-8)
+      this.trace(`agent models: ${agent} → ${choice.model ?? 'unchanged'} (${choice.why})`)
     }
     this.publisher.mark('pane', 'hud')
+    if (choice.model !== null) return { model: choice.model, isReserved }
     return { isReserved }
+  }
+
+  /** An agent the policy set a model on answered nothing and did not stop: the engine refused that model. */
+  private noteAgentModelRefused(agentId: string): void {
+    const model = this.models.byPolicy.get(agentId)
+    if (model === undefined) return
+    this.models.byPolicy.delete(agentId)
+    const family = familyOf(model)
+    this.models.unavailable.add(family ?? model)
+    if (family !== null) this.models.known.delete(family)
+    this.trace(`agent models: ${model} was refused for agent ${agentId}; agents keep their own model for it this session`)
+    this.publisher.mark('pane')
+  }
+
+  /**
+   * The main conversation's request, before it is sent (layer 3 of the cache guard): a model or effort other than
+   * the last request's is seen here whichever way it was changed (a picker, Remote Control, an IDE, a setting).
+   * Nothing is changed (the request is the person's): the change is traced, and a large rebuild nobody confirmed
+   * is said once. Cache Guardian names it as the cause when the answer shows the rebuild (layer 4).
+   */
+  private observeMainRequest(model: string, effort: string | null): void {
+    const now = this.clock()
+    const last = this.models.lastMain
+    this.models.lastMain = { model, effort, at: now }
+    if (last === null) return
+    const cache = this.cache.state
+    const verdict = ModelGuard.requestChange({
+      last,
+      model,
+      effort,
+      cachedTokens: cache.lastPrefix,
+      isWarm: CacheModel.warmthOf(cache, now, true) === 'warm',
+      isEffortLearned: this.cache.isEffortRebuilding(last.model),
+      threshold: LIMITS.guardSwitchTokens,
+    })
+    if (verdict === null) return
+    this.models.lastGuard = { at: now, line: verdict.line }
+    this.trace(`model guard: before the request: ${verdict.line}`)
+    const confirmed = this.models.confirmedSwitch
+    const isConfirmed = verdict.cause === 'model' && confirmed !== null && ModelGuard.sameModel(confirmed.from, last.model) && ModelGuard.sameModel(confirmed.to, model)
+    if (verdict.isCostly && !isConfirmed && this.host !== null && this.settings.ui.toasts) {
+      const what = verdict.cause === 'model' ? `Model changed to ${CacheModel.shortModel(model)}` : `Effort changed to ${effort ?? 'none'}`
+      this.host.toast(`${what} where Control Room could not ask first: this request re-sends ${fmt.tokens(cache.lastPrefix)} cached tokens uncached.`, 8000)
+    }
   }
 
   /**
@@ -3399,11 +3439,15 @@ export class Runtime {
    * agents never are), its slot passes to the ledger, and the list is looked at every couple of seconds
    * while any agent is alive, whether or not the list has caught up yet.
    */
-  onAgentSpawned(e: AgentSpawnInput, answer: AgentSpawnResult | undefined, isReserved: boolean): void {
+  onAgentSpawned(e: AgentSpawnInput, answer: AgentSpawnResult | undefined, isReserved: boolean, policyModel?: string): void {
     if (isReserved) this.agents.reserved = Math.max(0, this.agents.reserved - 1)
     if (answer === undefined || answer.deny !== undefined || answer.agentId === undefined) {
       this.publisher.mark('pane', 'hud')
       return
+    }
+    if (policyModel !== undefined) {
+      this.models.byPolicy.set(answer.agentId, policyModel)
+      if (this.models.byPolicy.size > 64) this.models.byPolicy.delete(this.models.byPolicy.keys().next().value as string)
     }
     const workflow = (e as { workflow?: { runId: string; agentIndex: number } }).workflow
     this.ops.noteSpawn({
@@ -3548,10 +3592,13 @@ export class Runtime {
     if (!before.cache.keepWarm && this.settings.cache.keepWarm) this.cache.resetVerdict()
     // A change of effort where it is known to rebuild the cache: say so while there is a large warm cache to lose.
     const effortOf = (s: Settings) => (s.frontier.enabled && s.frontier.effort !== 'keep' ? s.frontier.effort : null)
-    if (effortOf(before) !== effortOf(this.settings) && this.settings.ui.toasts && this.cache.isEffortRebuilding(null)) {
+    const cacheModel = this.cache.state.model
+    const rebuilds = cacheModel === null ? 'no' : ModelGuard.effortRebuilds(cacheModel, this.cache.isEffortRebuilding(null))
+    if (effortOf(before) !== effortOf(this.settings) && this.settings.ui.toasts && rebuilds !== 'no') {
       const cached = this.cache.state.lastPrefix
       if (CacheModel.warmthOf(this.cache.state, this.clock()) === 'warm' && cached >= this.settings.cache.minTokens) {
-        host.toast(`Effort changes rebuild the prompt cache on ${CacheModel.shortModel(this.cache.state.model ?? '')}: the next request re-sends ${fmt.tokens(cached)} tokens`, 6000)
+        const how = rebuilds === 'yes' ? 'rebuild' : 'may rebuild'
+        host.toast(`Effort changes ${how} the prompt cache on ${CacheModel.shortModel(cacheModel ?? '')}: the next request may re-send ${fmt.tokens(cached)} tokens`, 6000)
       }
     }
   }

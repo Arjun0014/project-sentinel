@@ -22,7 +22,10 @@ export type PermissionCategory =
   | 'dangerous'
 
 export type ModelAlias = 'session' | 'haiku' | 'sonnet' | 'opus' | 'fable'
-export type RouterStrategy = 'off' | 'balanced' | 'performance' | 'economy' | 'custom'
+/** The kinds of work the Agent Model Policy tells apart (features/agentModels.ts). */
+export type AgentCategory = 'explore' | 'research' | 'planning' | 'implementation' | 'debugging' | 'review' | 'security' | 'general'
+/** A category's model: the agent's own (`agent`), the main conversation's (`session`), or an alias Claude Code takes at a spawn. */
+export type AgentModelChoice = 'agent' | 'session' | 'haiku' | 'sonnet' | 'opus' | 'fable'
 export type ResourceLevel = 'off' | 'low' | 'medium' | 'high' | 'custom'
 export type ResourceEnforcement = 'inform' | 'limit' | 'strict'
 export type SubagentMode = 'unrestricted' | 'block' | 'ask' | 'limit'
@@ -65,20 +68,11 @@ export type ControlRoomSettings = {
   frontier: { enabled: boolean; effort: FrontierEffort; subagentEffort: boolean }
   qa: { enabled: boolean }
   guard: { enabled: boolean; strictness: GuardStrictness; maxPerTurn: number; maxPerSession: number; modelCheck: boolean }
-  router: {
-    strategy: RouterStrategy
-    mainLoop: boolean
-    subagents: boolean
-    custom: {
-      trivial: ModelAlias
-      simple: ModelAlias
-      standard: ModelAlias
-      hard: ModelAlias
-      explore: ModelAlias
-      plan: ModelAlias
-      general: ModelAlias
-    }
-  }
+  /**
+   * The Agent Model Policy (1.8.0; replaces the Model router, whose main-conversation routing was removed): a
+   * subagent's model by its kind of work, with per-agent-type overrides. Never the main conversation's model.
+   */
+  agentModels: { enabled: boolean; overrides: { type: string; model: AgentModelChoice }[] } & Record<AgentCategory, AgentModelChoice>
   subagents: { mode: SubagentMode; limit: number; countTeammates: boolean }
   focus: { enabled: boolean; tools: 'compact' | 'hidden'; results: boolean; diffs: boolean; spinner: boolean }
   resources: { level: ResourceLevel; cpu: number; ram: number; intervalSec: number; enforcement: ResourceEnforcement }
@@ -128,7 +122,7 @@ export type WatcherScout = 'off' | 'suggest' | 'auto'
 
 export type ControlRoomSystems = Pick<
   ControlRoomSettings,
-  'autopilot' | 'frontier' | 'qa' | 'guard' | 'router' | 'subagents' | 'focus' | 'resources' | 'permissions' | 'progress' | 'answers' | 'cache' | 'ops'
+  'autopilot' | 'frontier' | 'qa' | 'guard' | 'agentModels' | 'subagents' | 'focus' | 'resources' | 'permissions' | 'progress' | 'answers' | 'cache' | 'ops'
 >
 
 export type ControlRoomCustomProfile = { id: string; name: string; createdAt: number; systems: ControlRoomSystems }
@@ -545,7 +539,7 @@ export type SupervisorView = {
   notes: string | null
 }
 
-export type SystemId = 'autopilot' | 'frontier' | 'qa' | 'guard' | 'router' | 'subagents' | 'load' | 'focus' | 'answers'
+export type SystemId = 'autopilot' | 'frontier' | 'qa' | 'guard' | 'agentModels' | 'subagents' | 'load' | 'focus' | 'answers'
 
 export type StatusView = { text: string; tone: Tone }
 
@@ -567,7 +561,19 @@ export type PaneModel = {
   surfaces: string[]
   autopilot: AutopilotView
   agents: { running: AgentView[]; spawned: number; denied: number; asked: number }
-  router: { lastDecision: string | null; resolved: { alias: string; id: string }[]; unavailable: string[] }
+  /**
+   * Models in this session: the main conversation's (never switched by Project Sentinel), the Agent Model Policy's
+   * latest decisions, the ids Claude Code reported answering by family, and families it refused.
+   */
+  models: {
+    /** The main conversation's model as Claude Code reports it ('' before it said). */
+    session: string
+    decisions: { at: number; agent: string; why: string; model: string | null }[]
+    resolved: { alias: string; id: string }[]
+    unavailable: string[]
+    /** The model / effort guard's latest word ("before the request: effort high → low on …"), or null. */
+    guard: { at: number; line: string } | null
+  }
   guard: { turn: number; session: number; last: { verdict: string; score: number; reasons: string[]; at: number } | null; isActive: boolean; reason: string | null }
   frontier: { lastEffort: string | null; isEffortSupported: boolean | null; isComposeReached: boolean | null; delivery: FrontierDeliveryView }
   notes: string[]

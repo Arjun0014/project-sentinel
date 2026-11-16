@@ -948,7 +948,8 @@ describe('Cold Resume Guard', () => {
     await f.advance(500)
     expect(f.kept.filled).toEqual(['Fix the parser bug.', 'Second try.'])
     expect(f.kept.submitted).toEqual([])
-    expect(f.kept.traces.filter(t => t.startsWith('cold resume: ') && !t.includes('asking'))).toEqual([
+    // The audit's own lines (why it armed) aside: what each answer did.
+    expect(f.kept.traces.filter(t => t.startsWith('cold resume: ') && !t.includes('asking') && !/^cold resume: (armed|did not arm)/.test(t))).toEqual([
       'cold resume: cancelled; nothing sent, the message goes back to the prompt box',
       'cold resume: the question was dismissed; nothing sent, the message goes back to the prompt box',
     ])
@@ -1081,9 +1082,12 @@ describe('Cold Resume Guard', () => {
     const f = await coldSession()
     expect(await f.rt.ops.coldGuard({ ...person('mid-turn'), turnId: 't9' })).toBeNull()
     expect(await f.rt.ops.coldGuard({ text: 'Mission Queue · Q-1, queued by the user at 10:00 for next safe boundary.' })).toBeNull()
+    // A headless session: no surface at load, and none when the guard looks again (1.8.0 looks again: Desktop attaches late).
     f.rt.surfaces = []
+    f.live.surfaces = []
     expect(await f.rt.ops.coldGuard(person('headless'))).toBeNull()
     expect(f.kept.asked).toEqual([])
+    expect(f.kept.traces.at(-1)).toBe('cold resume: guard did not arm: no surface to ask on (a headless session)')
   })
 
   test('a resumed session: Claude Code’s own word on the cache and its estimate', async () => {

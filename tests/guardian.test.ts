@@ -311,32 +311,25 @@ describe('Cache Guardian', () => {
     expect(Views.hudOf(rt).cache?.recentMiss).toBeNull()
   })
 
-  test('the router keeps a warm cache, and a miss its own switch causes is put down to it', async () => {
-    const f = await started(s => void (s.router.strategy = 'economy'), ONE_HOUR)
-    const { rt, advance } = f
-    rt.router.known.set('haiku', HAIKU)
-    // A context small enough for the router to consider a switch at all.
-    f.live.usage = { ...f.live.usage, context: { tokens: 30_000, window: 1_000_000, percent: 3 } }
-    await turn(f, rt, [{ prompt: 30_000, read: 0 }])
-    rt.onPromptSubmit('Where is the config read?', { kind: 'composer' })
-    expect(rt.router.turnModel).toBeNull()
-    expect(rt.router.lastDecision).toContain('keeps the warm cache (30k tokens)')
-    // A small warm cache is not worth keeping: the router switches, and owns the rebuild.
-    const g = await started(s => void (s.router.strategy = 'economy'), ONE_HOUR)
-    g.rt.router.known.set('haiku', HAIKU)
-    g.live.usage = { ...g.live.usage, context: { tokens: 10_000, window: 1_000_000, percent: 1 } }
-    await turn(g, g.rt, [{ prompt: 10_000, read: 0 }])
-    g.rt.onPromptSubmit('Where is the config read?', { kind: 'composer' })
-    expect(g.rt.router.turnModel).toBe(HAIKU)
-    await turn(g, g.rt, [{ prompt: 10_200, read: 0 }])
-    const miss = Views.paneOf(g.rt).cache.misses[0]
-    expect(miss).toMatchObject({ cause: 'model', kind: 'preventable' })
-    expect(miss?.detail).toContain('Model router: opus-5-5 → haiku-4-5')
-    expect(miss?.advice).toContain('model router')
-    // Once the cache has lapsed, nothing is lost by a switch.
-    await advance(70 * MIN)
-    rt.onPromptSubmit('Where is the config read?', { kind: 'composer' })
-    expect(rt.router.turnModel).toBe(HAIKU)
+  test('the main conversation is never routed: every request keeps the model Claude Code chose, whatever the prompt or the stored settings', async () => {
+    // 1.7 routed the main conversation (Economy sent quick turns to Haiku), rebuilding a warm cache on each switch.
+    // A 1.7 store: the router, and no Agent Model Policy yet.
+    const f = await started(s => {
+      const old = s as unknown as Record<string, unknown>
+      old.router = { strategy: 'economy', mainLoop: true, subagents: true }
+      delete old.agentModels
+    }, ONE_HOUR)
+    const { rt } = f
+    f.live.usage = { ...f.live.usage, context: { tokens: 10_000, window: 1_000_000, percent: 1 } }
+    await turn(f, rt, [{ prompt: 10_000, read: 0 }])
+    for (const text of ['thanks', 'Where is the config read?', 'Investigate the race condition in the scheduler']) {
+      rt.onPromptSubmit(text, { kind: 'composer' })
+      rt.onTurnStart({ turnId: `r-${text.length}`, text })
+      expect(rt.stepRequest({ turnId: `r-${text.length}`, index: 0, model: OPUS, effort: 'high', messageCount: 3 }).model).toBeUndefined()
+    }
+    // The stored router became the subagent policy; nothing of it touches the main conversation.
+    expect(rt.settings.agentModels).toMatchObject({ enabled: true, explore: 'haiku' })
+    expect('router' in rt.settings).toBe(false)
   })
 
   test('a fresh context starts the cache over; the lifetime it learned carries', async () => {

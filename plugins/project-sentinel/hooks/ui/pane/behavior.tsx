@@ -8,43 +8,29 @@
 
 import type { RenderElement } from 'claude-code'
 
-import type { ModelAlias, PaneModel } from '../../../types'
+import type { AgentModelChoice, PaneModel } from '../../../types'
 import { ANSWER_STYLE_INFO } from '../../core/answers'
-import { ANSWER_STYLES } from '../../core/settings'
+import { AGENT_CATEGORIES, ANSWER_STYLES } from '../../core/settings'
+import { CATEGORY_LABEL as AGENT_CATEGORY_LABEL, SUGGESTED as SUGGESTED_AGENT_MODELS } from '../../features/agentModels'
 import type { Kit } from '../kit'
 import { card, link, picker, row, segmented, stepper, switchControl } from '../primitives'
 import { ACCENT } from '../theme'
 
-const MODELS: readonly { value: ModelAlias; label: string; hint: string }[] = [
-  { value: 'session', label: 'Session model', hint: "this session's model" },
+/** A subagent's model under the Agent Model Policy: only what Claude Code takes at a spawn. */
+const AGENT_MODEL_OPTIONS: readonly { value: AgentModelChoice; label: string; hint: string }[] = [
+  { value: 'agent', label: 'Agent’s own', hint: 'its definition’s model, or Claude’s choice' },
+  { value: 'session', label: 'Session model', hint: 'the main conversation’s model' },
   { value: 'haiku', label: 'Haiku', hint: 'fastest, lowest cost' },
   { value: 'sonnet', label: 'Sonnet', hint: 'balanced' },
   { value: 'opus', label: 'Opus', hint: 'deep work' },
   { value: 'fable', label: 'Fable', hint: 'the most capable' },
 ]
 
-const asAlias = (v: string): ModelAlias => MODELS.find(m => m.value === v)?.value ?? 'session'
+const asChoice = (v: string): AgentModelChoice => AGENT_MODEL_OPTIONS.find(m => m.value === v)?.value ?? 'agent'
 
-const CLASS_LABEL: Record<string, string> = {
-  trivial: 'Quick replies',
-  simple: 'Questions',
-  standard: 'Building',
-  hard: 'Hard problems',
-  explore: 'Explore agents',
-  plan: 'Plan agents',
-  general: 'Other agents',
-}
+/** `claude-opus-5-5[1m]` → `opus-5-5`. */
+const shortModel = (id: string): string => id.replace(/^claude-/, '').replace(/\[1m\]$/i, '').replace(/-\d{8}$/, '')
 
-const STRATEGY_HINT: Record<string, string> = {
-  off: 'every task uses the session model',
-  balanced: 'lighter for quick work',
-  performance: 'stronger for hard work',
-  economy: 'lightest that fits',
-  custom: 'you choose per task',
-}
-
-/** A picker hint ("lighter for quick work") as a row's subtitle ("Lighter for quick work"). */
-const sentence = (hint: string): string => hint.charAt(0).toUpperCase() + hint.slice(1)
 
 const EFFORT_WORD: Record<string, string> = { max: 'Maximum', xhigh: 'Extra high', high: 'High', medium: 'Medium', low: 'Low' }
 
@@ -235,51 +221,58 @@ export function behaviorPage(kit: Kit, pane: PaneModel): RenderElement {
       })}
 
       {card(kit, {
-        key: 'router',
-        title: 'Model router',
+        key: 'models',
+        title: 'Models',
         accent,
-        aside: s.router.strategy !== 'off' && pane.router.lastDecision !== null ? `Last: ${pane.router.lastDecision}` : undefined,
-        footer: s.router.strategy === 'off' ? undefined : 'Never downgrades while Frontier Max is on. Switches only while the context is small.',
-        rows: k => [
-          row(k, {
-            key: 'ro-strategy',
-            label: 'Pick a model for each task',
-            subtitle: sentence(STRATEGY_HINT[s.router.strategy] ?? ''),
-            control: picker(k, {
-              key: 'ro-strategy',
-              value: s.router.strategy,
-              options: [
-                { value: 'off', label: 'Off', hint: STRATEGY_HINT.off },
-                { value: 'balanced', label: 'Balanced', hint: STRATEGY_HINT.balanced },
-                { value: 'performance', label: 'Performance', hint: STRATEGY_HINT.performance },
-                { value: 'economy', label: 'Economy', hint: STRATEGY_HINT.economy },
-                { value: 'custom', label: 'Custom', hint: STRATEGY_HINT.custom },
-              ],
-              onSelect: v => u(d => void (d.router.strategy = (['off', 'balanced', 'performance', 'economy', 'custom'].includes(v) ? v : 'off') as typeof d.router.strategy)),
-            }),
-          }),
-          s.router.strategy !== 'off' &&
+        aside: pane.models.session === '' ? undefined : shortModel(pane.models.session),
+        footer: 'A prompt cache belongs to one model: switching the main conversation re-sends its whole context uncached. A subagent starts a fresh context of its own, so its model costs the main cache nothing.',
+        rows: k => {
+          const p = s.agentModels
+          const known = new Set(pane.models.resolved.map(r => r.alias))
+          const options = AGENT_MODEL_OPTIONS.filter(o => o.value !== 'fable' || known.has('fable') || AGENT_CATEGORIES.some(c => p[c] === 'fable'))
+          const last = pane.models.decisions.at(-1)
+          return [
             row(k, {
-              key: 'ro-main',
+              key: 'mo-main',
               label: 'Main conversation',
-              control: switchControl(k, { key: 'ro-main', isOn: s.router.mainLoop, onPress: () => u(d => void (d.router.mainLoop = !d.router.mainLoop)) }),
+              subtitle: 'Chosen in Claude Code (/model). Control Room never switches it',
+              value: pane.models.session === '' ? 'Claude Code’s' : shortModel(pane.models.session),
+              valueTone: 'muted',
             }),
-          s.router.strategy !== 'off' &&
             row(k, {
-              key: 'ro-sub',
-              label: 'Subagents',
-              control: switchControl(k, { key: 'ro-sub', isOn: s.router.subagents, onPress: () => u(d => void (d.router.subagents = !d.router.subagents)) }),
+              key: 'mo-guard',
+              label: 'Cache protection',
+              subtitle: s.cache.guardModelSwitch ? 'Asks before a model switch re-sends 100k+ warm cached tokens' : 'A model switch is not asked about',
+              control: link(k, { key: 'mo-guard', label: s.cache.guardModelSwitch ? 'On' : 'Off', onPress: () => kit.actions.setTab('context') }),
             }),
-          ...(s.router.strategy === 'custom'
-            ? (['trivial', 'simple', 'standard', 'hard', 'explore', 'plan', 'general'] as const).map(c =>
-                row(k, {
-                  key: `ro-c-${c}`,
-                  label: CLASS_LABEL[c] ?? c,
-                  control: picker(k, { key: `ro-c-${c}`, value: s.router.custom[c], options: MODELS, onSelect: v => u(d => void (d.router.custom[c] = asAlias(v))) }),
-                }),
-              )
-            : []),
-        ],
+            row(k, {
+              key: 'mo-agents',
+              label: 'Agent models by kind of work',
+              subtitle: p.enabled ? 'Each subagent gets the model set for its kind of work' : 'Each subagent runs on its own definition’s model, or Claude’s choice',
+              control: switchControl(k, {
+                key: 'mo-agents',
+                isOn: p.enabled,
+                onPress: () =>
+                  u(d => {
+                    d.agentModels.enabled = !d.agentModels.enabled
+                    // Turned on with nothing chosen yet: start from the suggested policy (cheap search, careful debugging).
+                    if (d.agentModels.enabled && AGENT_CATEGORIES.every(c => d.agentModels[c] === 'agent')) for (const c of AGENT_CATEGORIES) d.agentModels[c] = SUGGESTED_AGENT_MODELS[c]
+                  }),
+              }),
+            }),
+            ...(p.enabled
+              ? AGENT_CATEGORIES.map(c =>
+                  row(k, {
+                    key: `mo-${c}`,
+                    label: AGENT_CATEGORY_LABEL[c],
+                    control: picker(k, { key: `mo-${c}`, value: p[c], options, onSelect: v => u(d => void (d.agentModels[c] = asChoice(v))) }),
+                  }),
+                )
+              : []),
+            p.enabled && p.overrides.length > 0 && row(k, { key: 'mo-overrides', label: 'Per agent', subtitle: p.overrides.map(o => `${o.type} → ${o.model}`).join(' · ') }),
+            p.enabled && last !== undefined && row(k, { key: 'mo-last', label: 'Latest agent', subtitle: last.agent, value: last.model === null ? 'its own model' : shortModel(last.model), valueTone: 'muted' }),
+          ]
+        },
       })}
 
       {card(kit, {

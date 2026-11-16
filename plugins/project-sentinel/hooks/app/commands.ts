@@ -9,7 +9,8 @@ import type { CommandRunResult } from 'claude-code'
 import { ANSWER_STYLE_INFO, answerStyleLabel } from '../core/answers'
 import * as fmt from '../core/format'
 import { listProfiles } from '../core/profiles'
-import { ANSWER_STYLES, type AnswerStyle, defaultSettings } from '../core/settings'
+import { AGENT_CATEGORIES, AGENT_MODEL_CHOICES, ANSWER_STYLES, type AgentCategory, type AgentModelChoice, type AnswerStyle, defaultSettings } from '../core/settings'
+import { CATEGORY_LABEL, SUGGESTED } from '../features/agentModels'
 import type { CacheView } from '../../types'
 import { VERSION } from '../constants'
 import * as Chain from '../features/chain'
@@ -35,7 +36,8 @@ const HELP = [
   '  /cr frontier|guard|qa|focus on|off',
   '  /cr resources off|low|medium|high|60/80',
   '  /cr agents                what is running (Activity → Agents) · /cr agents unlimited|off|ask|<n>: what Claude may start',
-  '  /cr router off|balanced|performance|economy|custom',
+  '  /cr models                the main conversation’s model (never switched) and the Agent Model Policy',
+  '  /cr models on|off · <kind> agent|session|haiku|sonnet|opus|fable · type <agent-type> <model>|clear',
   '  /cr style standard|brief|ste|mission|quest   how Claude writes to you',
   '  /cr cache                 the prompt cache: lifetime, Keep warm, recent rebuilds',
   '  /cr cache keep on|off · idle 2h · stable on|off · guard on|off',
@@ -72,7 +74,7 @@ export function statusText(rt: Runtime): string {
     ['Frontier Max', rt.settings.frontier.enabled || paneOf(rt).frontier.delivery.state === 'stale' ? `${st.frontier.text} · ${frontierDeliveryText(paneOf(rt).frontier.delivery).text}` : st.frontier.text],
     ['Lazy-exit guard', st.guard.text],
     ['Release check', st.qa.text],
-    ['Model router', st.router.text],
+    ['Models', `${rt.sessionModel === '' ? 'Claude Code’s' : rt.sessionModel} (never switched) · agents: ${st.agentModels.text}`],
     ['Subagents', st.subagents.text],
     ['Machine load', st.load.text],
     ['Focus view', st.focus.text],
@@ -167,6 +169,52 @@ export function diagnosticsText(rt: Runtime): string {
     'Keep warm refreshes (newest first)',
     ...(cache.keepWarm.log.length === 0 ? ['  none in this context'] : cache.keepWarm.log.map(refreshLine)),
   ].join('\n')
+}
+
+/** `/cr models`: what the main conversation runs on, and the Agent Model Policy (read or set). */
+export function modelsCommand(rt: Runtime, words: readonly string[]): string {
+  const [a1, a2, a3] = words
+  const p = rt.settings.agentModels
+  const policyLines = (p = rt.settings.agentModels) => [
+    `Agent Model Policy ${p.enabled ? 'on' : 'off'}${p.enabled ? '' : ' (each subagent runs on its own definition’s model, or Claude’s choice)'}`,
+    ...(p.enabled ? AGENT_CATEGORIES.map(c => `  ${CATEGORY_LABEL[c].padEnd(24)} ${p[c]}`) : []),
+    ...(p.enabled && p.overrides.length > 0 ? [`  Per agent type: ${p.overrides.map(o => `${o.type} → ${o.model}`).join(', ')}`] : []),
+  ]
+  if (a1 === undefined) {
+    const known = [...rt.models.known.entries()].map(([f, id]) => `${f} = ${id}`)
+    const last = rt.models.decisions.at(-1)
+    return [
+      `Main conversation: ${rt.sessionModel === '' ? 'Claude Code’s model' : rt.sessionModel}. Control Room never switches it: a prompt cache belongs to one model.`,
+      `Cache protection: ${rt.settings.cache.guardModelSwitch ? 'asks before a model switch re-sends 100k+ warm cached tokens' : 'off'}${rt.models.lastGuard === null ? '' : ` · last: ${rt.models.lastGuard.line}`}`,
+      ...policyLines(),
+      ...(last === undefined ? [] : [`Latest agent: ${last.agent} → ${last.model ?? 'its own model'} (${last.why})`]),
+      ...(known.length === 0 ? [] : [`Seen answering this session: ${known.join(', ')}`]),
+      ...(rt.models.unavailable.size === 0 ? [] : [`Refused this session: ${[...rt.models.unavailable].join(', ')}`]),
+      'Set: /cr models on|off · /cr models <kind> <model> · /cr models type <agent-type> <model>|clear',
+    ].join('\n')
+  }
+  const isChoice = (v: string | undefined): v is AgentModelChoice => v !== undefined && (AGENT_MODEL_CHOICES as readonly string[]).includes(v)
+  if (a1 === 'on' || a1 === 'off') {
+    rt.update(s => {
+      s.agentModels.enabled = a1 === 'on'
+      if (a1 === 'on' && AGENT_CATEGORIES.every(c => s.agentModels[c] === 'agent')) for (const c of AGENT_CATEGORIES) s.agentModels[c] = SUGGESTED[c]
+    })
+    return policyLines().join('\n')
+  }
+  if (a1 === 'type' || a1 === 'agent') {
+    if (a2 === undefined || (a3 !== 'clear' && !isChoice(a3))) return `Usage: /cr models type <agent-type> ${AGENT_MODEL_CHOICES.join('|')}|clear`
+    rt.update(s => {
+      const rest = s.agentModels.overrides.filter(o => o.type.toLowerCase() !== a2)
+      s.agentModels.overrides = a3 === 'clear' || !isChoice(a3) ? rest : [...rest, { type: a2, model: a3 }].slice(-12)
+    })
+    return a3 === 'clear' ? `Agents of type ${a2} follow the policy by kind of work again.` : `Agents of type ${a2} run on ${a3}${p.enabled ? '' : ' once the policy is on (/cr models on)'}.`
+  }
+  const kind = AGENT_CATEGORIES.find(c => c === a1 || CATEGORY_LABEL[c].toLowerCase().startsWith(a1))
+  if (kind === undefined || !isChoice(a2)) return `Usage: /cr models <${AGENT_CATEGORIES.join('|')}> ${AGENT_MODEL_CHOICES.join('|')}`
+  rt.update(s => {
+    s.agentModels[kind as AgentCategory] = a2
+  })
+  return `${CATEGORY_LABEL[kind]} agents: ${a2}${p.enabled ? '' : ' (the policy is off: /cr models on)'}.`
 }
 
 export async function handleCommand(rt: Runtime, args: string): Promise<CommandRunResult> {
@@ -328,14 +376,13 @@ export async function handleCommand(rt: Runtime, args: string): Promise<CommandR
       })
       return { text: `Subagents: ${rt.subagentLabel()}.` }
     }
-    case 'router': {
-      const valid = ['off', 'balanced', 'performance', 'economy', 'custom']
-      if (a1 === undefined || !valid.includes(a1)) return { text: `Usage: /cr router ${valid.join('|')}` }
-      rt.update(s => {
-        s.router.strategy = a1 as 'off' | 'balanced' | 'performance' | 'economy' | 'custom'
-      })
-      return { text: `Model router ${a1 === 'off' ? 'off' : `${a1.charAt(0).toUpperCase()}${a1.slice(1)}`}.` }
-    }
+    case 'router':
+      return {
+        text: 'The model router was removed in 1.8: Control Room no longer switches the main conversation’s model, because a prompt cache belongs to one model and a switch re-sends the whole context uncached. Subagents start fresh contexts, so their models are free: /cr models.',
+      }
+    case 'models':
+    case 'model':
+      return { text: modelsCommand(rt, words.slice(1)) }
     case 'style':
     case 'answers': {
       const aliases: Record<string, AnswerStyle> = { standard: 'standard', default: 'standard', normal: 'standard', brief: 'brief', short: 'brief', ste: 'ste', plain: 'ste', simplified: 'ste', mission: 'mission', quest: 'quest', game: 'quest' }

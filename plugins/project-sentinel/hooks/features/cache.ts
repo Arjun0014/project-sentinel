@@ -98,7 +98,10 @@ export const FIVE_MINUTE_IDLE_CAP_MS = 45 * 60_000
  */
 export type CacheChange = 'compact' | 'model' | 'policy' | 'style' | 'tools' | 'effort' | 'history'
 
-/** Who made a change: the person, Project Sentinel's model router, or the engine itself. */
+/**
+ * Who made a change: the person, or the engine itself. `router` is only ever read back from a record kept by
+ * 1.7 (its model router, removed in 1.8: Project Sentinel no longer switches the main conversation's model).
+ */
 export type ChangeBy = 'person' | 'router' | 'engine'
 
 /** `refresh`: Keep warm refreshed the cache, yet the conversation rebuilt it before the refreshed expiry, with nothing changed. */
@@ -477,7 +480,7 @@ export function observeRequest(
   const gapMs = state.lastRequestAt === null ? 0 : Math.max(0, req.at - state.lastRequestAt)
   let next: CacheState = { ...state }
   // A change of model or effort is itself a change the cache may not survive
-  // (unless one was already noted with more to say, such as the router's).
+  // (unless one was already noted with more to say, such as Claude Code's own report of a switch).
   const isNoted = (cause: CacheChange) => next.pending.some(p => p.cause === cause)
   if (!isRefresh && state.requests > 0 && req.model !== null && state.model !== null && req.model !== state.model && !isNoted('model')) {
     next = noteChange(next, { cause: 'model', at: req.at, detail: `Model changed: ${shortModel(state.model)} → ${shortModel(req.model)}` })
@@ -725,7 +728,7 @@ export function adviceFor(miss: CacheMiss, input: { keepWarm: boolean; stablePol
         : 'Turn on Keep warm to hold the cache while you are away.'
     case 'model':
       return miss.by === 'router'
-        ? 'The model router switched models for this task. Set the router to Balanced or Off to keep one model per context.'
+        ? 'Project Sentinel 1.7’s model router switched models here; 1.8 never switches the main conversation’s model.'
         : 'Switch models at the start of a fresh context; Project Sentinel asks first when the cache is large.'
     case 'effort':
       return 'Change effort at the start of a fresh context: on this model the change rebuilds the cache.'

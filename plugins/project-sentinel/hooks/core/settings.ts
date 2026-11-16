@@ -6,7 +6,10 @@
 
 import { DEFAULT_HANDOFF_FILE } from '../constants'
 
+import { policyFromRouter } from '../features/agentModels'
 import type {
+  AgentCategory,
+  AgentModelChoice,
   AnswerStyle,
   ContinuationMethod,
   ControlRoomCustomProfile,
@@ -19,12 +22,13 @@ import type {
   PermissionState,
   ResourceEnforcement,
   ResourceLevel,
-  RouterStrategy,
   SubagentMode,
   WatcherScout,
 } from '../../types'
 
 export type {
+  AgentCategory,
+  AgentModelChoice,
   AnswerStyle,
   ContinuationMethod,
   FrontierEffort,
@@ -34,7 +38,6 @@ export type {
   PermissionState,
   ResourceEnforcement,
   ResourceLevel,
-  RouterStrategy,
   SubagentMode,
   WatcherScout,
 }
@@ -64,6 +67,15 @@ void _everyCategory
 
 export const MODEL_ALIASES: readonly ModelAlias[] = ['session', 'haiku', 'sonnet', 'opus', 'fable']
 
+/** A category's possible models (the Agent Model Policy). */
+export const AGENT_MODEL_CHOICES: readonly AgentModelChoice[] = ['agent', 'session', 'haiku', 'sonnet', 'opus', 'fable']
+export const AGENT_CATEGORIES: readonly AgentCategory[] = ['explore', 'research', 'planning', 'implementation', 'debugging', 'review', 'security', 'general']
+
+/** The Agent Model Policy off: every agent on its own definition's model (or Claude's choice). */
+export function agentModelsOff(): ControlRoomSystems['agentModels'] {
+  return { enabled: false, explore: 'agent', research: 'agent', planning: 'agent', implementation: 'agent', debugging: 'agent', review: 'agent', security: 'agent', general: 'agent', overrides: [] }
+}
+
 export const ANSWER_STYLES: readonly AnswerStyle[] = ['standard', 'brief', 'ste', 'mission', 'quest']
 
 export const WATCHER_SCOUTS: readonly WatcherScout[] = ['off', 'suggest', 'auto']
@@ -73,7 +85,7 @@ export const SYSTEM_KEYS = [
   'frontier',
   'qa',
   'guard',
-  'router',
+  'agentModels',
   'subagents',
   'focus',
   'resources',
@@ -146,20 +158,7 @@ export function classicSystems(): SystemSettings {
     frontier: { enabled: false, effort: 'max', subagentEffort: false },
     qa: { enabled: false },
     guard: { enabled: false, strictness: 'standard', maxPerTurn: 2, maxPerSession: 12, modelCheck: true },
-    router: {
-      strategy: 'off',
-      mainLoop: true,
-      subagents: true,
-      custom: {
-        trivial: 'haiku',
-        simple: 'sonnet',
-        standard: 'session',
-        hard: 'session',
-        explore: 'haiku',
-        plan: 'session',
-        general: 'sonnet',
-      },
-    },
+    agentModels: agentModelsOff(),
     subagents: { mode: 'unrestricted', limit: 2, countTeammates: true },
     focus: { enabled: true, tools: 'compact', results: false, diffs: false, spinner: true },
     resources: { level: 'off', cpu: 70, ram: 85, intervalSec: 3, enforcement: 'limit' },
@@ -240,8 +239,9 @@ function normalizeSystems(raw: unknown, base: SystemSettings): SystemSettings {
   const fr = isRecord(r.frontier) ? r.frontier : {}
   const qa = isRecord(r.qa) ? r.qa : {}
   const gu = isRecord(r.guard) ? r.guard : {}
-  const ro = isRecord(r.router) ? r.router : {}
-  const roc = isRecord(ro.custom) ? ro.custom : {}
+  // The Agent Model Policy; a store from before 1.8.0 has the Model router instead, whose subagent choices carry over.
+  const am = isRecord(r.agentModels) ? r.agentModels : (policyFromRouter(r.router) ?? {})
+  const amo = Array.isArray(am.overrides) ? am.overrides : []
   const sa = isRecord(r.subagents) ? r.subagents : {}
   const fo = isRecord(r.focus) ? r.focus : {}
   const re = isRecord(r.resources) ? r.resources : {}
@@ -279,19 +279,21 @@ function normalizeSystems(raw: unknown, base: SystemSettings): SystemSettings {
       maxPerSession: num(gu.maxPerSession, base.guard.maxPerSession, 1, 50),
       modelCheck: bool(gu.modelCheck, base.guard.modelCheck),
     },
-    router: {
-      strategy: pick(ro.strategy, ['off', 'balanced', 'performance', 'economy', 'custom'] as const, base.router.strategy),
-      mainLoop: bool(ro.mainLoop, base.router.mainLoop),
-      subagents: bool(ro.subagents, base.router.subagents),
-      custom: {
-        trivial: pick(roc.trivial, MODEL_ALIASES, base.router.custom.trivial),
-        simple: pick(roc.simple, MODEL_ALIASES, base.router.custom.simple),
-        standard: pick(roc.standard, MODEL_ALIASES, base.router.custom.standard),
-        hard: pick(roc.hard, MODEL_ALIASES, base.router.custom.hard),
-        explore: pick(roc.explore, MODEL_ALIASES, base.router.custom.explore),
-        plan: pick(roc.plan, MODEL_ALIASES, base.router.custom.plan),
-        general: pick(roc.general, MODEL_ALIASES, base.router.custom.general),
-      },
+    agentModels: {
+      enabled: bool(am.enabled, base.agentModels.enabled),
+      explore: pick(am.explore, AGENT_MODEL_CHOICES, base.agentModels.explore),
+      research: pick(am.research, AGENT_MODEL_CHOICES, base.agentModels.research),
+      planning: pick(am.planning, AGENT_MODEL_CHOICES, base.agentModels.planning),
+      implementation: pick(am.implementation, AGENT_MODEL_CHOICES, base.agentModels.implementation),
+      debugging: pick(am.debugging, AGENT_MODEL_CHOICES, base.agentModels.debugging),
+      review: pick(am.review, AGENT_MODEL_CHOICES, base.agentModels.review),
+      security: pick(am.security, AGENT_MODEL_CHOICES, base.agentModels.security),
+      general: pick(am.general, AGENT_MODEL_CHOICES, base.agentModels.general),
+      overrides: amo
+        .filter(isRecord)
+        .map(o => ({ type: str(o.type, '', 60), model: pick(o.model, AGENT_MODEL_CHOICES, 'agent') }))
+        .filter(o => o.type !== '')
+        .slice(0, 12),
     },
     subagents: {
       mode: pick(sa.mode, ['unrestricted', 'block', 'ask', 'limit'] as const, base.subagents.mode),
@@ -394,7 +396,7 @@ export function systemsOf(settings: Settings): SystemSettings {
     frontier: settings.frontier,
     qa: settings.qa,
     guard: settings.guard,
-    router: settings.router,
+    agentModels: settings.agentModels,
     subagents: settings.subagents,
     focus: settings.focus,
     resources: settings.resources,

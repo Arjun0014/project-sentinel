@@ -17,7 +17,7 @@ describe('settings', () => {
     expect(s.permissions).toEqual(classicSystems().permissions)
     expect(Object.values(s.permissions).filter(v => v === 'deny')).toHaveLength(2)
     expect(Object.values(s.permissions).filter(v => v === 'ask')).toHaveLength(6)
-    expect(s.router.strategy).toBe('off')
+    expect(s.agentModels.enabled).toBe(false)
     expect(s.subagents.mode).toBe('unrestricted')
     expect(s.resources.level).toBe('off')
     expect(s.focus.enabled).toBe(true)

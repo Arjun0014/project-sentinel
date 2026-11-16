@@ -34,7 +34,7 @@ import type {
 import { MIN_ENGINE } from '../constants'
 import * as fmt from '../core/format'
 import { findProfile, isModified } from '../core/profiles'
-import { PERMISSION_CATEGORIES } from '../core/settings'
+import { AGENT_CATEGORIES, PERMISSION_CATEGORIES } from '../core/settings'
 import { relativeTo, shortPath } from '../core/text'
 import { readingTone } from '../ui/theme'
 import { planWords } from '../ui/hud'
@@ -75,7 +75,6 @@ function contextTone(rt: Runtime): Tone {
 
 const EFFORT_NAME: Record<string, string> = { max: 'Maximum effort', xhigh: 'Extra-high effort', high: 'High effort', keep: 'Policy only' }
 const LEVEL_NAME: Record<string, string> = { off: 'Off', low: 'Low', medium: 'Medium', high: 'High', custom: 'Custom' }
-const STRATEGY_NAME: Record<string, string> = { off: 'Off', balanced: 'Balanced', performance: 'Performance', economy: 'Economy', custom: 'Custom' }
 
 /**
  * A handoff waiting for the person: calm when they asked for it ("Wait for
@@ -130,9 +129,12 @@ export function guardStatus(rt: Runtime): StatusView {
   return { text: 'Watching for early stops', tone: 'normal' }
 }
 
-export function routerStatus(rt: Runtime): StatusView {
-  const s = rt.settings.router.strategy
-  return { text: STRATEGY_NAME[s] ?? s, tone: s === 'off' ? 'muted' : 'normal' }
+/** The Agent Model Policy: subagents' models by kind of work. The main conversation is never routed. */
+export function agentModelsStatus(rt: Runtime): StatusView {
+  const p = rt.settings.agentModels
+  if (!p.enabled) return { text: 'Off · agents on their own models', tone: 'muted' }
+  const set = AGENT_CATEGORIES.filter(c => p[c] !== 'agent').length
+  return { text: `On · ${set} of ${AGENT_CATEGORIES.length} kinds of work set`, tone: 'normal' }
 }
 
 export function subagentStatus(rt: Runtime): StatusView {
@@ -190,7 +192,7 @@ export function statusOf(rt: Runtime): Record<SystemId, StatusView> {
     frontier: frontierStatus(rt),
     qa: qaStatus(rt),
     guard: guardStatus(rt),
-    router: routerStatus(rt),
+    agentModels: agentModelsStatus(rt),
     subagents: subagentStatus(rt),
     load: load.isOn ? { text: `${load.level} · ${load.text}`, tone: load.tone } : { text: 'Off', tone: 'muted' },
     focus: focusStatus(rt),
@@ -589,10 +591,12 @@ export function paneOf(rt: Runtime): PaneModel {
       denied: rt.agents.denied,
       asked: rt.agents.asked,
     },
-    router: {
-      lastDecision: rt.router.lastDecision,
-      resolved: [...rt.router.known.entries()].map(([alias, id]) => ({ alias, id })),
-      unavailable: [...rt.router.unavailable],
+    models: {
+      session: rt.sessionModel,
+      decisions: rt.models.decisions.slice(-4),
+      resolved: [...rt.models.known.entries()].map(([alias, id]) => ({ alias, id })),
+      unavailable: [...rt.models.unavailable],
+      guard: rt.models.lastGuard,
     },
     guard: {
       turn: rt.guard.turnBlocks,

@@ -19,7 +19,7 @@ import { ACCENT, G } from '../theme'
  * How telling a change from the profile is, by the system it touches: what
  * changes how Claude works or what it may do comes before presentation.
  */
-const WEIGHT: readonly string[] = ['autopilot', 'frontier', 'permissions', 'guard', 'qa', 'resources', 'subagents', 'router', 'cache', 'answers', 'progress', 'focus']
+const WEIGHT: readonly string[] = ['autopilot', 'frontier', 'permissions', 'guard', 'qa', 'resources', 'subagents', 'agentModels', 'cache', 'answers', 'progress', 'focus']
 
 const weightOf = (path: string): number => {
   const i = WEIGHT.indexOf(path.split('.')[0] ?? '')

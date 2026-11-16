@@ -25,6 +25,8 @@ import { type AgentLedger, agentRows, aliveRows, noteCall, noteEnd, noteModel, n
 import * as Cache from '../features/cache'
 import * as Chain from '../features/chain'
 import * as Evidence from '../features/evidence'
+import * as ModelGuard from '../features/modelGuard'
+import { LIMITS } from '../constants'
 import { doingOf } from '../features/digest'
 import * as Ops from '../features/ops'
 import * as Plan from '../features/plan'
@@ -75,6 +77,9 @@ export type FreshPurpose = {
 
 const isPersonOrigin = (origin: PromptOrigin | undefined): boolean => origin === undefined || origin.kind === 'composer' || origin.kind === 'bridge' || origin.kind === 'sdk'
 
+/** The model switch guard's answers (prompt.submit, layer 2 of features/modelGuard.ts). */
+export const SWITCH = { back: 'Switch back', send: 'Send anyway', fresh: 'Start fresh', cancel: 'Cancel' } as const
+
 export class Operations {
   readonly agentLedger: AgentLedger = new Map()
   /** The Watcher Scout's suggestion after the last turn, until it is taken or ignored (memory only). */
@@ -86,6 +91,8 @@ export class Operations {
   private foreignDismissed = new Set<string>()
   /** The Cold Resume Guard's last question: when, and what the person chose. */
   coldLast: { at: number; choice: string } | null = null
+  /** The model switch guard's last question: when, the switch, and what the person chose. */
+  switchLast: { at: number; from: string; to: string; choice: string } | null = null
   /** What Claude Code said of the cache when this session was resumed (`classic.SessionStart`), for its first message. */
   resumed: { at: number; secondsSince: number | null; tokens: number | null; isExpired: boolean; usd: number | null; model: string | null } | null = null
   /** The handoff notes' stat, looked at after turns and before a fresh start (undefined: not looked at yet). */
@@ -1092,6 +1099,123 @@ export class Operations {
     return { isOn: s.coldResume, threshold: s.coldResumeTokens, isArmed: s.coldResume && isCold && tokens >= s.coldResumeTokens, tokens: isCold ? tokens : (rt.usage.tokens ?? null), cause, usd, priceNote, last: this.coldLast }
   }
 
+  /** One line for the debug log: what the Cold Resume Guard read of the cache, and why it did or did not arm. */
+  private coldWhy(now: number, cold: ColdResumeView): string {
+    const rt = this.rt
+    const c = rt.cache.state
+    const r = this.resumed
+    const side = rt.cache.sideRequestAt
+    const at = (ms: number) => new Date(ms).toISOString()
+    const facts: string[] = []
+    if (r !== null && c.requests === 0) facts.push(`Claude Code said at resume: ${r.isExpired ? 'the cache likely expired' : 'the cache is likely still warm'}${r.secondsSince === null ? '' : ` (last answer ${Math.round(r.secondsSince / 60)} min before)`}`)
+    if (c.lastRequestAt === null) facts.push('no request in this context yet')
+    else {
+      const ttl = Cache.ttlMs(c)
+      const ttlWords = c.ttl === null ? 'lifetime unknown' : `lifetime ${c.ttl.value} (${c.ttl.source})`
+      facts.push(`last request ${at(c.lastRequestAt)} on ${c.model ?? '?'}, ${c.lastPrefix} tokens, ${ttlWords}`)
+      if (ttl !== null) facts.push(`${now < c.lastRequestAt + ttl ? 'warm until' : 'lapsed at'} ${at(c.lastRequestAt + ttl)}`)
+      else facts.push(`idle ${Math.round((now - c.lastRequestAt) / 60_000)} min (surely lapsed only after ${SURELY_LAPSED_MS / 60_000})`)
+    }
+    if (side !== null) facts.push(`Claude Code's own side request at ${at(side)} read the cache`)
+    const verdict = !cold.isOn
+      ? 'did not arm: the Cold Resume Guard is off'
+      : cold.isArmed
+        ? `armed: ${cold.tokens ?? '?'} tokens to re-read (${cold.cause ?? 'lapsed'})`
+        : cold.cause !== null && (cold.tokens ?? 0) < cold.threshold
+          ? `did not arm: cold, but ${cold.tokens ?? 0} tokens is under the ${cold.threshold} threshold`
+          : 'did not arm: the cache is not known to have lapsed'
+    return `${verdict} · ${facts.join(' · ')}`
+  }
+
+  /**
+   * The model switch guard (layer 2): the session's model, read again now, against the model the warm cache was
+   * made on. A switch Claude Code's own dialog never asked about (Desktop's picker, Remote Control, an IDE) is
+   * asked about here, before the message re-sends the whole context uncached. Nothing is sent while it asks.
+   */
+  async switchGuard(e: { text: string; attachments?: readonly unknown[] }): Promise<{ drop: string } | null> {
+    const rt = this.rt
+    const host = rt.host
+    if (host === null) return null
+    const now = this.now()
+    const sessionModel = await host.sessionModel().catch(() => '')
+    if (sessionModel !== '' && sessionModel !== rt.sessionModel) {
+      rt.trace(`model guard: the session model reads ${sessionModel} (was ${rt.sessionModel || 'unknown'})`)
+      rt.sessionModel = sessionModel
+    }
+    const c = rt.cache.state
+    const verdict = ModelGuard.switchVerdict({
+      isOn: rt.settings.cache.guardModelSwitch,
+      sessionModel: sessionModel || rt.sessionModel,
+      cacheModel: c.model,
+      cachedTokens: c.lastPrefix,
+      isWarm: Cache.warmthOf(c, now, false) === 'warm',
+      threshold: LIMITS.guardSwitchTokens,
+      confirmed: rt.models.confirmedSwitch,
+    })
+    rt.trace(`model guard: at the message: ${verdict.line}`)
+    if (!verdict.isArmed) return null
+    rt.models.lastGuard = { at: now, line: verdict.line }
+    const health = this.resumeHealth()
+    const from = Cache.shortModel(verdict.from)
+    const to = Cache.shortModel(verdict.to)
+    const rate = rt.cache.writeRate(verdict.to, c.ttl?.value ?? null)
+    const cost = rate === null ? '' : ` (about ${fmt.cost((c.lastPrefix * rate.usdPerMTok) / 1_000_000)} at Claude Code’s cache-write price)`
+    const fresh = health.isHealthy ? ` Start fresh carries the run into a new context on ${to}, then sends your message.` : ''
+    const question = `The model changed from ${from} to ${to} while this context’s ${fmt.tokens(c.lastPrefix)}-token prompt cache is warm on ${from}. A prompt cache belongs to one model: this message would re-send all of it uncached to ${to}${cost}. Switch back keeps the cache and sends your message on ${from}.${fresh} Continue?`
+    const options = [SWITCH.back, SWITCH.send, ...(health.isHealthy ? [SWITCH.fresh] : []), SWITCH.cancel]
+    let answer: string
+    try {
+      answer = await host.ask(question, options, 'Model switch')
+    } catch {
+      answer = SWITCH.cancel
+    }
+    this.switchLast = { at: this.now(), from: verdict.from, to: verdict.to, choice: answer }
+    rt.trace(`model guard: asked about ${verdict.from} → ${verdict.to}: ${answer}`)
+    rt.publisher.mark('ops', 'pane')
+    const hasAttachments = (e.attachments?.length ?? 0) > 0
+    switch (answer) {
+      case SWITCH.send:
+        rt.models.confirmedSwitch = { from: verdict.from, to: verdict.to }
+        return null
+      case SWITCH.back:
+        this.switchBackForMessage(verdict.from, e.text, hasAttachments)
+        this.clearRestored(e.text, `is sent once the model is back on ${from}`)
+        return { drop: `Switching back to ${from} (the warm cache’s model): your message is sent after.` }
+      case SWITCH.fresh:
+        if (!health.isHealthy) return null
+        rt.models.confirmedSwitch = { from: verdict.from, to: verdict.to }
+        void this.freshForMessage(e.text, hasAttachments, c.lastPrefix)
+        this.clearRestored(e.text, 'goes to the fresh context')
+        return { drop: 'Starting fresh from the resume state: your message goes to the fresh context.' }
+      default:
+        this.putBack(e.text, hasAttachments)
+        return { drop: hasAttachments ? 'Not sent. Your message is back in the prompt box (attachments were not kept).' : 'Not sent. Your message is back in the prompt box.' }
+    }
+  }
+
+  /**
+   * Switch back: Claude Code's own /model, once the dropped prompt's dispatch has settled, then the message as the
+   * person's. If the switch fails, the message goes back to the prompt box: it is sent once or not at all.
+   */
+  private switchBackForMessage(model: string, text: string, hasAttachments: boolean): void {
+    const rt = this.rt
+    const host = rt.host
+    if (host === null) return
+    host.after(COMPACT_AFTER_DROP_MS, () => {
+      void host
+        .switchModel(model)
+        .then(() => {
+          rt.trace(`model guard: switched back to ${model}; sending the held message`)
+          host.after(600, () => void host.submitAsUser(text).catch(() => this.putBack(text, hasAttachments)))
+        })
+        .catch(error => {
+          rt.trace(`model guard: switching back to ${model} failed (${error instanceof Error ? error.message : String(error)}); the message goes back to the prompt box`)
+          this.toast(`Could not switch back to ${Cache.shortModel(model)}. Your message is back in the prompt box.`, 8000)
+          this.putBack(text, hasAttachments)
+        })
+    })
+  }
+
   /** Why the cache lapsed, from what Keep warm knows. */
   private coldCause(idleMs: number): string {
     const rt = this.rt
@@ -1116,17 +1240,39 @@ export class Operations {
   async coldGuard(e: { text: string; origin?: PromptOrigin; turnId?: string; attachments?: readonly unknown[] }): Promise<{ drop: string } | null> {
     const rt = this.rt
     const host = rt.host
-    if (host === null || e.turnId !== undefined || rt.turn.isRunning || !isPersonOrigin(e.origin)) return null
-    if (prompts.ownPromptKind(e.text) !== null || rt.surfaces.length === 0) return null
+    if (host === null) return null
+    // Every message says in the debug log why the guards did or did not arm (the Mac / Desktop audit: never guess).
+    const skip = (why: string): null => {
+      rt.trace(`cold resume: guard did not arm: ${why}`)
+      return null
+    }
+    if (e.turnId !== undefined) return skip('the message is delivered into a running turn')
+    if (rt.turn.isRunning) return skip('a turn is running (its own requests keep the cache warm)')
+    if (!isPersonOrigin(e.origin)) return skip(`a ${e.origin?.kind ?? 'unknown'} message is not the person’s own (only composer, bridge and SDK host messages are guarded)`)
+    if (prompts.ownPromptKind(e.text) !== null) return skip("Control Room's own prompt")
+    if (rt.surfaces.length === 0) {
+      // Surfaces are read once at load; a host that attached later (Desktop) is looked at again before giving up.
+      const surfaces = await host.surfaces().catch(() => [] as const)
+      if (surfaces.length === 0) return skip('no surface to ask on (a headless session)')
+      rt.surfaces = [...surfaces]
+      rt.trace(`cold resume: surfaces read again: ${surfaces.join(', ')}`)
+    }
     const now = this.now()
     const cold = this.coldState(now)
-    if (!cold.isArmed || cold.tokens === null) return null
+    rt.trace(`cold resume: ${this.coldWhy(now, cold)}`)
+    if (!cold.isArmed || cold.tokens === null) return this.switchGuard(e)
+    // The model the message would go to, if it changed: then nothing of the cache is read, lapsed or not.
+    const sessionModel = await host.sessionModel().catch(() => rt.sessionModel)
+    const cacheModel = rt.cache.state.model
+    const isSwitched = cacheModel !== null && sessionModel !== '' && ModelGuard.compareModels(cacheModel, sessionModel) === 'different'
+    if (isSwitched) rt.trace(`cold resume: the model changed too (${cacheModel} → ${sessionModel}): asked once, as a cold resume`)
     const health = this.resumeHealth()
     const preview = this.resumePreview()
     // Tokens are the fact; a price is only ever an estimate, and the re-read costs at least that (seen live: Claude Code's $0.36 was $0.52).
     const cost = Cache.coldCostWords(cold)
     const fresh = health.isHealthy ? ` Start fresh: ${previewLine(preview)}, then your message.` : ` A fresh start is not offered: ${health.problems[0] ?? 'the resume state is not ready'}.`
-    const question = `${fmt.tokens(cold.tokens)} tokens need to be reprocessed: the prompt cache expired, and continuing sends this session's earlier context again before the cache is warm.${cost === null ? '' : ` ${cost.sentence}`} Why: ${cold.cause ?? 'it lapsed'}.${fresh} Compact first reads it all once more to summarise it, then the context is smaller. Continue?`
+    const switched = isSwitched ? ` The model also changed (${Cache.shortModel(cacheModel ?? '')} → ${Cache.shortModel(sessionModel)}), and a cache belongs to one model.` : ''
+    const question = `${fmt.tokens(cold.tokens)} tokens need to be reprocessed: the prompt cache expired, and continuing sends this session's earlier context again before the cache is warm.${cost === null ? '' : ` ${cost.sentence}`} Why: ${cold.cause ?? 'it lapsed'}.${switched}${fresh} Compact first reads it all once more to summarise it, then the context is smaller. Continue?`
     const options = [COLD.continue, ...(health.isHealthy ? [COLD.fresh] : []), COLD.compact, COLD.cancel]
     rt.trace(`cold resume: asking before a message re-reads ${cold.tokens} tokens (${cold.cause ?? 'lapsed'})`)
     let answer: string
@@ -1144,6 +1290,8 @@ export class Operations {
     switch (answer) {
       case COLD.continue:
         rt.trace('cold resume: continued with the full session')
+        // The switch was part of what the person accepted: the switch guard does not ask about it again.
+        if (isSwitched && cacheModel !== null) rt.models.confirmedSwitch = { from: cacheModel, to: sessionModel }
         return null
       case COLD.fresh:
         if (!health.isHealthy) return null

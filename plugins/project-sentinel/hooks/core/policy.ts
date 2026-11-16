@@ -6,12 +6,12 @@
  *   1. Organisation & engine safety (deny rules, plan mode)    — never loosened
  *   2. Permission Policy                                       — deny > ask > allow
  *   3. The person's live actions (abort, typed prompts)
- *   4. Context Autopilot handoff                               — suspends guard/router
+ *   4. Context Autopilot handoff                               — suspends the guard
  *   5. Resource Governor                                       — how, not whether
  *   6. Subagent Control                                        — hard spawn limits
  *   7. Frontier Max                                            — vetoes economy downgrades
  *   8. No-Lazy-Exit Guard
- *   9. Model Router
+ *   9. Agent Model Policy                                      — subagents only, never the main conversation
  *  10. Focus View                                              — presentation only
  */
 
@@ -33,7 +33,8 @@ export type Effective = {
   frontier: { isActive: boolean; effort: ModelEffort | null }
   qa: { isActive: boolean }
   guard: { isActive: boolean; reason: string | null }
-  router: { isActive: boolean; isMainLoop: boolean; isSubagents: boolean; reason: string | null }
+  /** The Agent Model Policy: subagents' models by kind of work. The main conversation is never routed (1.8.0). */
+  agentModels: { isActive: boolean }
   subagents: { mode: Settings['subagents']['mode']; limit: number }
   resources: { ceilings: Ceilings | null }
   autopilot: { isActive: boolean; isHandoff: boolean }
@@ -50,20 +51,11 @@ export function effective(settings: Settings, live: Live): Effective {
   else if (isHandoff) guardReason = 'Paused during the handoff'
   else if (isPlan) guardReason = 'Paused in plan mode'
 
-  let routerReason: string | null = null
-  if (settings.router.strategy === 'off') routerReason = 'off'
-  else if (isHandoff) routerReason = 'main conversation held on the session model during the handoff'
-
   return {
     frontier: { isActive: settings.frontier.enabled, effort: settings.frontier.enabled ? EFFORT[settings.frontier.effort] : null },
     qa: { isActive: settings.qa.enabled },
     guard: { isActive: guardReason === null, reason: guardReason },
-    router: {
-      isActive: settings.router.strategy !== 'off',
-      isMainLoop: settings.router.strategy !== 'off' && settings.router.mainLoop && !isHandoff,
-      isSubagents: settings.router.strategy !== 'off' && settings.router.subagents,
-      reason: routerReason,
-    },
+    agentModels: { isActive: settings.agentModels.enabled },
     subagents: { mode: settings.subagents.mode, limit: settings.subagents.limit },
     resources: { ceilings: ceilingsOf(settings.resources) },
     autopilot: { isActive: settings.autopilot.enabled, isHandoff },

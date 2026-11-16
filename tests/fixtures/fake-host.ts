@@ -142,6 +142,10 @@ export function fakeHost(
     paneRefusals: [] as string[],
     /** Whether `$.ui.panes()` lists the Control Room pane as open (none is by default). */
     isPaneOpen: false,
+    /** The session's model, as `$.session.model()` reads it (a /model switch changes it). */
+    model: 'claude-opus-5-5',
+    /** The surfaces drawing the session (`$.session.surfaces()`); Desktop attaches as `desktop`. */
+    surfaces: ['terminal'] as import('claude-code').RenderSurface[],
   }
   const schedule = (ms: number, fn: () => void, every: number | null) => {
     const t = { id: ++seq, at: time + ms, every, fn, isCancelled: false }
@@ -158,12 +162,15 @@ export function fakeHost(
     sessionId: async () => live.sessionId,
     sessionRoot: async () => options.cwd ?? '/work',
     sessionCwd: async () => options.sessionCwd ?? options.cwd ?? '/work',
-    switchModel: async model => void kept.commands.push(`model ${model}`),
-    sessionModel: async () => 'claude-opus-5-5',
+    switchModel: async model => {
+      kept.commands.push(`model ${model}`)
+      live.model = model
+    },
+    sessionModel: async () => live.model,
     usage: async () => live.usage,
     usageSummary: async () => live.usage,
     version: async () => ({ version: '2.1.292', base: '2.1.292' }),
-    surfaces: async () => ['terminal'],
+    surfaces: async () => live.surfaces,
     compact: async () => {
       // A headless or SDK session (Claude Code 2.1.295): compaction runs only inside a turn, as a /compact prompt.
       if (live.isCompactTurnOnly) throw new Error('$.session.compact: not available in a headless (-p / SDK) session yet: compaction here runs inside a turn (a /compact prompt); catch it and carry on')

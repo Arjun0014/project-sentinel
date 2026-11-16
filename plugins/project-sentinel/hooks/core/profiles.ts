@@ -167,9 +167,15 @@ const LABELS: Record<string, string> = {
   'guard.maxPerTurn': 'Guard nudges per turn',
   'guard.maxPerSession': 'Guard nudges per session',
   'guard.modelCheck': 'Smart check',
-  'router.strategy': 'Model router',
-  'router.mainLoop': 'Route main conversation',
-  'router.subagents': 'Route subagents',
+  'agentModels.enabled': 'Agent Model Policy',
+  'agentModels.explore': 'Agent model: explore',
+  'agentModels.research': 'Agent model: research',
+  'agentModels.planning': 'Agent model: planning',
+  'agentModels.implementation': 'Agent model: implementation',
+  'agentModels.debugging': 'Agent model: debugging',
+  'agentModels.review': 'Agent model: review',
+  'agentModels.security': 'Agent model: security',
+  'agentModels.general': 'Agent model: general',
   'subagents.mode': 'Subagents',
   'subagents.limit': 'Subagents at most',
   'subagents.countTeammates': 'Count teammates',
@@ -250,7 +256,7 @@ export function diffSystems(from: SystemSettings, to: SystemSettings): SettingCh
   for (const [path, next] of b) {
     const prev = a.get(path)
     if (deepEqual(prev, next)) continue
-    if (path.startsWith('router.custom.')) continue
+    if (path.startsWith('agentModels.overrides')) continue
     changes.push({ path, label: LABELS[path] ?? path, from: show(path, prev), to: show(path, next) })
   }
   return changes

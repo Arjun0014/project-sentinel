@@ -74,7 +74,7 @@ export const LIMITS = {
   clearSettleMs: 15_000,
   /** Characters of the person's request and Claude's answer the guard reads. */
   guardTextChars: 6000,
-  /** Model classification timeout for the guard and router. */
+  /** Model classification timeout for the guard. */
   classifyTimeoutMs: 12_000,
   /** From this much warm cached context, a model switch the person makes is confirmed first. */
   guardSwitchTokens: 100_000,

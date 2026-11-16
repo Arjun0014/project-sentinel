@@ -440,7 +440,7 @@ export const register: Register = on => {
       answer = await next(decision.model === undefined ? e : { ...e, model: decision.model })
       return answer
     } finally {
-      rt.onAgentSpawned(e, answer, decision.isReserved === true)
+      rt.onAgentSpawned(e, answer, decision.isReserved === true, decision.model)
     }
   }).catch(($, e, next) =>
     rt.settings.subagents.mode === 'block' && !next.called ? { deny: 'Control Room: subagents are disabled in this session.' } : next(e),

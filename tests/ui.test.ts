@@ -407,11 +407,14 @@ describe('ui', () => {
     const ui = await $.ui.mount({ plugin: 'project-sentinel', surface: 'mobile', component: 'Pane', requestId: 'control-room', props: paneProps(60) })
     await ui.press({ key: 'tab-behavior' })
     await w.clock.advance(300)
-    await ui.press({ key: 'ro-strategy' })
+    // The Agent Model Policy: on starts from the suggested policy; a kind of work is a choice drawn in place.
+    await ui.press({ key: 'mo-agents' })
     await w.clock.advance(300)
-    await ui.press({ key: 'ro-strategy:economy' })
+    await ui.press({ key: 'mo-explore' })
+    await w.clock.advance(300)
+    await ui.press({ key: 'mo-explore:sonnet' })
     await w.clock.advance(2000)
-    expect(saved(w).router.strategy).toBe('economy')
+    expect(saved(w).agentModels).toMatchObject({ enabled: true, explore: 'sonnet', debugging: 'opus', implementation: 'session' })
   })
 
   test('Focus View draws a compact tool row that expands in place', { timeoutMs: 30_000 }, async ($, on) => {
