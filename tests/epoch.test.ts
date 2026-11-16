@@ -137,6 +137,25 @@ describe('the handoff notes verdict', () => {
     expect(Artifact.candidatesOf({ file: '/abs/NOTES.md', roots: [{ path: '/repo', via: 'configured' }], writes: [], isCaseInsensitive: false })).toEqual([{ path: '/abs/NOTES.md', via: 'configured' }])
   })
 
+  test('a project nested inside another repository: the outer repository’s notes are another project’s, never looked at', () => {
+    const c = Artifact.candidatesOf({
+      file,
+      roots: [
+        { path: 'C:\\outer\\packages\\app', via: 'configured' },
+        { path: 'C:\\outer\\packages\\app', via: 'working directory' },
+        { path: 'C:\\Outer', via: 'repository root' },
+      ],
+      writes: [],
+      isCaseInsensitive: true,
+    })
+    expect(c).toEqual([{ path: 'C:\\outer\\packages\\app\\NEXT_SESSION_PROMPT.md', via: 'configured' }])
+    // Claude writing the notes up there is still followed: its own write is a candidate of its own.
+    const w = Artifact.candidatesOf({ file, roots: [{ path: '/repo/app', via: 'configured' }, { path: '/repo', via: 'repository root' }], writes: [{ path: '/repo/NEXT_SESSION_PROMPT.md', at: 5, tool: 'Write', isCertain: true }], isCaseInsensitive: false })
+    expect(w.map(x => x.via)).toEqual(['configured', 'written by Claude'])
+    // A repository root that is the project, or a worktree elsewhere, stays a place to look.
+    expect(Artifact.candidatesOf({ file, roots: [{ path: '/repo/app', via: 'configured' }, { path: '/elsewhere/wt', via: 'repository root' }], writes: [], isCaseInsensitive: false }).map(x => x.via)).toEqual(['configured', 'repository root'])
+  })
+
   test('missing is only "no such file": any other failure is "could not inspect", even beside a missing place', () => {
     expect(Artifact.isMissingError(Object.assign(new Error('x'), { code: 'ENOENT' }))).toBe(true)
     expect(Artifact.isMissingError(new Error('ENOENT: no such file or directory'))).toBe(true)

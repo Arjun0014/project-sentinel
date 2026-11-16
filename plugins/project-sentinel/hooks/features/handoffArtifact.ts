@@ -114,8 +114,16 @@ export function candidatesOf(input: {
     seen.add(key)
     out.push({ path, via })
   }
+  // A project nested inside another repository (a monorepo's package, a folder in someone's repo): that repository's
+  // root is another project's, and its notes file is not this one's (seen live: the outer repo's notes read "present").
+  const configured = input.roots.find(r => r.via === 'configured')?.path ?? null
+  const isOuter = (path: string) => {
+    if (configured === null || configured === '') return false
+    const outer = normPath(path, input.isCaseInsensitive)
+    return normPath(configured, input.isCaseInsensitive).startsWith(`${outer}/`)
+  }
   if (isAbsolute(input.file)) add(input.file, 'configured')
-  else for (const r of input.roots) if (r.path !== null && r.path !== '') add(joinPath(r.path, input.file), r.via)
+  else for (const r of input.roots) if (r.path !== null && r.path !== '' && !(r.via === 'repository root' && isOuter(r.path))) add(joinPath(r.path, input.file), r.via)
   // Newest first: where Claude last wrote a file of that name.
   for (const w of [...input.writes].sort((a, b) => b.at - a.at)) if (isNotesPath(w.path, input.file, input.isCaseInsensitive) && isAbsolute(w.path)) add(w.path, 'written by Claude')
   return out
