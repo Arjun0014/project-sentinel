@@ -14,9 +14,10 @@ no longer switches the main conversation's model, and guards every way a model o
 warm cache. Context usage belongs to the context it was measured in, while the run carries across any number of
 contexts; the handoff notes are judged in one place, wherever they really are. Agents are tracked through every
 channel Claude Code offers, the session's Advisor gets a control, Guardrails defer to Claude Code's own permissions
-by default, and Keep warm says exactly when it starts and stops. 649 tests pass on Claude Code 2.1.325 and on
-2.1.289 (with a type-check against its own declarations); an integrated test runs one run across three fresh
-contexts with all of it at once.
+by default, and Keep warm says exactly when it starts and stops. 652 tests pass on Claude Code 2.1.325 and on
+2.1.289 (with a type-check against its own declarations), and in CI on Linux, Windows and macOS; an integrated test
+runs one run across three fresh contexts with all of it at once, and live headless runs on real Claude Code (Haiku
+and Sonnet) checked the Desktop-style model switch, the Agent Model Policy and work left running across a /clear.
 
 ### Fixed
 
@@ -51,6 +52,11 @@ contexts with all of it at once.
   and an agent loop acting that no record names is counted: "No subagents" is said only when nothing was seen.
 - **The Cold Resume Guard gave up where Desktop attached after the load** (no surface known yet): the surfaces are
   read again first. Every message now says in the debug log why the guard did or did not arm.
+- **A project nested inside another repository read the outer repository's handoff notes** as its own "present"
+  notes (seen live): the repository root is no longer looked at when it is above the project's root. Claude's own
+  write is still followed wherever it lands.
+- **Claude Code raises SubagentStart inside the spawn, before its id is known** (seen live on 2.1.325): the row is
+  now the spawn's, still running, and the debug log no longer says its spawn was not seen.
 - Claude Code 2.1.325: the status bar's `isCollapsed` prop, Desktop's minimized-pane `widget` placement (a glance),
   and the engine's own `tool.check` during a call (tests).
 
