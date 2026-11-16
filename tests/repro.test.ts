@@ -8,6 +8,9 @@
  *   - handoff after handoff with no real growth burned through fresh contexts
  *   - `/cr fresh` refused notes written in this context ("no handoff is under way")
  *   - Keep warm stood down while the handoff only checked its notes
+ *   - the model router switched the main conversation's model, rebuilding a warm cache
+ *   - a model switch from Desktop's picker (`source: sdk`) over a large warm cache went through unasked
+ *   - Activity → Agents said "No subagents in this context" while Claude Code reported an agent's loop acting
  *
  * Only the Runtime, the views and the fake host are used, so the file runs against an earlier Runtime too.
  */
@@ -17,6 +20,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { ToolCallResult } from 'claude-code'
 
 import { Runtime } from '../hooks/app/runtime'
+import { agentsText } from '../hooks/app/opsCommands'
 import * as Views from '../hooks/app/views'
 import { classicSettings } from '../hooks/core/settings'
 import type { Settings } from '../hooks/core/settings'
@@ -480,5 +484,50 @@ describe('Keep warm while a handoff only waits', () => {
     }
     rt.autopilot = { ...rt.autopilot, state: 'clearing' }
     expect(rt.keepWarmStandDown()).not.toBeNull()
+  })
+})
+
+describe('models and agents', () => {
+  test('the main conversation is never routed to another model, whatever the stored router said', async () => {
+    // 1.7.0: a stored router on Economy sent a quick turn to Haiku once the context was small, rebuilding the cache.
+    const f = await started(s => {
+      const old = s as unknown as Record<string, unknown>
+      old.router = { strategy: 'economy', mainLoop: true, subagents: true, custom: { trivial: 'haiku', simple: 'haiku', standard: 'sonnet', hard: 'session', explore: 'haiku', plan: 'sonnet', general: 'haiku' } }
+      delete old.agentModels
+    })
+    const { rt } = f
+    // Haiku has answered in this session (so 1.7.0 knew an id to route to); the context is small.
+    rt.onTurnStart({ turnId: 'r0', text: 'Hi.' })
+    const e0 = { turnId: 'r0', index: 0, model: 'claude-opus-5-5', messageCount: 3 }
+    rt.stepRequest(e0)
+    rt.stepResponse(e0, {}, { turnId: 'r0', index: 0, answer: '', toolUses: [], stopReason: 'end_turn', usage: { ...usageOf(10_000), model: 'claude-haiku-4-5-20251001' } })
+    await rt.onTurnComplete({ agentId: undefined, reason: 'answer', answer: 'hi' })
+    rt.onPromptSubmit('thanks', { kind: 'composer' })
+    rt.onTurnStart({ turnId: 'r1', text: 'thanks' })
+    expect(rt.stepRequest({ turnId: 'r1', index: 0, model: 'claude-opus-5-5', messageCount: 4 }).model).toBeUndefined()
+  })
+
+  test('a model switch from Desktop’s picker (source sdk) over a warm 300k cache is asked about before the next message goes', async () => {
+    const f = await started(() => undefined)
+    const { rt, kept, live } = f
+    rt.onTurnStart({ turnId: 'm1', text: 'Work.' })
+    stepAt(rt, 'm1', 0, 300_000, 'end_turn')
+    await rt.onTurnComplete({ agentId: undefined, reason: 'answer', answer: 'done' })
+    await f.advance(2000)
+    const sw = { from_model: 'claude-opus-5-5', to_model: 'claude-sonnet-5-5', source: 'sdk', context_tokens: 300_000, prompt_cache_warm: true, cache_ttl: '1h' as const, estimated_cache_write_usd: 1.2, pricing: 'catalog' }
+    rt.onPreModelSwitch(sw)
+    rt.onPostModelSwitch(sw)
+    live.model = 'claude-sonnet-5-5'
+    live.answer = 'Cancel'
+    const held = await rt.ops.coldGuard({ text: 'Next step.', origin: { kind: 'sdk' } as never })
+    expect(held).not.toBeNull()
+    expect(kept.asked.at(-1)?.header).toBe('Model switch')
+  })
+
+  test('an agent loop acting that no record names is never reported as "No subagents in this context"', async () => {
+    const f = await started(() => undefined)
+    const { rt } = f
+    rt.ops.noteAgentCall('agent-from-before-a-reload', 'Reading src/renderer.ts')
+    expect(agentsText(rt.ops.view(), rt.clock())).not.toContain('No subagents in this context')
   })
 })
