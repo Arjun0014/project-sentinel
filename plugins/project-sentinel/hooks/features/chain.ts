@@ -164,8 +164,9 @@ export function rollOver(
   run: Run,
   input: { end: SessionEnd; endNote: string | null; nextId: string; nextStart: SessionStart; now: number },
 ): Run {
+  // Already rolled over to that session (a runtime that adopted the clear, then saw its start): nothing to end twice.
+  if (run.sessions.some(s => s.id === input.nextId)) return run
   const ended = withCurrent(run, input.now, s => ({ ...s, endedAt: input.now, end: input.end, endNote: input.endNote }))
-  if (ended.sessions.some(s => s.id === input.nextId)) return ended
   const index = (currentSession(ended)?.index ?? 0) + 1
   const sessions = [...ended.sessions, newSession(input.nextId, index, input.nextStart, input.now)].slice(-LIMITS.sessionsPerRun)
   return { ...ended, sessions, status: 'active' }

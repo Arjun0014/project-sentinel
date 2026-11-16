@@ -367,6 +367,91 @@ describe('the handoff notes are judged where they really are', () => {
   })
 })
 
+describe('one run across many contexts', () => {
+  const PLAN = {
+    objective: 'Port the renderer to WebGPU',
+    milestones: [
+      { title: 'Map the WebGL calls', status: 'completed', evidence: 'inventory reviewed' },
+      { title: 'Port the shader pipeline', status: 'in_progress', doing: 'Porting the shaders' },
+      { title: 'Port the texture uploads', status: 'pending' },
+      { title: 'Benchmark the frame time', status: 'pending' },
+      { title: 'Get the GPU test machine', status: 'blocked', blocker: 'needs access from you' },
+    ],
+  }
+
+  test('twelve handoffs in one run: the same run, every milestone with its status, the objective, one continuation each', { timeoutMs: 30_000 }, async () => {
+    const f = await started(() => undefined)
+    const { rt, kept } = f
+    rt.onTurnStart({ turnId: 'p0', text: 'Port the renderer to WebGPU.' })
+    rt.recordMilestones(PLAN, undefined)
+    await rt.onTurnComplete({ agentId: undefined, reason: 'answer', answer: 'planned' })
+    const runId = rt.run?.id
+    for (let i = 0; i < 12; i++) {
+      await handOff(f, 705_000 + i * 1_000)
+      // Each fresh context sends only the milestone it works on, in other words: the rest is carried.
+      stepAt(rt, lastContinuation, 0, 40_000, 'tool_use')
+      const reply = rt.recordMilestones({ objective: 'Port the renderer to WebGPU', milestones: [{ title: 'Port the WebGPU shader pipeline', status: 'in_progress', doing: `Pass ${i + 1}` }] }, undefined)
+      expect(reply).toContain('Kept from an earlier context, not in your list: Port the texture uploads (pending); Benchmark the frame time (pending); Get the GPU test machine (blocked)')
+      stepAt(rt, lastContinuation, 1, 42_000, 'end_turn')
+      await rt.onTurnComplete({ agentId: undefined, reason: 'answer', answer: 'working' })
+      // Real work between handoffs: no loop.
+      await f.advance(31 * 60_000)
+    }
+    expect(rt.run?.id).toBe(runId)
+    expect(rt.run?.sessions.length).toBe(13)
+    expect(rt.run?.sessions.slice(1).every(s => s.start === 'handoff')).toBe(true)
+    expect(rt.run?.objective).toBe('Port the renderer to WebGPU')
+    expect(rt.plan().tasks.map(t => `${t.subject}:${t.status}`)).toEqual([
+      'Map the WebGL calls:completed',
+      'Port the WebGPU shader pipeline:in_progress',
+      'Port the texture uploads:pending',
+      'Benchmark the frame time:pending',
+      'Get the GPU test machine:blocked',
+    ])
+    expect(count(kept.submitted, 'Context Autopilot continuation')).toBe(12)
+    expect(count(kept.submitted, 'final handoff for this context window')).toBe(12)
+    expect(rt.autopilot.lastError).toBeNull()
+    // The last fresh context was handed the run's milestones and its objective with its first message.
+    const block = rt.takeFreshContext() ?? ''
+    expect(block).toContain('session 13')
+    expect(block).toContain('Port the texture uploads')
+    expect(block).toContain('Get the GPU test machine')
+  })
+
+  test('a reload during Project Sentinel’s own /clear: the next runtime adopts the run and gives the fresh context its continuation, once', async () => {
+    const f = await started(() => undefined)
+    const { rt, kept, live } = f
+    rt.onTurnStart({ turnId: 'p0', text: 'Port the renderer to WebGPU.' })
+    rt.recordMilestones(PLAN, undefined)
+    await rt.onTurnComplete({ agentId: undefined, reason: 'answer', answer: 'planned' })
+    rt.onTurnStart({ turnId: 't1', text: 'Carry on.' })
+    stepAt(rt, 't1', 0, 705_000, 'tool_use')
+    await rt.onTurnComplete({ agentId: undefined, reason: 'answer', answer: 'done' })
+    await f.advance(300)
+    await rt.onTurnStart({ turnId: 'h1', text: framed(kept.submitted.at(-1)) })
+    writes(rt, '/work/NEXT_SESSION_PROMPT.md', 'wr1')
+    stepAt(rt, 'h1', 0, 706_000, 'end_turn')
+    await rt.onTurnComplete({ agentId: undefined, reason: 'answer', answer: 'handoff written' })
+    await f.advance(1500)
+    expect(kept.commands).toContain('clear')
+    expect(kept.store['handoff.pending.v1']).toBeDefined()
+    // The plugin reloads before the fresh session's start reaches the runtime that cleared.
+    rt.stopTimers()
+    live.sessionId = 'S2'
+    const next = new Runtime()
+    next.bind(f.host)
+    await next.onSessionStart({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await next.onClassicSessionStart({ source: 'clear', sessionId: 'S2' })
+    await f.advance(4500)
+    expect(count(kept.submitted, 'Context Autopilot continuation')).toBe(1)
+    expect(next.run?.id).toBe(rt.run?.id)
+    expect(next.run?.sessions.map(s => `${s.id}:${s.start}`)).toEqual(['S1:startup', 'S2:handoff'])
+    expect(next.plan().tasks.length).toBe(5)
+    expect(next.autopilot.state).toBe('resuming')
+    expect(kept.store['handoff.pending.v1']).toBeUndefined()
+  })
+})
+
 describe('one truth for /cr fresh, /cr handoff and the panel', () => {
   test('notes written in this context: /cr fresh starts the fresh context instead of asking for another handoff', async () => {
     const f = await started(() => undefined)

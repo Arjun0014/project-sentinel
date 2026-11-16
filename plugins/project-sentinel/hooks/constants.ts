@@ -28,6 +28,12 @@ export const STORE_ENTRIES = {
   cache: 'cache.v1',
   /** A fresh install's first-run card (1.7.0): when it was shown, and when the person dismissed it. */
   onboarding: 'onboarding.v1',
+  /**
+   * Project Sentinel's own /clear in flight (1.8.0): the run, the session it leaves, and the first prompt the fresh
+   * context is owed. A runtime that loads after the clear (a reload, a restarted process) adopts the run and
+   * delivers that prompt once; the runtime that ran the clear deletes it when it saw the fresh session itself.
+   */
+  clearInFlight: 'handoff.pending.v1',
 } as const
 
 /** The handoff file Context Autopilot asks Claude to create or update. */

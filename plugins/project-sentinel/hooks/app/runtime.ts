@@ -125,6 +125,28 @@ export const HANDOFF_CHOICE = {
 
 const isOwnPrompt = (origin: PromptOrigin | undefined): boolean => origin?.kind === 'plugin' && origin.name === OWN_PLUGIN
 
+/** Project Sentinel's own /clear in flight, as the store keeps it (STORE_ENTRIES.clearInFlight). */
+type ClearInFlight = { runId: string; fromSession: string | null; root: string; at: number; via: 'handoff' | 'fresh'; endNote: string; prompt: string | null; promptKind: 'continuation' | 'resume' }
+
+/** How long a clear in flight may be adopted by a runtime that loads after it. */
+const ADOPT_WITHIN_MS = 30 * 60_000
+
+function clearInFlightOf(v: unknown): ClearInFlight | null {
+  if (typeof v !== 'object' || v === null) return null
+  const r = v as Record<string, unknown>
+  if (typeof r.runId !== 'string' || typeof r.root !== 'string' || typeof r.at !== 'number' || !Number.isFinite(r.at)) return null
+  return {
+    runId: r.runId,
+    fromSession: typeof r.fromSession === 'string' ? r.fromSession : null,
+    root: r.root,
+    at: r.at,
+    via: r.via === 'fresh' ? 'fresh' : 'handoff',
+    endNote: typeof r.endNote === 'string' ? r.endNote.slice(0, 120) : 'handoff',
+    prompt: typeof r.prompt === 'string' ? r.prompt : null,
+    promptKind: r.promptKind === 'resume' ? 'resume' : 'continuation',
+  }
+}
+
 const isPersonOrigin = (origin: PromptOrigin | undefined): boolean =>
   origin === undefined || origin.kind === 'composer' || origin.kind === 'bridge' || origin.kind === 'sdk'
 
@@ -310,6 +332,8 @@ export class Runtime {
   private notesFoundAt: string | null = null
   /** Claude wrote the notes after the handoff gave up on them: checked again at the turn's end (or now when idle). */
   private notesRecheckOwed = false
+  /** Project Sentinel's own /clear that a runtime before this one ran and never saw through (a reload during it). */
+  private adopted: ClearInFlight | null = null
 
   /** The background work in flight Claude Code last listed, with each task's class; null before any Stop. */
   inFlight(): Autopilot.BackgroundTask[] | null {
@@ -712,8 +736,11 @@ export class Runtime {
     // Claude's own statement of the objective, when it gives one, says it better than the request's first sentence.
     const objective = typeof input.objective === 'string' ? clean(input.objective, 140) : ''
     // Another objective of Claude's with none of the plan's milestones is new work: it counts from nothing.
-    const isOtherObjective = objective.length >= 8 && this.run.objectiveBy === 'claude' && this.run.objective !== null && objective !== this.run.objective
+    const isOtherObjective =
+      objective.length >= 8 && this.run.objectiveBy === 'claude' && this.run.objective !== null && objective !== this.run.objective && !Plan.isSameMilestone(objective, this.run.objective ?? '')
     const base = Plan.isNewWork(this.plan(), input, isOtherObjective) ? Plan.emptyPlan() : this.plan()
+    // Open milestones an earlier context left that this list does not name: kept, and said so in the reply.
+    const carried = Plan.carriedLeftOut(base, input, session)
     if (objective.length >= 8 && (objective !== this.run.objective || this.run.objectiveBy !== 'claude')) {
       this.run = { ...this.run, objective, objectiveBy: 'claude' }
       this.persistRun()
@@ -734,7 +761,8 @@ export class Runtime {
     this.setPlan(Plan.fromMilestones(base, input, session, Date.now()))
     this.noteWorkStarted()
     const p = this.progress()
-    return `Recorded: ${p.done} of ${p.total} milestones done${p.current === null ? '' : `, now: ${p.current.subject}`}.`
+    const kept = carried.length === 0 ? '' : ` Kept from an earlier context, not in your list: ${carried.map(t => `${t.subject} (${t.status.replace('_', ' ')})`).join('; ')}. Send them with their status, or mark them dropped.`
+    return `Recorded: ${p.done} of ${p.total} milestones done${p.current === null ? '' : `, now: ${p.current.subject}`}.${kept}`
   }
 
   /** A new run plan from Claude's task list: kept with the run, and in the Quest log, newly finished milestones pay. */
@@ -853,6 +881,23 @@ export class Runtime {
       // Milestones done before this runtime attached are no turn's doing.
       this.turnStartDone = this.progress().done
       return
+    }
+    // Project Sentinel's own /clear that the runtime before this one never saw through (a reload during it): the run
+    // goes on in this session, and the first prompt it owed is delivered here.
+    const inFlight = clearInFlightOf(await host.storeGet(STORE_ENTRIES.clearInFlight).catch(() => undefined))
+    if (inFlight !== null && inFlight.fromSession !== this.sessionId && inFlight.root === this.root && Date.now() - inFlight.at < ADOPT_WITHIN_MS) {
+      const raw = await host.storeGet(`${STORE_ENTRIES.runPrefix}${inFlight.runId}`).catch(() => undefined)
+      if (Chain.isRun(raw)) {
+        this.run = Chain.rollOver({ ...raw, status: 'active', plan: Plan.planOf(raw.plan), ops: Ops.opsOf(raw.ops), ...(raw.evidence === undefined ? {} : { evidence: Evidence.evidenceOf(raw.evidence) }) }, { end: 'handoff', endNote: inFlight.endNote, nextId: this.sessionId, nextStart: 'handoff', now })
+        this.adopted = inFlight
+        await host.storeDelete(STORE_ENTRIES.clearInFlight).catch(() => undefined)
+        this.turnStartDone = this.progress().done
+        this.persistRun(true)
+        this.trace(`run: adopted run ${this.run.number}'s fresh context after a reload during Project Sentinel's own /clear (${inFlight.endNote})`)
+        // Its start may never be reported to this runtime: the prompt it owed goes anyway, once, if nothing else began.
+        host.after(4000, () => void this.deliverAdopted('no fresh session was reported'))
+        return
+      }
     }
     const resumedFrom = this.startSource?.source === 'resume' ? this.startSource.sessionId : null
     const previous = resumedFrom === null ? null : await findRunBySession(host, resumedFrom)
@@ -1176,7 +1221,8 @@ export class Runtime {
     }
     const host = this.host
     const now = host === null ? Date.now() : await this.engineNow()
-    const wasOurs = this.isOwnClear || this.autopilot.state === 'clearing'
+    const adopted = this.adopted
+    const wasOurs = this.isOwnClear || this.autopilot.state === 'clearing' || adopted !== null
     const purpose = wasOurs ? this.freshPurpose : null
     this.trace(`fresh session ${input.sessionId} after /clear (${purpose !== null ? `Project Sentinel's ${purpose.endNote}` : wasOurs ? "Control Room's handoff" : 'cleared by the person'})`)
     if (wasOurs) this.onOwnClearSeen?.()
@@ -1250,6 +1296,8 @@ export class Runtime {
     this.freshContext = extras === null ? base : `${base} ${extras}`
     // The fresh conversation is empty, so asking for its context blocks again costs nothing.
     this.host?.invalidatePromptContext()
+    // A clear the runtime before this one ran: the first prompt it owed goes now.
+    if (adopted !== null) void this.deliverAdopted('its fresh session started')
   }
 
   /** Whether this runtime has looked for the store the plugin kept under its former name. */
@@ -2292,18 +2340,71 @@ export class Runtime {
       this.isOwnClear = false
       this.onOwnClearSeen = null
     }
+    await this.markClearInFlight()
     try {
       await host.clearContext()
     } catch (error) {
       settle()
+      await host.storeDelete(STORE_ENTRIES.clearInFlight).catch(() => undefined)
       return { ok: false, error: error instanceof Error ? clean(error.message, 160) : String(error) }
     }
     if (!isSeen) await Promise.race([seen, new Promise<void>(resolve => host.after(LIMITS.clearSettleMs, resolve))])
     settle()
+    // Seen through by this runtime (or not cleared at all): no runtime after it adopts it.
+    await host.storeDelete(STORE_ENTRIES.clearInFlight).catch(() => undefined)
     // Without the fresh session's start, a new session id still proves the clear happened.
     const after = isSeen ? null : await host.sessionId().catch(() => null)
     if (!isSeen && (after === null || after === before)) return { ok: false, error: 'the context was not cleared' }
     return { ok: true }
+  }
+
+  /**
+   * The first prompt a clear this runtime adopted owed the fresh context (the continuation, a fresh resume), once:
+   * when its session's start is reported, or a moment after the load when it is not. Never once a turn ran here.
+   */
+  private async deliverAdopted(why: string): Promise<void> {
+    const adopted = this.adopted
+    if (adopted === null) return
+    this.adopted = null
+    const session = this.run === null ? undefined : Chain.currentSession(this.run)
+    if (this.turn.isRunning || (session?.turns ?? 0) > 0 || adopted.prompt === null) {
+      this.trace(`run: the adopted clear's first prompt is not sent (${this.turn.isRunning || (session?.turns ?? 0) > 0 ? 'a turn ran here already' : 'none was owed'})`)
+      return
+    }
+    if (adopted.promptKind === 'continuation') {
+      if (!this.settings.autopilot.enabled || !this.settings.autopilot.autoContinue) return
+      this.stepAutopilot({ kind: 'adoptedClear', now: await this.engineNow() })
+    }
+    this.trace(`run: delivering the adopted clear's ${adopted.promptKind} prompt (${why})`)
+    await this.submitOwn(adopted.prompt, adopted.promptKind === 'continuation' ? 'continuation' : 'resume')
+  }
+
+  /** Project Sentinel's own /clear is about to run: the run and what the fresh context is owed, kept where a reload finds them. */
+  private async markClearInFlight(): Promise<void> {
+    const host = this.host
+    if (host === null || this.run === null) return
+    // The run as it is now, so a runtime that adopts the clear starts from it (not from a write still debounced).
+    await saveRun(host, this.run).catch(() => undefined)
+    this.saveRunLater.drop(pending => pending.id === this.run?.id)
+    const purpose = this.freshPurpose
+    const next = (Chain.currentSession(this.run)?.index ?? 1) + 1
+    const isAuto = this.settings.autopilot.enabled && this.settings.autopilot.autoContinue
+    const marker: ClearInFlight = {
+      runId: this.run.id,
+      fromSession: this.sessionId,
+      root: this.root,
+      at: Date.now(),
+      via: purpose === null ? 'handoff' : 'fresh',
+      endNote: purpose?.endNote ?? `handoff at ${this.autopilot.triggeredTokens === null ? 'manual request' : `${Math.round(this.autopilot.triggeredTokens / 1000)}k tokens`}`,
+      prompt:
+        purpose === null
+          ? isAuto
+            ? prompts.continuationPrompt({ handoffPath: this.notesPathForFresh(), sessionNumber: next })
+            : null
+          : prompts.freshResumePrompt({ sessionNumber: next, handoffPath: this.handoffPath(), why: purpose.why, then: purpose.then }),
+      promptKind: purpose === null ? 'continuation' : 'resume',
+    }
+    await host.storeSet(STORE_ENTRIES.clearInFlight, marker).catch(() => undefined)
   }
 
   /** Why the fresh context Project Sentinel is starting outside a handoff exists (a fresh wake, the Cold Resume Guard); null otherwise. */

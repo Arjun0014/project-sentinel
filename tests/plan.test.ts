@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { applyTool, emptyPlan, fromMilestones, fromTodoWrite, isNewWork, objectiveOf, planOf, progressOf } from '../hooks/features/plan'
+import { applyTool, emptyPlan, fromMilestones, fromTodoWrite, isNewWork, isSameMilestone, objectiveOf, planOf, progressOf } from '../hooks/features/plan'
 import { continuationContext } from '../hooks/features/prompts'
 
 const todo = (content: string, status: 'pending' | 'in_progress' | 'completed', activeForm = `${content}ing`) => ({ content, status, activeForm })
@@ -55,12 +55,44 @@ describe('run plan', () => {
     expect(second.tasks[0]!.doneAt).toBe(10)
   })
 
-  test('after a handoff the fresh context re-plans: earlier open work goes, finished work stays', () => {
-    const before = fromTodoWrite(emptyPlan(), [todo('A', 'completed'), todo('B', 'completed'), todo('C', 'in_progress'), todo('D', 'pending')], 1, 10)
-    // Session 2 writes its own list from the handoff notes; C was renamed, D dropped.
-    const after = fromTodoWrite(before, [todo('Finish C', 'in_progress'), todo('E', 'pending')], 2, 20)
-    expect(progressOf(after)).toMatchObject({ done: 2, total: 4 })
-    expect(after.tasks.map(t => t.subject)).toEqual(['A', 'B', 'Finish C', 'E'])
+  test('after a handoff the fresh context carries the run: earlier open work stays until named or dropped; a reworded title is the same milestone, in its place', () => {
+    // Seen in a real run (1.7.0): the fresh context's first, partial list dropped the run's open milestones and the
+    // Work track read as unrelated new work while the code work went on from the notes.
+    const before = fromTodoWrite(
+      emptyPlan(),
+      [todo('Write the parser', 'completed'), todo('Wire the CLI', 'completed'), todo('Fix the cache scheduler', 'in_progress'), todo('Document the flags', 'pending'), todo('Benchmark startup', 'pending')],
+      1,
+      10,
+    )
+    // Session 2 writes a partial list from the notes: the scheduler reworded, the docs dropped, the benchmark left out.
+    const after = fromTodoWrite(before, [todo('Fix cache scheduler races', 'in_progress'), { content: 'Document the flags', status: 'dropped' }, todo('Release notes', 'pending')], 2, 20)
+    expect(after.tasks.map(t => `${t.subject}:${t.status}:${t.session}`)).toEqual([
+      'Write the parser:completed:1',
+      'Wire the CLI:completed:1',
+      'Fix cache scheduler races:in_progress:2',
+      'Benchmark startup:pending:1',
+      'Release notes:pending:2',
+    ])
+    expect(progressOf(after)).toMatchObject({ done: 2, total: 5 })
+    // The reworded milestone took its new title's key: the next list matches it exactly, and it is not carried twice.
+    const third = fromTodoWrite(after, [todo('Fix cache scheduler races', 'completed'), todo('Release notes', 'in_progress')], 2, 30)
+    expect(third.tasks.map(t => `${t.subject}:${t.status}`)).toEqual(['Write the parser:completed', 'Wire the CLI:completed', 'Fix cache scheduler races:completed', 'Benchmark startup:pending', 'Release notes:in_progress'])
+    // Within one session a rewritten list stays authoritative for the open work that session wrote.
+    const fourth = fromTodoWrite(third, [todo('Benchmark startup', 'in_progress')], 2, 40)
+    expect(fourth.tasks.map(t => t.subject)).toEqual(['Write the parser', 'Wire the CLI', 'Fix cache scheduler races', 'Benchmark startup'])
+    expect(isSameMilestone('Fix the cache scheduler', 'Fix cache scheduler races')).toBe(true)
+    expect(isSameMilestone('Fix the cache scheduler', 'Document the cache')).toBe(false)
+    expect(isSameMilestone('C', 'Finish C')).toBe(false)
+  })
+
+  test('the Task tools: a fresh session’s own task list (new ids) never drops the run’s carried open tasks', () => {
+    let plan = applyTool(emptyPlan(), { tool: 'TaskCreate', input: { subject: 'Port the renderer', description: '' }, result: { task: { id: '1', subject: 'Port the renderer' } }, session: 1, now: 1 })
+    plan = applyTool(plan, { tool: 'TaskCreate', input: { subject: 'Profile the hot loop', description: '' }, result: { task: { id: '2', subject: 'Profile the hot loop' } }, session: 1, now: 2 })
+    plan = applyTool(plan, { tool: 'TaskUpdate', input: { taskId: '1', status: 'completed' }, result: {}, session: 1, now: 3 })
+    // Session 2: Claude Code's task list starts over; TaskList names only the new session's tasks.
+    plan = applyTool(plan, { tool: 'TaskCreate', input: { subject: 'Write the migration guide', description: '' }, result: { task: { id: '1', subject: 'Write the migration guide' } }, session: 2, now: 4 })
+    plan = applyTool(plan, { tool: 'TaskList', input: {}, result: { tasks: [{ id: '1', subject: 'Write the migration guide', status: 'in_progress' }] }, session: 2, now: 5 })
+    expect(plan.tasks.map(t => `${t.subject}:${t.status}`)).toEqual(['Port the renderer:completed', 'Profile the hot loop:pending', 'Write the migration guide:in_progress'])
   })
 
   test('the Task tools build the plan by id; a deleted task leaves it, TaskList is the truth', () => {

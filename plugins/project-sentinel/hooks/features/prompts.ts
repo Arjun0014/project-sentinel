@@ -76,6 +76,7 @@ export const MILESTONES_TOOL = {
     'Keep 3 to 10 milestones for the whole objective, and send the whole list each time: when multi-step work starts, and whenever a milestone starts, moves to verifying, waits, is blocked or finishes. A quick one-step request needs none.',
     'Mark exactly one milestone in_progress while you work on it, with `doing`: what you are doing now, in a few present-tense words ("Rewriting the scheduler").',
     'Use verifying for work that is done but still being checked; completed only once it is verified, with `evidence` (what showed it works). Use waiting for a result that will come by itself (a running job, a scheduled run, a review) and blocked for something only the person can give; for both, say what it waits for in `blocker`.',
+    'Milestones carry across context handoffs: after one, send the run\'s milestones under the same titles. Mark one dropped when it is no longer part of the work; one from an earlier context that your list leaves out stays as it was.',
   ].join(' '),
   inputSchema: {
     type: 'object',
@@ -91,7 +92,7 @@ export const MILESTONES_TOOL = {
           type: 'object',
           properties: {
             title: { type: 'string', description: 'The outcome, in a few words ("Fix the renderer"), never a single command or file read.' },
-            status: { type: 'string', enum: ['pending', 'in_progress', 'verifying', 'waiting', 'blocked', 'completed'] },
+            status: { type: 'string', enum: ['pending', 'in_progress', 'verifying', 'waiting', 'blocked', 'completed', 'dropped'] },
             doing: { type: 'string', description: 'While in progress or verifying: what you are doing now, a few present-tense words ("Rewriting the scheduler").' },
             evidence: { type: 'string', description: 'For verifying or completed: what showed it works, in a few words ("42 of 42 tests pass").' },
             blocker: { type: 'string', description: 'For waiting or blocked: what it waits for, in a few words ("the S-002 run to finish", "needs the API key").' },

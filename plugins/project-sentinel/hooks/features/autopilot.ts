@@ -251,6 +251,11 @@ export type AutopilotEvent =
   | { kind: 'cancelHandoff'; tokens: number; window: number | undefined }
   /** The fresh context was told what the old one left running. */
   | { kind: 'leftRunningTold' }
+  /**
+   * This runtime loaded after Project Sentinel's own /clear (a reload during it): it adopts the fresh context the
+   * runtime before it started, and is about to give it the continuation that runtime owed.
+   */
+  | { kind: 'adoptedClear'; now: number }
 
 export type AutopilotEffect =
   | { kind: 'appendPending'; tokens: number; threshold: number; window: number | undefined }
@@ -811,6 +816,9 @@ export function step(model: Autopilot, event: AutopilotEvent, cfg: AutopilotConf
 
     case 'leftRunningTold':
       return model.leftRunning.length === 0 ? { model, effects: none } : { model: set(model, { leftRunning: [] }), effects: none }
+
+    case 'adoptedClear':
+      return { model: set(model, { state: 'resuming', triggeredTokens: null, triggeredAt: null, handoffSince: null, loop: null, lastError: null, ...noWait, ...fresh, note: 'Continuing in the fresh context' }), effects: none }
 
     case 'notesSeen':
       if (model.state !== 'waiting-background') return { model, effects: none }

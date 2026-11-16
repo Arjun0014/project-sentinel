@@ -3,11 +3,16 @@
  * (TodoWrite, or TaskCreate / TaskUpdate / TaskList), kept with the run so
  * work progress survives a handoff while the context starts over.
  *
- * Progress is finished ÷ total of those tasks, never a guess. A list Claude
- * rewrites is authoritative for open work; a finished task it drops stays
- * finished, because a fresh context's list rarely repeats what an earlier one
- * completed. The first plan written in a new session replaces the open work
- * of earlier sessions, which re-planned from the handoff notes.
+ * Progress is finished ÷ total of those tasks, never a guess. Within one session (one context) a list
+ * Claude rewrites is authoritative for the open work that session wrote; a finished task it drops stays
+ * finished, because a fresh context's list rarely repeats what an earlier one completed.
+ *
+ * Open work an EARLIER session left (pending, in progress, waiting, blocked) is carried, never dropped
+ * because a fresh context's first list happened to restate only part of the plan (seen in a real run: the
+ * code work continued from the notes while the Work track looked like unrelated new work). It leaves the
+ * plan when a later list names it (any status), when Claude marks it `dropped`, or when Claude starts new
+ * work (another objective, none of the plan's milestones). A title reworded across the handoff ("Fix the
+ * cache" → "Fix the cache scheduler") is matched to the carried milestone it names.
  */
 
 import { clean } from '../core/text'
@@ -59,9 +64,35 @@ export const isActive = (status: PlanStatus): boolean => status === 'in_progress
 /** Work that cannot go on by Claude's own hand for now: waiting for a result, or blocked on the person. */
 export const isHeld = (status: PlanStatus): boolean => status === 'waiting' || status === 'blocked'
 
-/** Earlier sessions' open work is dropped once a new session plans for itself. */
-function forSession(plan: Plan, session: number): PlanTask[] {
-  return session > plan.session ? plan.tasks.filter(t => t.status === 'completed') : plan.tasks
+/** Every task stays: earlier sessions' open work is carried until a list names it, drops it, or starts new work. */
+function forSession(plan: Plan, _session: number): PlanTask[] {
+  return plan.tasks
+}
+
+/** Open work an earlier session left: carried until this session names it. */
+export const isCarried = (t: PlanTask, session: number): boolean => t.status !== 'completed' && t.session < session
+
+/** A status that takes a milestone out of the plan: Claude says it is no longer part of the work. */
+const isDropped = (v: unknown): boolean => v === 'dropped' || v === 'cancelled' || v === 'canceled' || v === 'removed'
+
+const STOP_WORDS = new Set(['the', 'and', 'for', 'with', 'from', 'into', 'its', 'all', 'a', 'an', 'of', 'to', 'in', 'on', 'at', 'by', 'up'])
+
+const wordsOf = (subject: string): Set<string> => new Set(keyOf(subject).replace(/[^a-z0-9 ]+/g, ' ').split(' ').filter(w => w.length >= 3 && !STOP_WORDS.has(w)))
+
+/**
+ * Whether two milestone titles name the same outcome: most of their words in common, or one's words all in the
+ * other's (at least two). Only used to match a fresh context's list to the work it carried over.
+ */
+export function isSameMilestone(a: string, b: string): boolean {
+  const x = wordsOf(a)
+  const y = wordsOf(b)
+  if (x.size === 0 || y.size === 0) return false
+  let common = 0
+  for (const w of x) if (y.has(w)) common += 1
+  const union = x.size + y.size - common
+  if (common / union >= 0.6) return true
+  const [small, large] = x.size <= y.size ? [x, y] : [y, x]
+  return small.size >= 2 && common === small.size && large.size <= small.size * 2
 }
 
 /** At most PLAN_MAX tasks: the oldest finished ones go first, open work stays. */
@@ -86,14 +117,26 @@ export function fromTodoWrite(plan: Plan, todos: unknown, session: number, now: 
   const previous = new Map(plan.tasks.map(t => [t.key, t]))
   const next: PlanTask[] = []
   const seen = new Set<string>()
+  const dropped = new Set<string>()
+  /** Carried milestones a reworded title named: the old key → the new one (the place in the plan is kept). */
+  const renamed = new Map<string, string>()
   for (const item of todos) {
     if (!isRecord(item)) continue
     const subject = clean(str(item.content), 120)
-    const status = statusOf(item.status)
+    if (subject === '') continue
+    // A carried milestone named in other words is that milestone: it takes the new title (and its key, so later
+    // lists match it exactly), and keeps its place and its finished time.
     const key = keyOf(subject)
-    if (subject === '' || status === null || seen.has(key)) continue
+    const reworded = previous.has(key) ? undefined : before.find(t => isCarried(t, session) && !seen.has(t.key) && !renamed.has(t.key) && isSameMilestone(t.subject, subject))
+    if (isDropped(item.status)) {
+      dropped.add(reworded?.key ?? key)
+      continue
+    }
+    const status = statusOf(item.status)
+    if (status === null || seen.has(key)) continue
     seen.add(key)
-    const prev = previous.get(key)
+    if (reworded !== undefined) renamed.set(reworded.key, key)
+    const prev = previous.get(key) ?? reworded
     next.push({
       key,
       id: null,
@@ -105,8 +148,35 @@ export function fromTodoWrite(plan: Plan, todos: unknown, session: number, now: 
       detail: clean(str(item.detail), 160) || (status === 'completed' && prev?.status === 'completed' ? prev.detail : null),
     })
   }
-  const kept = before.filter(t => t.status === 'completed' && !seen.has(t.key))
-  return { tasks: capped([...kept, ...next]), session: Math.max(plan.session, session), updatedAt: now }
+  // Finished work stays; open work an earlier session left is carried until named or dropped (see the module).
+  const kept = before.filter(t => !seen.has(t.key) && !dropped.has(t.key) && !renamed.has(t.key) && (t.status === 'completed' || isCarried(t, session)))
+  return { tasks: capped(ordered(before, kept, next, renamed)), session: Math.max(plan.session, session), updatedAt: now }
+}
+
+/**
+ * The plan in its order: the tasks of the list as written, each carried task kept where it stood before the
+ * first of them (so a fresh context's partial list does not push the run's earlier milestones to the end); a
+ * reworded milestone stands where the one it renames stood.
+ */
+function ordered(before: readonly PlanTask[], kept: readonly PlanTask[], next: readonly PlanTask[], renamed: ReadonlyMap<string, string>): PlanTask[] {
+  const keptKeys = new Set(kept.map(t => t.key))
+  const nextKeys = new Set(next.map(t => t.key))
+  const out: PlanTask[] = []
+  let i = 0
+  for (const t of before) {
+    const target = renamed.get(t.key) ?? t.key
+    if (keptKeys.has(t.key)) out.push(t)
+    else if (nextKeys.has(target)) {
+      // A task of the new list that stood here before: the new list's run of tasks continues from here.
+      while (i < next.length) {
+        const n = next[i++]!
+        out.push(n)
+        if (n.key === target) break
+      }
+    }
+  }
+  while (i < next.length) out.push(next[i++]!)
+  return out
 }
 
 /** TaskCreate: one new task, with the id the tool's result gave it. */
@@ -115,7 +185,9 @@ export function fromTaskCreate(plan: Plan, input: Record<string, unknown>, resul
   const id = task === null ? '' : str(task.id)
   const subject = clean(str(task?.subject) || str(input.subject), 120)
   if (id === '' || subject === '') return plan
-  const tasks = forSession(plan, session).filter(t => t.id !== id)
+  // Claude Code's task ids start over in each session (a new context's task 1 is not the last one's): an id names a
+  // task of this session only.
+  const tasks = forSession(plan, session).filter(t => !(t.id === id && t.session === session))
   tasks.push({ key: keyOf(subject), id, subject, activeForm: clean(str(input.activeForm), 80) || null, status: 'pending', session, doneAt: null, detail: null })
   return { tasks: capped(tasks), session: Math.max(plan.session, session), updatedAt: now }
 }
@@ -123,13 +195,14 @@ export function fromTaskCreate(plan: Plan, input: Record<string, unknown>, resul
 /** TaskUpdate: a status, subject or active form changed; `deleted` removes the task. */
 export function fromTaskUpdate(plan: Plan, input: Record<string, unknown>, session: number, now: number): Plan {
   const id = str(input.taskId)
-  if (id === '' || !plan.tasks.some(t => t.id === id)) return plan
-  if (input.status === 'deleted') return { ...plan, tasks: plan.tasks.filter(t => t.id !== id), updatedAt: now }
+  const isIt = (t: PlanTask) => t.id === id && t.session === session
+  if (id === '' || !plan.tasks.some(isIt)) return plan
+  if (input.status === 'deleted') return { ...plan, tasks: plan.tasks.filter(t => !isIt(t)), updatedAt: now }
   const status = statusOf(input.status)
   const subject = clean(str(input.subject), 120)
   const activeForm = clean(str(input.activeForm), 80)
   const tasks = plan.tasks.map(t =>
-    t.id !== id
+    !isIt(t)
       ? t
       : {
           ...t,
@@ -157,13 +230,14 @@ export function fromTaskList(plan: Plan, result: unknown, session: number, now: 
   const before = forSession(plan, session)
   const tasks: PlanTask[] = []
   for (const t of before) {
-    if (t.id === null) {
-      tasks.push(t)
+    // A task-list id is this session's: an earlier session's task (its id from another list) is carried as it was.
+    if (t.id === null || t.session < session) {
+      if (t.id === null || t.status === 'completed' || isCarried(t, session)) tasks.push(t)
       continue
     }
     const l = listed.get(t.id)
     if (l === undefined) {
-      if (t.status === 'completed') tasks.push(t)
+      if (t.status === 'completed' || isCarried(t, session)) tasks.push(t)
       continue
     }
     listed.delete(t.id)
@@ -211,9 +285,16 @@ export function isNewWork(plan: Plan, input: Record<string, unknown>, isOtherObj
   const keys = new Set(plan.tasks.map(t => t.key))
   const titles = input.milestones
     .filter(isRecord)
-    .map(m => keyOf(clean(str(m.title), 120)))
-    .filter(k => k !== '')
-  return titles.length > 0 && !titles.some(k => keys.has(k))
+    .map(m => clean(str(m.title), 120))
+    .filter(t => t !== '')
+  return titles.length > 0 && !titles.some(t => keys.has(keyOf(t)) || plan.tasks.some(p => isSameMilestone(p.subject, t)))
+}
+
+/** The carried milestones a list left out (open work from earlier contexts it did not name): the tool's reply says them. */
+export function carriedLeftOut(plan: Plan, input: Record<string, unknown>, session: number): PlanTask[] {
+  if (!Array.isArray(input.milestones)) return []
+  const named = input.milestones.filter(isRecord).map(m => clean(str(m.title), 120))
+  return plan.tasks.filter(t => isCarried(t, session) && !named.some(n => keyOf(n) === t.key || isSameMilestone(t.subject, n)))
 }
 
 export function fromMilestones(plan: Plan, input: Record<string, unknown>, session: number, now: number): Plan {
