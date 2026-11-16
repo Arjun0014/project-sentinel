@@ -6,6 +6,55 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and ver
 `plugins/project-sentinel/.claude-plugin/plugin.json` and in `.claude-plugin/marketplace.json` must
 match. `claude plugin tag plugins/project-sentinel` checks this when tagging a release.
 
+## [Unreleased]
+
+A second hardening pass for long runs across many contexts (branch `sentinel-hardening-1.8`; not released, the
+version is still 1.7.0). In progress: the rest of this list is written as the work lands. 614 tests pass on
+Claude Code 2.1.325.
+
+### Fixed
+
+- **Handoff notes reported missing although they were written.** The prompts said only "at the project root",
+  the root was read once at the load (a worktree move or `/cd` left it stale), any stat error read as "missing",
+  and freshness was `mtime >= handoff start` alone. One verifier (`features/handoffArtifact.ts`) now judges the
+  notes for every reader (the handoff's check, `/cr handoff`, `/cr fresh`, the supervisor, Ready to resume): it
+  looks at every place they may be (the session's root now, the working directory, the repository root, the root
+  at the load, wherever Claude's editing tool wrote them), tells *missing* from *could not be inspected*, and takes
+  three proofs (Claude's own write, a change since the handoff began, the time). The baseline is the handoff's
+  first turn: a retry or a restart never moves it. The prompts name the exact path; the debug log lists every
+  place looked at and what was found. Notes Claude writes after the handoff gave up on them are checked again at
+  once and the handoff goes on by itself.
+- **A fresh context inherited the old context's size** (told it hit its threshold at ~701k right after a
+  handoff). Usage readings now belong to a context epoch (`features/contextEpoch.ts`): a new context's size is
+  unknown until a request made in it is answered; session-level figures (`session.measure`, `usage()`) never prove
+  or move it; an answer to a request made before a boundary is set aside. Autopilot acts only on proven figures.
+- **The fresh context's Work track looked like unrelated work.** The first plan a new session wrote dropped every
+  open milestone of earlier sessions. Open milestones are now carried until a later list names them, Claude marks
+  them `dropped` (new status on the milestones tool), or Claude starts new work; a reworded title is matched to
+  the milestone it names. Claude Code's task ids restart in each session: an id now names a task of its own session
+  only (a new session's task 1 replaced the previous one's, even a completed one).
+- **Keep warm stood down while the handoff only checked its notes**; it now stands down only for the clear itself
+  and the fresh context resuming.
+- Claude Code 2.1.325: the status bar's `isCollapsed` prop, Desktop's minimized-pane `widget` placement (a glance),
+  and the engine's own `tool.check` during a call (tests).
+
+### Added
+
+- **A handoff-loop circuit breaker**: a third handoff into fresh contexts within 30 minutes, or a fresh context at
+  its handoff point within two turns without growing, is refused ("Handoff loop prevented"); Recheck, Continue
+  here, Start fresh, Pause Autopilot.
+- **Context window sanity guard**: a window that shrinks under a model switch (a 1M model reported as 200k) while
+  the context already holds more than its new handoff point holds Autopilot instead of handing off at once ("Model
+  window changed unexpectedly"); use Claude Code's limit, switch back, or pause (`/cr window accept|back|pause`).
+- **Background work that outlives a context** is a dependency of the run (`features/dependencies.ts`), kept across
+  any number of handoffs until Claude Code reports its end; a task an earlier handoff left running never holds a
+  later handoff again. The fresh context is told what still runs and since when.
+- **A reload during Project Sentinel's own `/clear`**: a marker (`handoff.pending.v1`) lets the runtime that loads
+  next adopt the run and give the fresh context its continuation once.
+- The Handoff Supervisor says what Sentinel does next and the notes' state. `/cr fresh force` (and "start fresh
+  now") asks before starting from notes Sentinel could not verify; `/cr fresh` starts from notes written in this
+  context. `/cr autopilot pause|resume|recheck` for this session only.
+
 ## [1.7.0] - 2026-10-13
 
 A hardening and UX pass driven by real long-run failures: a written handoff held for hours by a Vite preview
