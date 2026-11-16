@@ -137,7 +137,8 @@ and Sonnet) checked the Desktop-style model switch, the Agent Model Policy and w
   5-hour cell read `reset · new window`: the window's reset time had passed since that session's last response.
   That load migrated the person's real store once: defaults generation 2 → 3, the router replaced by the Agent
   Model Policy (off, as their router was), their profile, Autopilot and Guardrails (already Default) unchanged.
-- The same screenshot showed the model cut to `haik…`, fixed above (unit-tested; not yet seen again in the app).
+- The same screenshot showed the model cut to `haik…`, fixed above. With the fix copied into the installed copy,
+  the person saw the card read `Haiku 5.5` in full in the app.
 - The session that had been working all along kept 1.7.0 in memory, across `/clear` too: its milestones tool
   still lacked `dropped`, and its handoff prompt lacked the exact notes path. It needs a new session to run this
   build (see Troubleshooting).
