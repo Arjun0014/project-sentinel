@@ -39,7 +39,7 @@ type Ctx = {
   /** Keep warm's verdict on itself, and why it paused when it did. */
   verdict: (verdict: 'yes' | 'no', reason: string | null) => void
   /** A watcher holding this cache until it wakes (its Keep warm strategy or Smart's hold), else null. */
-  hold: () => { until: number } | null
+  hold: () => { until: number; label?: string | null } | null
 }
 
 const RECENT_MISS_MS = 5 * 60_000
@@ -395,6 +395,21 @@ export class CacheGuardian {
     this.ticker = null
   }
 
+  /** Keep warm's two clocks now (features/cache.ts keepWarmTiming): the allowance from the idle start, the cache's lifetime. */
+  timing(now: number): Cache.KeepWarmTiming {
+    const s = this.ctx.settings().cache
+    const hold = this.ctx.hold()
+    return Cache.keepWarmTiming(this.state, {
+      now,
+      isOn: s.keepWarm || hold !== null,
+      isTurnRunning: this.ctx.isTurnRunning(),
+      idleSince: this.idleSince,
+      maxIdleMinutes: s.maxIdleMinutes,
+      hold,
+      plan: this.plan,
+    })
+  }
+
   refreshPlan(now: number): Cache.RefreshPlan {
     const s = this.ctx.settings().cache
     const hold = this.ctx.hold()
@@ -514,6 +529,7 @@ export class CacheGuardian {
         main: Cache.mainVerification(s.keepWarm),
         pausedReason: s.keepWarm.pausedReason,
         log: s.keepWarm.log.slice(0, 6).map(refreshView),
+        timing: this.timing(now),
       },
       misses: s.misses.slice(0, 8).map(m => missView(m, settings)),
       policies: { isStable: settings.stablePolicies, isHolding: this.isHoldingPolicies() },

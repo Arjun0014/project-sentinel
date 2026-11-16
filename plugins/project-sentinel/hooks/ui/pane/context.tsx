@@ -179,7 +179,7 @@ export function contextPage(kit: Kit, pane: PaneModel, hud: HudModel, chain: Cha
             </Text>
           </Box>
           <Text bold {...toneProps(hud.ctx.tone === 'warn' || hud.ctx.tone === 'bad' ? hud.ctx.tone : 'normal')}>
-            {hud.ctx.pct === null ? G.none : `${hud.ctx.pct}%`}
+            {hud.ctx.pct === null ? G.none : `${hud.ctx.isProvisional ? '~' : ''}${hud.ctx.pct}%`}
           </Text>
         </Box>
         {meterBar(kit, { key: 'ap-meter', fraction, marker: s.enabled ? marker : null, tone: meterTone, width: kit.columns, alt: `Context ${hud.ctx.pct ?? 0}% used` })}

@@ -10,7 +10,7 @@ import type { RenderElement } from 'claude-code'
 
 import type { PaneModel, PermissionCategory, PermissionState, PermissionsView, ResourcesView } from '../../../types'
 import * as fmt from '../../core/format'
-import { DEFAULT_PERMISSIONS, PERMISSION_CATEGORIES, PERMISSION_LABEL } from '../../core/settings'
+import { DEFAULT_PERMISSIONS, LEGACY_PERMISSIONS, PERMISSION_CATEGORIES, PERMISSION_LABEL } from '../../core/settings'
 import { CATEGORY_INFO } from '../../features/permissions/categories'
 import { clampState, statesFor } from '../../features/permissions/decide'
 import type { Kit } from '../kit'
@@ -61,6 +61,7 @@ export function guardrailsPage(kit: Kit, pane: PaneModel, permissions: Permissio
   const p = s.permissions
   const accent = ACCENT.guardrails
   const isDefault = PERMISSION_CATEGORIES.every(c => p[c] === DEFAULT_PERMISSIONS[c])
+  const isGuarded = PERMISSION_CATEGORIES.every(c => p[c] === LEGACY_PERMISSIONS[c])
   const r = s.resources
   const ceilings = resources?.ceilings ?? null
   const recent = permissions?.recent ?? []
@@ -85,10 +86,11 @@ export function guardrailsPage(kit: Kit, pane: PaneModel, permissions: Permissio
                 subtitle:
                   kit.openPicker === `perm-${c}`
                     ? `e.g. ${CATEGORY_INFO[c].examples}`
-                    : p[c] === DEFAULT_PERMISSIONS[c]
-                      ? `${STATE[p[c]].sentence} · default`
-                      : `${STATE[p[c]].sentence} · changed (default: ${STATE[DEFAULT_PERMISSIONS[c]].sentence.toLowerCase()})`,
-                subtitleTone: kit.openPicker !== `perm-${c}` && p[c] !== DEFAULT_PERMISSIONS[c] ? 'warn' : undefined,
+                    : p[c] === 'default'
+                      ? 'Claude Code decides (its permission mode and rules)'
+                      : `${STATE[p[c]].sentence} · Project Sentinel adds this on top of Claude Code`,
+                // A stricter choice is the person's (or a profile's), not a problem: quiet, never amber.
+                subtitleTone: undefined,
                 control: picker(k, {
                   key: `perm-${c}`,
                   value: p[c],
@@ -101,8 +103,11 @@ export function guardrailsPage(kit: Kit, pane: PaneModel, permissions: Permissio
       )}
       {footnote(kit, {
         key: 'permissions',
-        actions: isDefault ? undefined : [{ key: 'perm-reset', label: 'Restore safe defaults', onPress: () => u(d => void (d.permissions = { ...DEFAULT_PERMISSIONS })) }],
-        text: 'Ask always asks you first and Deny always stops an action, in every mode; Claude Code’s own rules still apply after a yes. Shell commands are matched by pattern: this narrows what Claude does, it is not a sandbox.',
+        actions: [
+          ...(isDefault ? [] : [{ key: 'perm-reset', label: 'All to Default (Claude Code decides)', onPress: () => u(d => void (d.permissions = { ...DEFAULT_PERMISSIONS })) }]),
+          ...(isGuarded ? [] : [{ key: 'perm-guarded', label: 'Use the Guarded set', onPress: () => u(d => void (d.permissions = { ...LEGACY_PERMISSIONS })) }]),
+        ],
+        text: 'Default: Project Sentinel does not override the action; Claude Code’s own permission mode and rules decide (not “allow everything”). Ask always asks you first and Deny always stops an action, in every mode; Claude Code’s own rules still apply after a yes. Shell commands are matched by pattern: this narrows what Claude does, it is not a sandbox.',
       })}
       {pane.allowRemoved.length === 0
         ? null

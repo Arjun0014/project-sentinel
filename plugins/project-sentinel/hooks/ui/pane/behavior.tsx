@@ -87,7 +87,7 @@ export function frontierDeliveryText(d: PaneModel['frontier']['delivery']): { te
 
 function frontierDeliveryRow(k: Kit, d: PaneModel['frontier']['delivery']): RenderElement {
   const t = frontierDeliveryText(d)
-  return row(k, { key: 'fr-delivery', label: 'This context', subtitle: t.text, subtitleTone: t.tone })
+  return row(k, { key: 'fr-delivery', label: 'Reached Claude in this context', subtitle: t.text, subtitleTone: t.tone })
 }
 
 const STRICTNESS_HINT: Record<string, string> = {
@@ -144,8 +144,8 @@ export function behaviorPage(kit: Kit, pane: PaneModel): RenderElement {
         aside: s.frontier.enabled ? st.frontier.text : undefined,
         // What it is, plainly: a policy in Claude's instructions and an effort request. Never the model.
         footer: s.frontier.enabled
-          ? 'Frontier Max adds Sentinel’s strongest engineering policy to Claude’s instructions: investigate before acting, finish the job, verify before calling it done, never stop at the first plausible answer. It asks for the effort above on each request where the model has an effort setting; it never changes the model.'
-          : 'Adds a finish-and-verify engineering policy to Claude’s instructions and asks for more reasoning effort where the model supports it. It never changes the model.',
+          ? 'Frontier Max gives Claude Sentinel’s strongest engineering policy (investigate before acting, finish the job, verify before calling it done); requests the effort above on each request where the model takes an effort setting; and never switches the main model. “This context” is read from the requests themselves, not from what Claude says.'
+          : 'Gives Claude a finish-and-verify engineering policy and requests more reasoning effort where the model supports it. It never switches the main model.',
         rows: k => [
           row(k, {
             key: 'fr-on',
@@ -156,7 +156,7 @@ export function behaviorPage(kit: Kit, pane: PaneModel): RenderElement {
             row(k, {
               key: 'fr-effort',
               label: 'Effort',
-              subtitle: s.frontier.effort === 'keep' ? 'Policy only: the effort is left as it is' : 'Asked for where the model supports it',
+              subtitle: s.frontier.effort === 'keep' ? 'Policy only: the effort is left as it is' : pane.frontier.isEffortSupported === false ? 'This model takes no effort setting: the policy alone applies' : 'Requested on each request where the model supports it',
               control: picker(k, {
                 key: 'fr-effort',
                 value: s.frontier.effort,

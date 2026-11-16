@@ -176,7 +176,11 @@ export type HudModel = {
   /** What needs a look, most pressing first; empty when all is calm. */
   chips: HudChip[]
   isPaneOpen: boolean
-  ctx: { tokens: number | null; window: number | null; pct: number | null; threshold: number | null; tone: Tone }
+  /**
+   * This context's size. `isProvisional`: not yet proven by a request of this context (after a reload: the last
+   * figure seen, drawn with a "~" until this context's own reading arrives; never acted on by Autopilot).
+   */
+  ctx: { tokens: number | null; window: number | null; pct: number | null; threshold: number | null; tone: Tone; isProvisional: boolean }
   cost: { usd: number | null; runUsd: number | null; isRunPartial: boolean }
   /** The applied profile; `isModified` when settings changed since it was applied. */
   profile: { id: string; name: string; isModified: boolean }
@@ -431,6 +435,27 @@ export type RefreshView = {
   note: string | null
 }
 
+/** Keep warm's timing (features/cache.ts keepWarmTiming). */
+export type KeepWarmTimingView = {
+  phase: 'off' | 'ready' | 'idle' | 'stopped'
+  headline: string
+  requestedMs: number
+  effectiveMs: number
+  capWhy: string | null
+  idleSince: number | null
+  idleForMs: number | null
+  stopsAt: number | null
+  leftMs: number | null
+  hold: { until: number; label: string | null } | null
+  nextRefreshAt: number | null
+  noRefreshWhy: string | null
+  ttl: '5m' | '1h' | null
+  ttlSource: string | null
+  expiresAt: number | null
+  refreshes: number
+  lastRefresh: { at: number; status: string } | null
+}
+
 /** The prompt cache in full, for Context: derived figures are named as such where they are drawn. */
 export type CacheView = {
   warmth: CacheWarmth
@@ -468,6 +493,8 @@ export type CacheView = {
     pausedReason: string | null
     /** The latest refreshes, newest first. */
     log: RefreshView[]
+    /** Keep warm's two clocks: the idle allowance (from the last turn's end, never reset by a refresh) and the cache's lifetime. */
+    timing: KeepWarmTimingView
   }
   misses: CacheMissView[]
   policies: { isStable: boolean; isHolding: boolean }

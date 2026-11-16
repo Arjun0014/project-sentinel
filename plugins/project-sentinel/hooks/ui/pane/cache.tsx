@@ -80,10 +80,46 @@ export function keepWarmProof(cache: CacheView): { refreshes: string; fork: { te
 }
 
 /** Keep warm's proof as rows: the refreshes, the last fork's reading, the conversation's verdict. */
+/**
+ * Keep warm's clocks in words (KeepWarmTimingView): ready while Claude works; while idle, how long, how much is
+ * left, when it started and stops, the next refresh and when the cache lapses without it; the allowance asked
+ * for and the one in force when they differ, and a watcher's hold. Times are readings, never estimates.
+ */
+export function keepWarmTimingLines(t: CacheView['keepWarm']['timing'], now: number): { key: string; left: string; right?: string; tone?: Tone }[] {
+  const at = (ms: number) => fmt.clock(ms)
+  // Time gone, to the minute and never more than it is; time left, never less than it is; a setting as said.
+  const gone = (ms: number) => (ms < 60_000 ? 'under a minute' : fmt.minutes(Math.floor(ms / 60_000)))
+  const left = (ms: number) => fmt.countdown(ms)
+  const span = (ms: number) => fmt.minutes(ms / 60_000)
+  const inWords = (ms: number) => (ms <= now ? 'now' : `in ${left(ms - now)}`)
+  const lines: { key: string; left: string; right?: string; tone?: Tone }[] = []
+  if (t.phase === 'off') return lines
+  lines.push({ key: 'kw-headline', left: t.headline, tone: t.phase === 'stopped' ? 'warn' : t.phase === 'idle' ? 'info' : 'muted' })
+  if (t.phase === 'idle' || t.phase === 'stopped') {
+    lines.push({ key: 'kw-idle', left: `Idle for ${gone(t.idleForMs ?? 0)}`, right: t.phase === 'idle' ? `Keep warm left ${left(t.leftMs ?? 0)}` : 'Keep warm stopped' })
+    if (t.idleSince !== null && t.stopsAt !== null) lines.push({ key: 'kw-window', left: `Started ${at(t.idleSince)}`, right: `${t.phase === 'idle' ? 'Stops' : 'Stopped'} ${at(Math.min(t.stopsAt, t.phase === 'stopped' ? now : t.stopsAt))}` })
+    lines.push({
+      key: 'kw-next',
+      left: t.nextRefreshAt !== null ? `Next refresh ${at(t.nextRefreshAt)} (${inWords(t.nextRefreshAt)})` : `No refresh planned: ${t.noRefreshWhy ?? 'none needed'}`,
+      right: t.expiresAt === null ? undefined : t.expiresAt > now ? `Cache expires ${inWords(t.expiresAt)} without one` : `Cache lapsed ${at(t.expiresAt)}`,
+    })
+  }
+  const ttl = t.ttl === null ? 'Cache lifetime not known yet' : `Cache lifetime ${t.ttl === '1h' ? '1 hour' : '5 minutes'}${t.ttlSource === null ? '' : ` (${t.ttlSource === 'engine' ? 'Claude Code' : t.ttlSource})`}`
+  lines.push({ key: 'kw-ttl', left: ttl, right: t.refreshes === 0 ? 'No refresh yet' : `${fmt.plural(t.refreshes, 'refresh')}${t.lastRefresh === null ? '' : ` · last ${t.lastRefresh.status}`}` })
+  if (t.capWhy !== null) lines.push({ key: 'kw-cap', left: `Requested ${span(t.requestedMs)} · Effective ${span(t.effectiveMs)}`, right: undefined, tone: 'muted' })
+  if (t.capWhy !== null) lines.push({ key: 'kw-cap-why', left: `Why: ${t.capWhy}`, tone: 'muted' })
+  if (t.hold !== null && t.hold.until + 60_000 > (t.idleSince ?? now) + t.effectiveMs) {
+    lines.push({ key: 'kw-hold', left: `Requested idle limit ${span(t.requestedMs)} · Watcher holds until ${at(t.hold.until)}`, tone: 'muted' })
+    lines.push({ key: 'kw-hold-why', left: `Reason: warm watcher resume${t.hold.label === null ? '' : ` (${t.hold.label})`}`, tone: 'muted' })
+  }
+  return lines
+}
+
 function keepWarmRows(k: Kit, cache: CacheView): RenderElement[] {
+  const timing = keepWarmTimingLines(cache.keepWarm.timing, k.now).map(l => (l.right === undefined ? textRuns(k, l.key, [{ text: l.left, tone: l.tone ?? 'muted' }]) : pair(k, { key: l.key, left: l.left, right: l.right })))
   const proof = keepWarmProof(cache)
-  if (proof === null) return []
-  const out: RenderElement[] = [pair(k, { key: 'kw-count', left: proof.refreshes })]
+  if (proof === null) return timing
+  const out: RenderElement[] = [...timing, pair(k, { key: 'kw-count', left: proof.refreshes })]
   if (proof.fork !== null) out.push(textRuns(k, 'kw-fork', [{ text: proof.fork.text, tone: proof.fork.tone }]))
   out.push(textRuns(k, 'kw-main', [{ text: 'Main cache: ', tone: 'muted' }, { text: proof.main.text, tone: proof.main.tone, isBold: proof.main.tone === 'good' || proof.main.tone === 'bad' }]))
   if (cache.keepWarm.pausedReason !== null) out.push(note(k, `Paused: ${cache.keepWarm.pausedReason}. Turn Keep warm on again to retry.`, 'kw-paused', 'warn'))

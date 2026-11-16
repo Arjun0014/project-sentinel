@@ -29,7 +29,7 @@ import type { PermissionLogEntry, QueueTarget, TabId, WatchStrategy } from '../.
 import { COMMAND, LIMITS, MIN_ENGINE, PANE_ID, PANE_TITLE, SHORT_COMMAND, STORE_ENTRIES } from '../constants'
 import { type Effective, POLICY_SECTION_ID, effective, policySections, policyText } from '../core/policy'
 import { applyProfile, findProfile, profileLabel } from '../core/profiles'
-import { DEFAULTS_GENERATION, PERMISSION_LABEL, type Settings, classicSettings, clone, defaultSettings, normalizeSettings } from '../core/settings'
+import { DEFAULTS_GENERATION, LEGACY_PERMISSIONS, NATIVE_PERMISSIONS, PERMISSION_LABEL, type Settings, classicSettings, clone, deepEqual, defaultSettings, normalizeSettings } from '../core/settings'
 import { fingerprint } from '../core/hash'
 import { clean } from '../core/text'
 import { versionAtLeast } from '../core/version'
@@ -598,15 +598,28 @@ export class Runtime {
         // Once, for whoever never opens the panel: what is on, and where it lives.
         this.announce('Project Sentinel is on: Autopilot protects the context at 70%, Frontier Max at Extra High. /cr opens Control Room.')
       }
-      this.trace(`settings: ${isUsed ? 'none saved, earlier use found: Classic kept' : 'a fresh install: the 1.7 defaults (Autopilot at 70%, Frontier Max at Extra High)'}`)
+      this.trace(`settings: ${isUsed ? 'none saved, earlier use found: Classic kept' : 'a fresh install: the defaults (Autopilot at 70%, Frontier Max at Extra High, Guardrails left to Claude Code)'}`)
       return
     }
     this.onboarding = onboardingOf(await host.storeGet(STORE_ENTRIES.onboarding).catch(() => undefined))
-    if (this.settings.defaults >= DEFAULTS_GENERATION) return
-    const wasNormal = this.settings.profile === 'normal'
-    this.settings = { ...this.settings, defaults: DEFAULTS_GENERATION, profile: wasNormal ? 'classic' : this.settings.profile }
+    const from = this.settings.defaults
+    if (from >= DEFAULTS_GENERATION) return
+    if (from < 2) {
+      const wasNormal = this.settings.profile === 'normal'
+      this.settings = { ...this.settings, profile: wasNormal ? 'classic' : this.settings.profile }
+      this.trace(`settings: saved before 1.7${wasNormal ? ': Normal is now called Classic (values unchanged)' : ''}`)
+    }
+    // 1.8.0: Guardrails default to Claude Code's own permissions. Only an install still exactly on the old
+    // built-in Ask/Deny set, under the profile whose defaults those were (Normal, Classic), moves; anything the
+    // person changed is kept as it is, and the stricter built-ins (Frontier Max, Low Resource, Release / QA) keep theirs.
+    const isUntouched = (this.settings.profile === 'normal' || this.settings.profile === 'classic') && deepEqual(this.settings.permissions, LEGACY_PERMISSIONS)
+    if (isUntouched) {
+      this.settings = { ...this.settings, permissions: { ...NATIVE_PERMISSIONS } }
+      this.announce('Guardrails now leave every action to Claude Code’s own permissions (Default). Your earlier built-in Ask/Deny set is the Guarded profile (Setup), if you want it back.')
+    }
+    this.trace(`settings: defaults generation ${from} → ${DEFAULTS_GENERATION}; permissions ${isUntouched ? 'were the untouched built-in set: now Claude Code’s own (Default)' : 'kept as they were (changed by the person, or a stricter profile)'}`)
+    this.settings = { ...this.settings, defaults: DEFAULTS_GENERATION }
     await host.storeSet(STORE_ENTRIES.settings, this.settings).catch(() => undefined)
-    this.trace(`settings: saved before 1.7${wasNormal ? ': Normal is now called Classic (values unchanged)' : ''}`)
   }
 
   /** The settings in the store are this load's fresh-install defaults, not yet the person's (see carryFormerStore). */

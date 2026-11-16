@@ -891,7 +891,7 @@ describe('ui', () => {
   test("Overview's Cache card says the cache's state once: the status line, then only what it holds, the lifetime in the aside", () => {
     const base: CacheView = {
       warmth: 'unknown', ttl: null, ttlSource: null, expiresAt: null, lastRequestAt: 1, cachedTokens: 345_000, requests: 3, hitRatio: 0.98, read: 1, written: 1, model: null,
-      keepWarm: { isOn: false, nextAt: null, isProbe: false, reason: 'Off', refreshes: 0, lastAt: null, lastRead: null, lastHit: null, verified: 'unknown', maxIdleMinutes: 120, isRefreshing: false, error: null, main: 'none', pausedReason: null, log: [] },
+      keepWarm: { isOn: false, nextAt: null, isProbe: false, reason: 'Off', refreshes: 0, lastAt: null, lastRead: null, lastHit: null, verified: 'unknown', maxIdleMinutes: 120, isRefreshing: false, error: null, main: 'none', pausedReason: null, log: [], timing: { phase: 'off', headline: 'Off', requestedMs: 7_200_000, effectiveMs: 7_200_000, capWhy: null, idleSince: null, idleForMs: null, stopsAt: null, leftMs: null, hold: null, nextRefreshAt: null, noRefreshWhy: 'Off', ttl: null, ttlSource: null, expiresAt: null, refreshes: 0, lastRefresh: null } },
       misses: [], policies: { isStable: true, isHolding: false }, guardModelSwitch: true,
     }
     // The status line says it may have lapsed; the line under it says only what the cache holds.

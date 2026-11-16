@@ -104,7 +104,7 @@ export function widgetView(kit: Kit, data: PaneData): RenderElement {
   const { Box, Text } = kit.ui
   const hud = data.hud
   const ctx = hud.ctx
-  const pct = ctx.pct === null ? (ctx.tokens === null ? 'new context' : `${Math.round(ctx.tokens / 1000)}k`) : `${ctx.pct}%`
+  const pct = ctx.pct === null ? (ctx.tokens === null ? 'new context' : `${ctx.isProvisional ? '~' : ''}${Math.round(ctx.tokens / 1000)}k`) : `${ctx.isProvisional ? '~' : ''}${ctx.pct}%`
   const lines: { key: string; text: string; color?: string; dim?: boolean }[] = []
   if (hud.alert !== null) lines.push({ key: 'w-alert', text: `${G.warn} ${hud.alert.text}`, color: hud.alert.tone === 'bad' ? 'error' : 'warning' })
   lines.push({ key: 'w-ctx', text: `Context ${pct}${hud.autopilot.isOn ? ` · ${hud.autopilot.text}` : ''}` })

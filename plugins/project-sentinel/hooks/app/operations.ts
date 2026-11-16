@@ -740,9 +740,9 @@ export class Operations {
   }
 
   /** The watcher holding the cache warm now, if any: Keep warm refreshes until it wakes. */
-  hold(): { until: number } | null {
+  hold(): { until: number; label: string | null } | null {
     const w = this.current().watchers.filter(x => x.status === 'armed' && Ops.modeOf(x).hold).sort((a, b) => a.wakeAt - b.wakeAt)[0]
-    return w === undefined ? null : { until: w.wakeAt }
+    return w === undefined ? null : { until: w.wakeAt, label: `${w.id}: ${w.label}` }
   }
 
   /**

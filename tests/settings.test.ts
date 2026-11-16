@@ -1,32 +1,33 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { applyProfile, deleteCustomProfile, diffSystems, findProfile, isModified, listProfiles, profileLabel, saveCustomProfile } from '../hooks/core/profiles'
-import { DEFAULT_PERMISSIONS, classicSettings, classicSystems, defaultSettings, normalizeSettings, safeRelativePath, systemsOf } from '../hooks/core/settings'
+import { DEFAULT_PERMISSIONS, LEGACY_PERMISSIONS, NATIVE_PERMISSIONS, classicSettings, classicSystems, defaultSettings, normalizeSettings, safeRelativePath, systemsOf } from '../hooks/core/settings'
 
 describe('settings', () => {
-  test('fresh-install defaults are opinionated: Autopilot at 70% into a fresh context, Frontier Max at Extra High; nothing loosened', () => {
+  test('fresh-install defaults: Autopilot at 70% into a fresh context, Frontier Max at Extra High, Guardrails all Default (Claude Code decides)', () => {
     const s = defaultSettings()
     expect(s.profile).toBe('normal')
-    expect(s.defaults).toBe(2)
+    expect(s.defaults).toBe(3)
     expect(s.autopilot).toMatchObject({ enabled: true, thresholdMode: 'percent', thresholdPercent: 70, continuation: 'clear', fallbackToCompact: true, autoContinue: true })
     expect(s.frontier).toEqual({ enabled: true, effort: 'xhigh', subagentEffort: false })
     expect(s.ops).toMatchObject({ decisions: true, watchers: true })
     expect(s.progress.milestones).toBe(true)
-    // Not asked for: the lazy-exit guard stays off, and every permission is exactly Classic's (2 Deny, 6 Ask).
+    // Not asked for: the lazy-exit guard stays off. 1.8.0: every Guardrail category is Default, so Claude Code's own
+    // permission mode and rules decide (not "allow everything"); Classic is the same.
     expect(s.guard.enabled).toBe(false)
+    expect(s.permissions).toEqual(NATIVE_PERMISSIONS)
     expect(s.permissions).toEqual(classicSystems().permissions)
-    expect(Object.values(s.permissions).filter(v => v === 'deny')).toHaveLength(2)
-    expect(Object.values(s.permissions).filter(v => v === 'ask')).toHaveLength(6)
+    expect(Object.values(s.permissions).every(v => v === 'default')).toBe(true)
     expect(s.agentModels.enabled).toBe(false)
     expect(s.subagents.mode).toBe('unrestricted')
     expect(s.resources.level).toBe('off')
     expect(s.focus.enabled).toBe(true)
     expect(s.focus.results).toBe(false)
     expect(s.focus.diffs).toBe(false)
-    expect(s.permissions.dangerous).toBe('deny')
-    expect(s.permissions.gitDestructive).toBe('deny')
-    expect(s.permissions.push).toBe('ask')
-    expect(s.permissions.install).toBe('ask')
+    expect(DEFAULT_PERMISSIONS).toEqual(NATIVE_PERMISSIONS)
+    // The stricter set is kept, as the Guarded profile and the stricter built-ins have it (2 Deny, 6 Ask).
+    expect(Object.values(LEGACY_PERMISSIONS).filter(v => v === 'deny')).toHaveLength(2)
+    expect(Object.values(LEGACY_PERMISSIONS).filter(v => v === 'ask')).toHaveLength(6)
   })
 
   test('Classic is every optional system off, as before 1.7; what an install that used Sentinel before keeps', () => {
@@ -35,8 +36,7 @@ describe('settings', () => {
     expect(c.autopilot.enabled).toBe(false)
     expect(c.frontier).toEqual({ enabled: false, effort: 'max', subagentEffort: false })
     expect(c.guard.enabled).toBe(false)
-    expect(c.permissions.dangerous).toBe('deny')
-    expect(c.permissions.gitDestructive).toBe('deny')
+    expect(c.permissions).toEqual(NATIVE_PERMISSIONS)
   })
 
   test('garbage normalizes: nothing stored is a fresh install; a stored record is read against Classic, never the new defaults', () => {
@@ -84,7 +84,20 @@ describe('settings', () => {
 
 describe('profiles', () => {
   test('built-in profiles are listed in order', () => {
-    expect(listProfiles(defaultSettings()).map(p => p.id)).toEqual(['normal', 'frontier', 'low-resource', 'release-qa', 'classic'])
+    expect(listProfiles(defaultSettings()).map(p => p.id)).toEqual(['normal', 'guarded', 'frontier', 'low-resource', 'release-qa', 'classic'])
+  })
+
+  test('Guarded is Normal with Project Sentinel’s own Ask/Deny set; the stricter built-ins keep theirs (1.8.0)', () => {
+    const fresh = defaultSettings()
+    const guarded = findProfile(fresh, 'guarded')!.systems
+    expect(guarded.permissions).toEqual(LEGACY_PERMISSIONS)
+    // Only the Guardrails differ from Normal.
+    expect(diffSystems(systemsOf(fresh), guarded).every(c => c.path.startsWith('permissions.'))).toBe(true)
+    expect(diffSystems(systemsOf(fresh), guarded).map(c => c.path)).toContain('permissions.dangerous')
+    for (const id of ['frontier', 'low-resource']) expect(findProfile(fresh, id)!.systems.permissions, id).toEqual(LEGACY_PERMISSIONS)
+    const applied = applyProfile(fresh, findProfile(fresh, 'guarded')!)
+    expect(profileLabel(applied)).toBe('Guarded')
+    expect(isModified(applied)).toBe(false)
   })
 
   test('Normal is the fresh-install defaults; Classic is Normal before 1.7; the other built-ins are what they always were', () => {
@@ -135,7 +148,8 @@ describe('profiles', () => {
     expect(paths).toContain('guard.enabled')
     expect(paths).toContain('autopilot.enabled')
     expect(paths).toContain('resources.level')
-    expect(paths).not.toContain('permissions.dangerous')
+    // Classic defers to Claude Code (1.8.0); Frontier Max keeps the stricter Guardrails, and the diff says so.
+    expect(changes.find(c => c.path === 'permissions.dangerous')).toMatchObject({ from: 'Default', to: 'Deny' })
     expect(changes.find(c => c.path === 'frontier.enabled')).toEqual({ path: 'frontier.enabled', label: 'Frontier Max', from: 'Off', to: 'On' })
     // Values read as the panel shows them.
     expect(changes.find(c => c.path === 'resources.level')).toMatchObject({ from: 'Off', to: 'Medium' })

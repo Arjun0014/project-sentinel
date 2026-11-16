@@ -123,7 +123,30 @@ export const PERMISSION_LABEL: Record<PermissionCategory, string> = {
   dangerous: 'Dangerous commands',
 }
 
-export const DEFAULT_PERMISSIONS: Record<PermissionCategory, PermissionState> = {
+/**
+ * Every category Default (1.8.0): Project Sentinel overrides nothing, and Claude Code's own permission mode and
+ * rules decide each action. Not "allow everything": Claude Code stays the authority.
+ */
+export const NATIVE_PERMISSIONS: Record<PermissionCategory, PermissionState> = {
+  install: 'default',
+  network: 'default',
+  download: 'default',
+  edit: 'default',
+  editOutside: 'default',
+  delete: 'default',
+  commit: 'default',
+  push: 'default',
+  gitDestructive: 'default',
+  deploy: 'default',
+  dangerous: 'default',
+}
+
+/**
+ * Project Sentinel's own Ask/Deny set before 1.8.0 (installs, downloads, edits outside the project, deletes,
+ * pushes and deploys ask; destructive Git and dangerous commands are denied): the Guarded profile, and the
+ * stricter built-ins (Frontier Max, Low Resource, Release / QA) keep it.
+ */
+export const LEGACY_PERMISSIONS: Record<PermissionCategory, PermissionState> = {
   install: 'ask',
   network: 'default',
   download: 'ask',
@@ -137,10 +160,14 @@ export const DEFAULT_PERMISSIONS: Record<PermissionCategory, PermissionState> = 
   dangerous: 'deny',
 }
 
+/** A fresh install's permissions (1.8.0): Claude Code's own, nothing added on top. */
+export const DEFAULT_PERMISSIONS: Record<PermissionCategory, PermissionState> = NATIVE_PERMISSIONS
+
 /**
- * Classic: every system as Project Sentinel set it before 1.7.0 (Autopilot and Frontier Max off). The
- * built-in Classic profile, what an existing install keeps, and the base stored settings are read
- * against, so a group missing from an old store never turns something on by itself.
+ * Classic: every system as Project Sentinel set it before 1.7.0 (Autopilot and Frontier Max off), with 1.8.0's
+ * native permissions (Claude Code decides). The built-in Classic profile, what an existing install keeps, and
+ * the base stored settings are read against, so a group missing from an old store never turns something on by
+ * itself (a store with no permissions group defers to Claude Code: nothing stricter is invented).
  */
 export function classicSystems(): SystemSettings {
   return {
@@ -171,10 +198,11 @@ export function classicSystems(): SystemSettings {
 }
 
 /**
- * The fresh-install defaults (1.7.0), Normal: opinionated out of the box. Context Autopilot on, handing off
- * at 70% to a fresh context (falling back to compacting) that carries on by itself; Frontier Max on at
- * Extra High effort; the Decision Inbox, Watchers and run milestones on. The lazy-exit guard and the
- * permissions are as Classic has them (see DEFAULT_PERMISSIONS: nothing is loosened).
+ * The fresh-install defaults, Normal: opinionated where it protects a long run, native where Claude Code already
+ * decides. Context Autopilot on, handing off at 70% to a fresh context (falling back to compacting) that carries
+ * on by itself; Frontier Max on at Extra High effort; the Decision Inbox, Watchers and run milestones on; every
+ * Guardrail category Default (1.8.0: Claude Code's own permission mode and rules decide). The lazy-exit guard and
+ * the Agent Model Policy are off.
  */
 export function defaultSystems(): SystemSettings {
   const s = classicSystems()
@@ -185,8 +213,11 @@ export function defaultSystems(): SystemSettings {
   return s
 }
 
-/** The marker of settings written under 1.7.0's defaults (see ControlRoomSettings.defaults). */
-export const DEFAULTS_GENERATION = 2
+/**
+ * The marker of the defaults settings were written under (see ControlRoomSettings.defaults): 2 for 1.7.0's,
+ * 3 for 1.8.0's (native permissions). An older store is brought forward once, at its load (Runtime.settleDefaults).
+ */
+export const DEFAULTS_GENERATION = 3
 
 /** A fresh install's settings: Normal, the 1.7.0 defaults. */
 export function defaultSettings(): Settings {
@@ -252,7 +283,9 @@ function normalizeSystems(raw: unknown, base: SystemSettings): SystemSettings {
   const op = isRecord(r.ops) ? r.ops : {}
 
   const permissions = {} as Record<PermissionCategory, PermissionState>
-  for (const category of PERMISSION_CATEGORIES) permissions[category] = permissionStateOf(pe[category], base.permissions[category])
+  // A category not stored takes the base's state; one stored but unreadable (a corrupt store) keeps the safe
+  // reading, Project Sentinel's own stricter state, never a quietly looser Default.
+  for (const category of PERMISSION_CATEGORIES) permissions[category] = pe[category] === undefined ? base.permissions[category] : permissionStateOf(pe[category], LEGACY_PERMISSIONS[category])
 
   return {
     autopilot: {

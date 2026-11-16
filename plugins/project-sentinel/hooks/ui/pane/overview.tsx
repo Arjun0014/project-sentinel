@@ -269,14 +269,14 @@ export function overviewPage(kit: Kit, data: PaneData): RenderElement {
         key: 'life-context',
         title: 'Context',
         accent: ACCENT.context,
-        aside: ctx.pct === null ? undefined : `${ctx.pct}%`,
+        aside: ctx.pct === null ? undefined : `${ctx.isProvisional ? '~' : ''}${ctx.pct}%`,
         link: go('context'),
         footer: s.autopilot.enabled ? 'Starts over at each handoff.' : 'Starts over when you clear it; Autopilot hands off before it fills.',
         rows: k => [
           meterBar(k, { key: 'ctx-meter', fraction, marker, tone: ctx.tone === 'muted' ? 'good' : ctx.tone, width: k.columns, alt: `Context ${ctx.pct ?? 0}% used` }),
           pair(k, {
             key: 'ctx-under',
-            left: ctx.tokens === null ? 'Waiting for the first response' : `${fmt.tokens(ctx.tokens)}${ctx.window === null ? '' : ` of ${fmt.tokens(ctx.window)}`} tokens`,
+            left: ctx.tokens === null ? 'Waiting for the first response' : `${ctx.isProvisional ? '~' : ''}${fmt.tokens(ctx.tokens)}${ctx.window === null ? '' : ` of ${fmt.tokens(ctx.window)}`} tokens${ctx.isProvisional ? ' (until this context’s own reading)' : ''}`,
             right: hud.autopilot.isOn && ctx.threshold !== null ? `hands off at ${fmt.tokens(ctx.threshold)}` : undefined,
           }),
           apart(k, 'sys-autopilot', toggle(k, 'sys-autopilot', 'Autopilot', s.autopilot.enabled, () => u(d => void (d.autopilot.enabled = !d.autopilot.enabled)), st.autopilot)),

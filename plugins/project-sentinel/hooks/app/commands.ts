@@ -19,7 +19,7 @@ import { anomalyText } from '../features/contextEpoch'
 import type { Runtime } from './runtime'
 import { recordLine } from './ledger'
 import { opsCommand } from './opsCommands'
-import { cacheState, keepWarmProof, keepWarmStatus } from '../ui/pane/cache'
+import { cacheState, keepWarmProof, keepWarmStatus, keepWarmTimingLines } from '../ui/pane/cache'
 import { frontierDeliveryText } from '../ui/pane/behavior'
 import { hudOf, paneOf, profileOf, runLabelOf, statusOf } from './views'
 import { planDetail } from '../ui/hud'
@@ -108,6 +108,7 @@ export function cacheText(rt: Runtime): string {
     ['Lifetime', lifetime],
     ['Cached', cache.warmth === 'none' ? '—' : `${fmt.tokens(cache.cachedTokens)} tokens · ${fmt.plural(cache.requests, 'request')}${cache.hitRatio === null ? '' : ` · ${Math.round(cache.hitRatio * 100)}% read from cache`}`],
     ['Keep warm', `${s.keepWarm ? 'On' : 'Off'} · ${keepWarmStatus(cache).text} · stops after ${fmt.minutes(s.maxIdleMinutes)} idle`],
+    ...keepWarmTimingLines(cache.keepWarm.timing, now).map((l): [string, string] => ['', l.right === undefined ? l.left : `${l.left} · ${l.right}`]),
     ['Model switch', s.guardModelSwitch ? 'Asks first when 100k+ cached tokens would be re-sent' : 'Does not ask'],
     ['Policies', s.stablePolicies ? (cache.policies.isHolding ? 'Held stable: changes reach Claude as notes' : 'Kept stable while the cache is warm') : 'Rewritten on every change'],
   ]

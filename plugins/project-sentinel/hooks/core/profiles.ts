@@ -10,7 +10,7 @@
 import { tokens as fmtTokens } from './format'
 import {
   type CustomProfile,
-  DEFAULT_PERMISSIONS,
+  LEGACY_PERMISSIONS,
   PERMISSION_CATEGORIES,
   PERMISSION_LABEL,
   type Settings,
@@ -31,16 +31,24 @@ export type ProfileInfo = {
   systems: SystemSettings
 }
 
-/** Normal: the fresh-install defaults (1.7.0). */
+/** Normal: the fresh-install defaults (1.8.0: Claude Code's own permissions decide). */
 const normal = (): SystemSettings => defaultSystems()
+
+/** Guarded: Normal, with Project Sentinel's own Ask/Deny Guardrails on top of Claude Code's (its defaults before 1.8.0). */
+const guarded = (): SystemSettings => {
+  const s = defaultSystems()
+  s.permissions = { ...LEGACY_PERMISSIONS }
+  return s
+}
 
 /** Classic: Normal as it was before 1.7.0, Autopilot and Frontier Max off. */
 const classic = (): SystemSettings => classicSystems()
 
-// The other built-ins are what they always were (built on Classic), so a person who applied one before 1.7.0
-// does not find it "edited" after the update.
+// The other built-ins are what they always were (built on Classic, with the stricter Guardrails they always had),
+// so a person who applied one before 1.8.0 does not find it "edited" after the update.
 const frontier = (): SystemSettings => {
   const s = classicSystems()
+  s.permissions = { ...LEGACY_PERMISSIONS }
   s.frontier = { enabled: true, effort: 'max', subagentEffort: false }
   s.guard = { ...s.guard, enabled: true, strictness: 'standard' }
   s.autopilot = { ...s.autopilot, enabled: true, thresholdMode: 'percent', thresholdPercent: 70 }
@@ -50,6 +58,7 @@ const frontier = (): SystemSettings => {
 
 const lowResource = (): SystemSettings => {
   const s = classicSystems()
+  s.permissions = { ...LEGACY_PERMISSIONS }
   s.resources = { ...s.resources, level: 'low', cpu: 50, ram: 75, enforcement: 'strict' }
   s.subagents = { ...s.subagents, mode: 'limit', limit: 1 }
   return s
@@ -64,7 +73,7 @@ const releaseQa = (): SystemSettings => {
   s.focus = { ...s.focus, diffs: true }
   s.resources = { ...s.resources, level: 'medium', cpu: 70, ram: 85, enforcement: 'limit' }
   s.permissions = {
-    ...DEFAULT_PERMISSIONS,
+    ...LEGACY_PERMISSIONS,
     install: 'ask',
     download: 'ask',
     delete: 'ask',
@@ -78,7 +87,8 @@ const releaseQa = (): SystemSettings => {
 }
 
 export const BUILTIN_PROFILES: readonly Omit<ProfileInfo, 'systems'>[] = [
-  { id: 'normal', name: 'Normal', tagline: 'Autopilot at 70%, Frontier Max at Extra High', isBuiltin: true },
+  { id: 'normal', name: 'Normal', tagline: 'Autopilot at 70%, Frontier Max at Extra High, Claude Code’s own permissions', isBuiltin: true },
+  { id: 'guarded', name: 'Guarded', tagline: 'Normal, with Project Sentinel’s Ask/Deny Guardrails on top', isBuiltin: true },
   {
     id: 'frontier',
     name: 'Frontier Max',
@@ -102,6 +112,7 @@ export const BUILTIN_PROFILES: readonly Omit<ProfileInfo, 'systems'>[] = [
 
 const BUILDERS: Record<string, () => SystemSettings> = {
   normal,
+  guarded,
   frontier,
   'low-resource': lowResource,
   'release-qa': releaseQa,

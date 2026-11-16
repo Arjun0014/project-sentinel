@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { defaultSettings } from '../hooks/core/settings'
+import { LEGACY_PERMISSIONS, defaultSettings } from '../hooks/core/settings'
 import type { Settings } from '../hooks/core/settings'
 import { SESSION, world } from './fixtures/world'
 import { bandProps } from './fixtures/band'
@@ -128,8 +128,11 @@ describe('register', () => {
     expect((await $.command.run(cmd('cr', 'cache'))).text).toContain('1 hour (as Claude Code reports it)')
   })
 
+  // 1.8.0: a fresh install leaves every category to Claude Code; these run under the Guarded set (Ask and Deny on).
+  const guarded = () => ({ ...defaultSettings(), profile: 'guarded', permissions: { ...LEGACY_PERMISSIONS } })
+
   test('Deny categories are refused before anything runs', { timeoutMs: 30_000 }, async ($, on) => {
-    world(on)
+    world(on, { settings: guarded() })
     await $.session.start(SESSION)
     const dangerous = await $.tool.call({ tool: 'Bash', command: 'rm -rf ~' })
     expect(dangerous.deny).toContain('Permission Policy')
@@ -140,7 +143,7 @@ describe('register', () => {
   })
 
   test('Ask: Control Room asks first where Claude Code would not ask, never answers a permission check, and a settings deny stands', { timeoutMs: 30_000 }, async ($, on) => {
-    const w = world(on)
+    const w = world(on, { settings: guarded() })
     let engine: 'allow' | 'ask' | 'deny' = 'allow'
     const checked: string[] = []
     on('tool.check', ($, e, next) => {

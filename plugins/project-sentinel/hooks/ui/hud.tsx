@@ -175,7 +175,7 @@ export function hudSegments(hud: HudModel, tier: Tier, surface: Kit['surface'] =
     const fraction = ctx.tokens / ctx.window
     const marker = ctx.threshold === null ? null : ctx.threshold / ctx.window
     const tone: Tone = ctx.tone === 'muted' || ctx.tone === 'normal' ? 'good' : ctx.tone
-    const pct: Span = { text: ` ${ctx.pct}%`, tone: valueTone(ctx.tone), isBold: true }
+    const pct: Span = { text: ` ${ctx.isProvisional ? '~' : ''}${ctx.pct}%`, tone: valueTone(ctx.tone), isBold: true }
     const notes: string[] = []
     const event = hud.autopilot.isOn && hud.autopilot.state !== 'armed' && hud.autopilot.state !== 'off' ? hud.autopilot.text : null
     if (event !== null) notes.push(event)
@@ -802,7 +802,7 @@ export function hudCells(hud: HudModel, columns: number): Cell[] {
     cells.push({
       key: 'ctx',
       caption: [...caption('Context'), ...note],
-      parts: [{ key: 'v', graphic: { source: svgContextMeter({ fraction, marker, tone, width, height: 14 }), alt: `Context ${ctx.pct}% used`, width, height: 14 }, value: [{ text: `${ctx.pct}%`, tone: valueTone(ctx.tone), isBold: true }] }],
+      parts: [{ key: 'v', graphic: { source: svgContextMeter({ fraction, marker, tone, width, height: 14 }), alt: `Context ${ctx.isProvisional ? 'about ' : ''}${ctx.pct}% used`, width, height: 14 }, value: [{ text: `${ctx.isProvisional ? '~' : ''}${ctx.pct}%`, tone: valueTone(ctx.tone), isBold: true }] }],
       weight: WEIGHT.ctx,
     })
   }

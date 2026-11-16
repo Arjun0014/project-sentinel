@@ -4,7 +4,7 @@ import { Runtime } from '../hooks/app/runtime'
 import * as Views from '../hooks/app/views'
 import { handleCommand } from '../hooks/app/commands'
 import { applyProfile, findProfile, isModified, profileLabel } from '../hooks/core/profiles'
-import { type Settings, classicSettings, classicSystems, defaultSettings, systemsOf } from '../hooks/core/settings'
+import { LEGACY_PERMISSIONS, NATIVE_PERMISSIONS, type Settings, classicSettings, classicSystems, defaultSettings, systemsOf } from '../hooks/core/settings'
 import { fakeHost } from './fixtures/fake-host'
 import { SESSION, world } from './fixtures/world'
 
@@ -14,9 +14,9 @@ import { SESSION, world } from './fixtures/world'
 // Sentinel but never changed a setting has no settings in its store: its runs, cache memory or Quest log
 // show it is not new.
 
-/** Settings as a version before 1.7.0 saved them: Normal meant what is now Classic, and no defaults marker. */
+/** Settings as a version before 1.7.0 saved them: Normal meant what is now Classic (with its Ask/Deny Guardrails), and no defaults marker. */
 function before17(patch: (s: Settings) => void = () => undefined, profile = 'normal'): Record<string, unknown> {
-  const s: Settings = { ...classicSettings(), profile }
+  const s: Settings = { ...classicSettings(), profile, permissions: { ...LEGACY_PERMISSIONS } }
   patch(s)
   const { defaults: _marker, ...stored } = s
   void _marker
@@ -40,9 +40,10 @@ describe('fresh-install defaults and the update', () => {
     expect(f.kept.store['settings.v1']).toEqual(defaultSettings())
     expect(profileLabel(f.rt.settings)).toBe('Normal')
     expect(Views.hudOf(f.rt).profile).toEqual({ id: 'normal', name: 'Normal', isModified: false })
-    expect(Views.paneOf(f.rt).firstRun).toEqual({ autopilot: '70%', frontier: 'Extra High effort', guardrails: '6 kinds of action ask you first, 2 are denied' })
+    expect(Views.paneOf(f.rt).firstRun).toEqual({ autopilot: '70%', frontier: 'Extra High effort', guardrails: 'Claude Code’s own permissions decide; Project Sentinel adds nothing on top' })
+    expect(f.rt.settings.permissions).toEqual(NATIVE_PERMISSIONS)
     expect(f.kept.store['onboarding.v1']).toMatchObject({ dismissedAt: null })
-    expect(f.kept.traces).toContain('settings: a fresh install: the 1.7 defaults (Autopilot at 70%, Frontier Max at Extra High)')
+    expect(f.kept.traces).toContain('settings: a fresh install: the defaults (Autopilot at 70%, Frontier Max at Extra High, Guardrails left to Claude Code)')
     await f.advance(5000)
     expect(f.kept.toasts).toContain('Project Sentinel is on: Autopilot protects the context at 70%, Frontier Max at Extra High. /cr opens Control Room.')
     // The card follows the live settings.
@@ -84,20 +85,21 @@ describe('fresh-install defaults and the update', () => {
     }
   })
 
-  test('saved before 1.7 on Normal: relabelled Classic, every value untouched, never "edited" by the new Normal', async () => {
+  test('saved before 1.7 on Normal: relabelled Classic, its values untouched but the untouched built-in Guardrails (now Claude Code’s own), never "edited"', async () => {
     const stored = before17(s => {
       s.autopilot.enabled = true
       s.autopilot.thresholdPercent = 80
     })
     const f = await loaded({ 'settings.v1': stored })
     expect(f.rt.settings.profile).toBe('classic')
-    expect(f.rt.settings.defaults).toBe(2)
+    expect(f.rt.settings.defaults).toBe(3)
+    expect(f.rt.settings.permissions).toEqual(NATIVE_PERMISSIONS)
     expect(f.rt.settings.autopilot).toMatchObject({ enabled: true, thresholdPercent: 80 })
     expect(f.rt.settings.frontier.enabled).toBe(false)
     expect(systemsOf(f.rt.settings)).toEqual({ ...classicSystems(), autopilot: { ...classicSystems().autopilot, enabled: true, thresholdPercent: 80 } })
     // Edited against Classic, exactly as it was "edited" against the old Normal.
     expect(profileLabel(f.rt.settings)).toBe('Classic*')
-    expect(f.kept.store['settings.v1']).toMatchObject({ profile: 'classic', defaults: 2 })
+    expect(f.kept.store['settings.v1']).toMatchObject({ profile: 'classic', defaults: 3 })
     expect(Views.paneOf(f.rt).firstRun).toBeNull()
     expect(f.kept.traces).toContain('settings: saved before 1.7: Normal is now called Classic (values unchanged)')
     // Untouched old Normal: Classic, not edited.
@@ -122,6 +124,39 @@ describe('fresh-install defaults and the update', () => {
     expect(h.rt.settings).toEqual(defaultSettings())
   })
 
+  test('1.8.0 Guardrails: only an install still on the untouched built-in Ask/Deny set, under Normal or Classic, moves to Claude Code’s own; said once', async () => {
+    // Saved under 1.7 (generation 2) on Normal with the built-in set: native now, announced once, Normal not edited.
+    const untouched = { ...defaultSettings(), defaults: 2, permissions: { ...LEGACY_PERMISSIONS } }
+    const f = await loaded({ 'settings.v1': untouched })
+    expect(f.rt.settings.permissions).toEqual(NATIVE_PERMISSIONS)
+    expect(f.rt.settings.defaults).toBe(3)
+    expect(profileLabel(f.rt.settings)).toBe('Normal')
+    expect(f.kept.traces).toContain('settings: defaults generation 2 → 3; permissions were the untouched built-in set: now Claude Code’s own (Default)')
+    await f.advance(5000)
+    expect(f.kept.toasts.filter(t => t.startsWith('Guardrails now leave every action to Claude Code’s own permissions'))).toHaveLength(1)
+    // Loaded again: generation 3, nothing more to do, nothing said again.
+    f.rt.stopTimers()
+    const again = new Runtime()
+    again.bind(f.host)
+    await again.onSessionStart({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await f.advance(5000)
+    expect(f.kept.toasts.filter(t => t.startsWith('Guardrails now leave'))).toHaveLength(1)
+    // The person changed one: every permission kept as it was.
+    const changed = { ...untouched, permissions: { ...LEGACY_PERMISSIONS, push: 'deny' as const } }
+    const g = await loaded({ 'settings.v1': changed })
+    expect(g.rt.settings.permissions).toEqual(changed.permissions)
+    expect(g.kept.traces).toContain('settings: defaults generation 2 → 3; permissions kept as they were (changed by the person, or a stricter profile)')
+    // A stricter built-in keeps its set, and is not edited; nor is a custom profile touched.
+    const frontier = applyProfile(classicSettings(), findProfile(classicSettings(), 'frontier')!)
+    const h = await loaded({ 'settings.v1': { ...frontier, defaults: 2 } })
+    expect(h.rt.settings.permissions).toEqual(LEGACY_PERMISSIONS)
+    expect(isModified(h.rt.settings)).toBe(false)
+    const mine = { ...untouched, profile: 'custom:night', customProfiles: [{ id: 'night', name: 'Night', systems: { ...systemsOf(untouched) } }] }
+    const k = await loaded({ 'settings.v1': mine })
+    expect(k.rt.settings.permissions).toEqual(LEGACY_PERMISSIONS)
+    expect(k.rt.settings.customProfiles[0]?.systems.permissions).toEqual(LEGACY_PERMISSIONS)
+  })
+
   test('Frontier Max no longer turns the lazy-exit guard on by itself', async () => {
     const f = await loaded({ 'settings.v1': classicSettings() })
     expect((await handleCommand(f.rt, 'frontier on')).text).toBe('Frontier Max on.')
@@ -139,7 +174,7 @@ describe('first-run clarity on the surfaces', () => {
       const ui = await $.ui.mount({ plugin: 'project-sentinel', surface, component: 'Pane', requestId: 'control-room', props: { title: 'Control Room', isFocused: true, bodyColumns: 66, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} } })
       await w.clock.advance(300)
       const text = JSON.stringify(await ui.find({ key: 'card-first-run' }))
-      for (const words of ['SENTINEL IS ON', 'Autopilot protects the context at 70%', 'Frontier Max at Extra High effort', 'never changes the model', 'Guardrails: what Claude may do', '6 kinds of action ask you first, 2 are denied', 'Activity has views', 'Summary · Operations · Agents · Tool calls', 'Work carries on; Context starts over']) {
+      for (const words of ['SENTINEL IS ON', 'Autopilot protects the context at 70%', 'Frontier Max at Extra High effort', 'never changes the model', 'Guardrails: what Claude may do', 'Claude Code’s own permissions decide; Project Sentinel adds nothing on top', 'Activity has views', 'Summary · Operations · Agents · Tool calls', 'Work carries on; Context starts over']) {
         expect(text, `${surface}: ${words}`).toContain(words)
       }
       // The header's profile reads plain Normal, never "edited", on a fresh install.
@@ -154,7 +189,7 @@ describe('first-run clarity on the surfaces', () => {
     expect(await ui.find({ key: 'card-first-run' })).toBeUndefined()
   })
 
-  test('Guardrails says each value and whether it is the default; a changed one says what the default is, in amber', { timeoutMs: 30_000 }, async ($, on) => {
+  test('Guardrails says what each value means: Default leaves it to Claude Code; a stricter one is said as added on top, quietly (1.8.0)', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on, { tokens: 120_000 })
     await $.session.start(SESSION)
     await w.clock.advance(300)
@@ -164,11 +199,14 @@ describe('first-run clarity on the surfaces', () => {
     await ui.press({ key: 'tab-guardrails' })
     await w.clock.advance(300)
     const row = async (c: string) => JSON.stringify(await ui.find({ key: `row-perm-${c}` }))
-    expect(await row('dangerous')).toContain('Never runs · default')
-    expect(await row('push')).toContain('Asks you first · default')
-    expect(await row('edit')).toContain('Claude Code decides · default')
-    // Release/QA asks before commits: a change from the default, said with what the default is.
-    expect(await row('commit')).toContain('Asks you first · changed (default: claude code decides)')
-    expect(await row('commit')).toContain('"color":"warning"')
+    expect(await row('dangerous')).toContain('Never runs · Project Sentinel adds this on top of Claude Code')
+    expect(await row('push')).toContain('Asks you first · Project Sentinel adds this on top of Claude Code')
+    expect(await row('edit')).toContain('Claude Code decides (its permission mode and rules)')
+    // Release/QA asks before commits: a stricter choice is the profile's, not a problem, so never amber.
+    expect(await row('commit')).toContain('Asks you first · Project Sentinel adds this on top of Claude Code')
+    expect(await row('commit')).not.toContain('"color":"warning"')
+    // Both sets are one press away.
+    expect(await ui.find({ key: 'perm-reset' })).toBeDefined()
+    expect(await ui.find({ key: 'perm-guarded' })).toBeDefined()
   })
 })

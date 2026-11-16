@@ -329,7 +329,7 @@ export function hudOf(rt: Runtime): HudModel {
     headline: headlineOf(rt, now, summary),
     chips: chipsOf({ failing, attention, guard, load, agents, quest, ops, isWorking: rt.turn.isRunning }),
     isPaneOpen: rt.ui.isPaneOpen,
-    ctx: { tokens, window, pct, threshold: s.autopilot.enabled ? handoffPoint(rt.autopilot) : null, tone: contextTone(rt) },
+    ctx: { tokens, window, pct, threshold: s.autopilot.enabled ? handoffPoint(rt.autopilot) : null, tone: contextTone(rt), isProvisional: rt.usageProvisional && tokens !== null },
     cost: { usd: rt.usage.costUsd ?? null, runUsd: totals?.costUsd ?? null, isRunPartial: totals?.isCostPartial ?? false },
     profile: profileOf(rt),
     frontier: { isOn: s.frontier.enabled, effort: s.frontier.enabled ? (EFFORT_NAME[s.frontier.effort] ?? null) : null },
@@ -658,7 +658,7 @@ function firstRunOf(rt: Runtime): PaneModel['firstRun'] {
   return {
     autopilot: a.enabled ? at : null,
     frontier: s.frontier.enabled ? (FIRST_RUN_EFFORT[s.frontier.effort] ?? 'its policy only') : null,
-    guardrails: `${asks} kinds of action ask you first, ${denies} are denied`,
+    guardrails: asks + denies === 0 ? 'Claude Code’s own permissions decide; Project Sentinel adds nothing on top' : `${asks} kinds of action ask you first, ${denies} are denied, on top of Claude Code’s own permissions`,
   }
 }
 

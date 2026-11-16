@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { DEFAULT_PERMISSIONS, PERMISSION_CATEGORIES, normalizeSettings, permissionStateOf } from '../hooks/core/settings'
+import { LEGACY_PERMISSIONS, PERMISSION_CATEGORIES, normalizeSettings, permissionStateOf } from '../hooks/core/settings'
 import { classifyMcp, classifyShell, isObviouslyDangerous, strictest } from '../hooks/features/permissions/categories'
 import { APPROVE, DECLINE, approvalQuestion, callWords, clampState, declineMessage, decisionFor, findingsFor, isOwnQuestionNeeded, statesFor } from '../hooks/features/permissions/decide'
 import { commandName, segmentsOf, stripWrappers, wordsOf } from '../hooks/features/permissions/shell'
@@ -134,7 +134,8 @@ describe('classification', () => {
 })
 
 describe('decisions', () => {
-  const states = { ...DEFAULT_PERMISSIONS }
+  // The decisions over a configuration with Ask and Deny in it (the Guarded set; 1.8.0's defaults are all Default).
+  const states = { ...LEGACY_PERMISSIONS }
 
   test('the strictest state wins, a mixed command included', () => {
     expect(decisionFor(classifyShell('git push --force && npm install'), states).state).toBe('deny')

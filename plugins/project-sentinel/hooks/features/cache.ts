@@ -692,6 +692,94 @@ export function nextRefresh(
   return { at, isProbe: false }
 }
 
+/**
+ * Keep warm's clocks, as the person reads them (Context → Cache). Two clocks, never mixed:
+ *   - the cache's lifetime (TTL): each request or refresh that reads the cache renews it from that moment;
+ *   - the idle allowance ("Stop after 3 h"): counts from when the last turn ended, and a refresh never resets it
+ *     (only a turn ends it: the next turn's end starts it again).
+ * While Claude works the allowance has not started (its requests keep the cache warm). The allowance in force can
+ * be shorter than the one asked for (the 5-minute cache's cap) or longer (a watcher holding the cache until it
+ * wakes): both are said, with why. Every time is a state or clock reading, never an estimate.
+ */
+export type KeepWarmTiming = {
+  phase: 'off' | 'ready' | 'idle' | 'stopped'
+  /** One line: what Keep warm is doing now. */
+  headline: string
+  requestedMs: number
+  effectiveMs: number
+  /** Why the allowance in force differs from the one asked for; null when it does not. */
+  capWhy: string | null
+  idleSince: number | null
+  idleForMs: number | null
+  /** When Keep warm stops refreshing (the allowance's end, or a watcher's hold past it); null before the idle clock starts. */
+  stopsAt: number | null
+  leftMs: number | null
+  hold: { until: number; label: string | null } | null
+  nextRefreshAt: number | null
+  /** Why no refresh is planned (the plan's own words), when none is. */
+  noRefreshWhy: string | null
+  ttl: '5m' | '1h' | null
+  ttlSource: string | null
+  /** When the cache lapses if nothing reads it again (the last request or refresh plus the lifetime). */
+  expiresAt: number | null
+  refreshes: number
+  lastRefresh: { at: number; status: string } | null
+}
+
+export function keepWarmTiming(
+  state: CacheState,
+  input: {
+    now: number
+    isOn: boolean
+    isTurnRunning: boolean
+    idleSince: number | null
+    maxIdleMinutes: number
+    hold: { until: number; label?: string | null } | null
+    plan: RefreshPlan
+  },
+): KeepWarmTiming {
+  const requestedMs = input.maxIdleMinutes * 60_000
+  const isShort = state.ttl?.value === '5m'
+  const effectiveMs = isShort ? Math.min(requestedMs, FIVE_MINUTE_IDLE_CAP_MS) : requestedMs
+  const capWhy = effectiveMs < requestedMs ? `the cache lives 5 minutes: past ${durationWords(effectiveMs)} idle, refreshing it costs more than rebuilding it` : null
+  const hold = input.hold === null ? null : { until: input.hold.until, label: input.hold.label ?? null }
+  const latest = state.keepWarm.log[0]
+  const base = {
+    requestedMs,
+    effectiveMs,
+    capWhy,
+    hold,
+    ttl: state.ttl?.value ?? null,
+    ttlSource: state.ttl?.source ?? null,
+    expiresAt: expiresAt(state),
+    refreshes: state.keepWarm.refreshes,
+    lastRefresh: latest === undefined ? null : { at: latest.at, status: latest.status },
+    nextRefreshAt: input.plan.at,
+    noRefreshWhy: input.plan.at === null ? input.plan.reason : null,
+  }
+  const allowance = durationWords(effectiveMs)
+  if (!input.isOn) return { ...base, phase: 'off', headline: 'Off: the cache lapses after its lifetime', idleSince: null, idleForMs: null, stopsAt: null, leftMs: null }
+  if (input.isTurnRunning || input.idleSince === null) {
+    const when = input.isTurnRunning ? 'when this turn finishes' : 'when the next turn finishes'
+    return { ...base, phase: 'ready', headline: `Ready: starts ${when}, then holds the cache for up to ${allowance} of idle time. The countdown has not started.`, idleSince: null, idleForMs: null, stopsAt: null, leftMs: null }
+  }
+  const limitEnd = input.idleSince + effectiveMs
+  const stopsAt = hold === null ? limitEnd : Math.max(limitEnd, hold.until + 60_000)
+  const idleForMs = Math.max(0, input.now - input.idleSince)
+  const leftMs = Math.max(0, stopsAt - input.now)
+  const isStopped = state.keepWarm.verified === 'no' || input.now >= stopsAt || (input.plan.at === null && /^Paused/.test(input.plan.reason))
+  const stopped = state.keepWarm.verified === 'no' ? (state.keepWarm.pausedReason ?? 'it did not keep the cache warm here') : input.plan.at === null ? input.plan.reason : `the ${allowance} idle allowance ended`
+  return {
+    ...base,
+    phase: isStopped ? 'stopped' : 'idle',
+    headline: isStopped ? `Stopped: ${stopped.charAt(0).toLowerCase()}${stopped.slice(1)}` : `Holding the cache: idle ${durationWords(idleForMs)}, ${durationWords(leftMs)} of Keep warm left`,
+    idleSince: input.idleSince,
+    idleForMs,
+    stopsAt,
+    leftMs: isStopped ? 0 : leftMs,
+  }
+}
+
 /** Keep warm starts over (turned on again by the person): its verdict, failures and pause are forgotten. */
 export function withVerdictReset(state: CacheState): CacheState {
   return { ...state, keepWarm: { ...state.keepWarm, verified: 'unknown', provingAfter: null, failures: 0, pausedReason: null } }
