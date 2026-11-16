@@ -52,8 +52,18 @@ function advisorRow(k: Kit, a: PaneModel['models']['advisor']) {
   })
 }
 
-/** `claude-opus-5-5[1m]` → `opus-5-5`. */
-const shortModel = (id: string): string => id.replace(/^claude-/, '').replace(/\[1m\]$/i, '').replace(/-\d{8}$/, '')
+/**
+ * A model as Claude Code names it in its own footer: `claude-opus-5-5[1m]` → `Opus 5.5`,
+ * `claude-haiku-4-5-20251001` → `Haiku 4.5`, the alias `sonnet` → `Sonnet`. Any other id keeps its
+ * own spelling without the `claude-` prefix and a date suffix.
+ */
+export function modelName(id: string): string {
+  const bare = id.replace(/\[1m\]$/i, '')
+  const m = /^(?:claude-)?(haiku|sonnet|opus|fable)(?:-(\d{1,2})(?:-(\d{1,2}))?)?(?=$|-\d{8}$)/i.exec(bare)
+  if (m === null) return bare.replace(/^claude-/, '').replace(/-\d{8}$/, '')
+  const family = m[1]!.charAt(0).toUpperCase() + m[1]!.slice(1).toLowerCase()
+  return m[2] === undefined ? family : `${family} ${m[2]}${m[3] === undefined ? '' : `.${m[3]}`}`
+}
 
 
 const EFFORT_WORD: Record<string, string> = { max: 'Maximum', xhigh: 'Extra high', high: 'High', medium: 'Medium', low: 'Low' }
@@ -259,7 +269,7 @@ export function behaviorPage(kit: Kit, pane: PaneModel): RenderElement {
               key: 'mo-main',
               label: 'Main conversation',
               subtitle: 'Chosen in Claude Code (/model). Control Room never switches it',
-              value: pane.models.session === '' ? 'Claude Code’s' : shortModel(pane.models.session),
+              value: pane.models.session === '' ? 'Claude Code’s' : modelName(pane.models.session),
               valueTone: 'muted',
             }),
             row(k, {
@@ -293,7 +303,7 @@ export function behaviorPage(kit: Kit, pane: PaneModel): RenderElement {
                 )
               : []),
             p.enabled && p.overrides.length > 0 && row(k, { key: 'mo-overrides', label: 'Per agent', subtitle: p.overrides.map(o => `${o.type} → ${o.model}`).join(' · ') }),
-            p.enabled && last !== undefined && row(k, { key: 'mo-last', label: 'Latest agent', subtitle: last.agent, value: last.model === null ? 'its own model' : shortModel(last.model), valueTone: 'muted' }),
+            p.enabled && last !== undefined && row(k, { key: 'mo-last', label: 'Latest agent', subtitle: last.agent, value: last.model === null ? 'its own model' : modelName(last.model), valueTone: 'muted' }),
             advisorRow(k, pane.models.advisor),
           ]
         },

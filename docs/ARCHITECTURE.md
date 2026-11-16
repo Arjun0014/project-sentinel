@@ -946,7 +946,7 @@ the prompt box: it is sent once or not at all.
 
 ## 9. Testing strategy
 
-* `claude plugin test` (1.8: 652 tests in 40 files on 2.1.325 and on 2.1.289; 1.7.0: 576 in 33
+* `claude plugin test` (1.8: 654 tests in 40 files on 2.1.325 and on 2.1.289; 1.7.0: 576 in 33
   files on 2.1.296 and on 2.1.289, and in CI on the latest
   Claude Code for Linux, Windows and macOS and on 2.1.289 for Linux; the 1.8 branch passed all four
   jobs, dispatched by hand: the workflow runs by itself only on main and on pull requests). The

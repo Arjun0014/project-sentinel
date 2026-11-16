@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
+import { defaultSettings } from '../hooks/core/settings'
 import type { Settings } from '../hooks/core/settings'
 import type { CacheView } from '../types'
+import { modelName } from '../hooks/ui/pane/behavior'
 import { cacheState, cacheSummary, lifetimeWords } from '../hooks/ui/pane/cache'
 import { MAX_COLUMNS, TABS } from '../hooks/ui/pane/frame'
 import { navRowColumns } from '../hooks/ui/primitives'
@@ -261,6 +263,47 @@ describe('ui', () => {
     }
     expect(await shrinkers('desktop')).toBeGreaterThan(5)
     expect(await shrinkers('terminal')).toBe(0)
+  })
+
+  test('on desktop a short value keeps its width beside a long subtitle; a long one may still cut short', { timeoutMs: 30_000 }, async ($, on) => {
+    // Seen in the Desktop app (1.8, a 470 px pane): "Main conversation" read "haik…", the value cut in
+    // proportion with the long subtitle beside it.
+    const settings = defaultSettings()
+    settings.autopilot.handoffFile = 'docs/handoff/NEXT_SESSION_PROMPT_FOR_THE_LONG_RUN.md'
+    const w = world(on, { settings })
+    await boot($, w)
+    const rightOf = async (tab: string, key: string) => {
+      const ui = await $.ui.mount({ plugin: 'project-sentinel', surface: 'desktop', component: 'Pane', requestId: 'control-room', props: paneProps(48) })
+      await ui.press({ key: tab })
+      await w.clock.advance(300)
+      let right: Node | null = null
+      each(await ui.drawn(), n => {
+        if (keyOf(n) === `${key}-right`) right = n
+      })
+      await ui.unmount()
+      return right as Node | null
+    }
+    const main = await rightOf('tab-behavior', 'mo-main')
+    expect(main).not.toBeNull()
+    expect(textOf(main)).toBe('Opus 5.5')
+    expect(main!.props?.flexShrink).toBe(0)
+    expect(main!.props?.overflow).toBeUndefined()
+    const file = await rightOf('tab-context', 'ap-file')
+    expect(file).not.toBeNull()
+    expect(textOf(file)).toBe('docs/handoff/NEXT_SESSION_PROMPT_FOR_THE_LONG_RUN.md')
+    expect(file!.props).toMatchObject({ flexShrink: 1, minWidth: 0, overflow: 'hidden' })
+  })
+
+  test('a model reads as Claude Code names it', () => {
+    expect(modelName('claude-opus-5-5')).toBe('Opus 5.5')
+    expect(modelName('claude-opus-5-5[1m]')).toBe('Opus 5.5')
+    expect(modelName('claude-haiku-5-5')).toBe('Haiku 5.5')
+    expect(modelName('claude-fable-5-2')).toBe('Fable 5.2')
+    expect(modelName('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
+    expect(modelName('claude-sonnet-4-20250514')).toBe('Sonnet 4')
+    expect(modelName('sonnet')).toBe('Sonnet')
+    expect(modelName('claude-3-5-sonnet-20241022')).toBe('3-5-sonnet')
+    expect(modelName('claude-opus-5-5-preview')).toBe('opus-5-5-preview')
   })
 
   test('on desktop the profile name field moves under its label in a narrow pane', { timeoutMs: 30_000 }, async ($, on) => {

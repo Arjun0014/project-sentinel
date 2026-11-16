@@ -35,6 +35,13 @@ did not arm, for every message) and `keep warm:`. They are never shown on screen
 - **Desktop shows an older version** (for example the 0.1 status bar, `CTX … | AUTO 700k`): the
   Code tab loads the copy recorded in `~/.claude/plugins/installed_plugins.json`, not the folder.
   Run `claude plugin update project-sentinel@control-room`, then start a new session.
+- **One open session shows the update and another does not:** seen in the Desktop app (Claude Code
+  2.1.325) when the installed copy changed under two open sessions. An idle session picked up the
+  new code in place; a session that had been working all along kept the version it started with,
+  across `/clear` too, until it was started again. Start a new session after an update rather than
+  relying on an open one. Both versions share one store: the older one reads settings the newer one
+  migrated as its own generation (1.7.0 ignores 1.8's new keys), and a record the older one saves
+  is migrated again by the newer one at its next load.
 - **Organisation policy:** managed settings can disable plugins. Project Sentinel cannot and does
   not work around that.
 - **Settings or runs missing after the rename:** they are carried over once, when Project Sentinel

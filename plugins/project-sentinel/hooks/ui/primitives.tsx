@@ -167,6 +167,13 @@ export function card(
 const NARROW_CONTROL = 20
 
 /**
+ * A plain value at most this long keeps its whole width on the remote surfaces: the label column wraps
+ * beside it instead. A browser shrinks flex items in proportion to their width, so a short value beside a
+ * long subtitle was cut too ("haik…" for a model, seen in the Desktop app); only a longer one may shrink.
+ */
+export const SHORT_VALUE = 20
+
+/**
  * A settings row: label (and a dim description under it) on the left, the
  * control or value on the right. A wide control (a segmented choice) moves
  * under the label when it would take over half the row, or when the label
@@ -199,8 +206,8 @@ export function row(
         {input.value}
       </Text>
     )
-  // A plain value may cut short where the surface lays out like a browser; a control keeps its size.
-  const isValueShrinking = control === undefined && kit.surface !== 'terminal'
+  // A long plain value may cut short where the surface lays out like a browser; a short one and a control keep their size.
+  const isValueShrinking = control === undefined && kit.surface !== 'terminal' && (input.value?.length ?? 0) > SHORT_VALUE
   return (
     <Box key={`row-${input.key}`} flexDirection="column">
       <Box flexDirection="row" columnGap={2}>

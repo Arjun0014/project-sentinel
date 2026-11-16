@@ -14,7 +14,7 @@ no longer switches the main conversation's model, and guards every way a model o
 warm cache. Context usage belongs to the context it was measured in, while the run carries across any number of
 contexts; the handoff notes are judged in one place, wherever they really are. Agents are tracked through every
 channel Claude Code offers, the session's Advisor gets a control, Guardrails defer to Claude Code's own permissions
-by default, and Keep warm says exactly when it starts and stops. 652 tests pass on Claude Code 2.1.325 and on
+by default, and Keep warm says exactly when it starts and stops. 654 tests pass on Claude Code 2.1.325 and on
 2.1.289 (with a type-check against its own declarations), and in CI on Linux, Windows and macOS; an integrated test
 runs one run across three fresh contexts with all of it at once, and live headless runs on real Claude Code (Haiku
 and Sonnet) checked the Desktop-style model switch, the Agent Model Policy and work left running across a /clear.
@@ -57,6 +57,11 @@ and Sonnet) checked the Desktop-style model switch, the Agent Model Policy and w
   write is still followed wherever it lands.
 - **Claude Code raises SubagentStart inside the spawn, before its id is known** (seen live on 2.1.325): the row is
   now the spawn's, still running, and the debug log no longer says its spawn was not seen.
+- **On Desktop a short value beside a long description was cut short** ("Main conversation … haik…" in the
+  Models card, seen in the Desktop app): the browser layout shrank it in proportion with the description. A
+  value of up to 20 characters now keeps its width and the description wraps beside it; a longer one (a long
+  notes path) may still cut with an ellipsis. The Models card names a model as Claude Code does (`Opus 5.5`,
+  not `opus-5-5`).
 - Claude Code 2.1.325: the status bar's `isCollapsed` prop, Desktop's minimized-pane `widget` placement (a glance),
   and the engine's own `tool.check` during a call (tests).
 
@@ -122,6 +127,20 @@ and Sonnet) checked the Desktop-style model switch, the Agent Model Policy and w
   context uncached to the other model, fighting Cache Guardian on long runs. The main conversation stays on the model
   chosen in Claude Code. A 1.7 store's router carries its subagent choices into the Agent Model Policy; its
   main-conversation routing is dropped. `/cr router` now explains the removal.
+
+### Seen live (Claude Desktop app, Code tab, its Claude Code 2.1.325, 2026-11-16)
+
+- The installed copy was replaced with this branch's build under two open sessions. An idle session (Haiku 5.5)
+  picked it up in place, without a restart. Its Control Room (the person's screenshot) showed the Models card as
+  built: *Main conversation*: chosen in Claude Code, never switched by Control Room; *Cache protection* On;
+  *Agent models by kind of work* Off; *Advisor* Off, session-wide, inherited by subagents. The status bar's
+  5-hour cell read `reset · new window`: the window's reset time had passed since that session's last response.
+  That load migrated the person's real store once: defaults generation 2 → 3, the router replaced by the Agent
+  Model Policy (off, as their router was), their profile, Autopilot and Guardrails (already Default) unchanged.
+- The same screenshot showed the model cut to `haik…`, fixed above (unit-tested; not yet seen again in the app).
+- The session that had been working all along kept 1.7.0 in memory, across `/clear` too: its milestones tool
+  still lacked `dropped`, and its handoff prompt lacked the exact notes path. It needs a new session to run this
+  build (see Troubleshooting).
 
 ## [1.7.0] - 2026-10-13
 
